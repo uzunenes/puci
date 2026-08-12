@@ -1,0 +1,38 @@
+# Build artifacts
+build/
+build-*/
+builddir/
+_*/
+
+# Object and library files
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+*.exe
+*.dll
+
+# Compiled / generated
+*.gcda
+*.gcno
+*.profraw
+*.profdata
+compile_commands.json
+meson-private/
+meson-logs/
+meson-info/
+
+# Editor / OS
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Secrets
+.env
+*.key
+*.pem
+
+# Sessions / local data
+sessions/

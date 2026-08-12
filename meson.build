@@ -1,0 +1,62 @@
+project(
+    'puci',
+    'c',
+    version: '0.1.0',
+    license: 'MIT',
+    meson_version: '>=1.0.0',
+    default_options: [
+        'c_std=c17',
+        'buildtype=release',
+        'warning_level=3',
+    ],
+)
+
+# ---- Global compiler flags ------------------------------------------------
+cc = meson.get_compiler('c')
+
+c_args = [
+    '-Wall',
+    '-Wextra',
+    '-Wpedantic',
+    '-Werror',
+    '-Wconversion',
+    '-Wno-unused-parameter',
+]
+
+if get_option('native_arch')
+    foreach a : cc.get_supported_arguments('-march=native')
+        c_args += a
+    endforeach
+endif
+
+if get_option('lto')
+    add_project_arguments('-flto', language: 'c')
+    add_project_link_arguments('-flto', language: 'c')
+endif
+
+add_project_arguments(c_args, language: 'c')
+
+# ---- Library ABI version (must match include/puci/version.h) ---------------
+PUCI_ABI_VERSION = 1
+
+# ---- Dependencies ---------------------------------------------------------
+curl_dep = dependency('libcurl')
+        
+# ---- Top-level summary ----------------------------------------------------
+summary({
+    'cli': get_option('cli'),
+    'tui': get_option('tui'),
+    'memory': get_option('memory'),
+    'swarm': get_option('swarm'),
+    'browser': get_option('browser'),
+    'mcp': get_option('mcp'),
+    'native arch': get_option('native_arch'),
+    'LTO': get_option('lto'),
+}, section: 'Feature flags')
+
+# ---- Subdirectories -------------------------------------------------------
+subdir('src/lib')
+subdir('src/cli')
+subdir('examples')
+subdir('tests')
+subdir('packaging')

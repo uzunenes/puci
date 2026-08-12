@@ -1,0 +1,13 @@
+# libpuci / puci-cli feature flags.
+
+option('tui', type: 'feature', value: 'enabled', description: 'Terminal UI support (only used by the CLI, never by libpuci)')
+option('memory', type: 'feature', value: 'enabled', description: 'Memory/embeddings subsystem (optional, strippable)')
+option('swarm', type: 'feature', value: 'disabled', description: 'Swarm / multi-agent orchestration (optional, strippable)')
+option('browser', type: 'feature', value: 'disabled', description: 'Browser automation (optional, strippable)')
+option('mcp', type: 'feature', value: 'disabled', description: 'MCP client (optional, strippable)')
+option('cli', type: 'boolean', value: true, description: 'Build the puci-cli binary')
+option('static_lib', type: 'boolean', value: true, description: 'Build libpuci.a static library')
+option('shared_lib', type: 'boolean', value: true, description: 'Build libpuci.so shared library')
+option('native_arch', type: 'boolean', value: false, description: 'Add -march=native to optimization (default off for portable distro builds)')
+option('lto', type: 'boolean', value: false, description: 'Enable link-time optimization')
+option('examples', type: 'boolean', value: false, description: 'Build the example programs')
