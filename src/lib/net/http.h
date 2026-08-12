@@ -16,6 +16,7 @@
  */
 
 #include <stddef.h>
+#include <poll.h>
 #include "puci/puci.h"
 
 /* Opaque persistent HTTP connection (owns a libcurl handle). Keeping one alive
@@ -115,5 +116,68 @@ puci_status puci_http_post_stream(const puci_allocator *alloc,
                                   const puci_cancel_token *cancel,
                                   puci_http_stream_cb data_cb, void *userdata,
                                   int *out_status, char *err, size_t errlen);
+
+/* ------------------------------------------------------------------ */
+/* Non-blocking request handle (external event-loop driving).          */
+/*                                                                     */
+/* Splits puci_http_post_stream into an explicit state machine over the */
+/* curl multi interface so a host program can drive the transfer from  */
+/* its own poll() loop. This is the primitive poll_loop.c is built on. */
+/*                                                                     */
+/* Model: an in-flight request is a puci_http_req. The host calls       */
+/*   puci_http_begin()  -> register + drive one bounded step            */
+/*   puci_http_get_fds()       read the fds curl wants polled          */
+/*   puci_http_next_timeout_ms()  how long the host may block          */
+/*   puci_http_step()          do bounded work (never blocks on net)   */
+/*   puci_http_end()           finalise + free                         */
+/*                                                                     */
+/* start / finish are optional; if provided, start() runs the first    */
+/* bounded step (so the handle becomes immediately pollable) and        */
+/* finish() is called once when the transfer completes or fails.       */
+/*                                                                     */
+/* Threading: a handle is owned by the thread that created it. All of   */
+/* its functions must be called from that thread.                      */
+/* ------------------------------------------------------------------ */
+typedef struct puci_http_req puci_http_req;
+
+/* Creates an in-flight request against the persistent conn (which must be
+ * non-NULL). The request body/url/headers are copied into the handle's own
+ * storage (allocated via alloc), so the caller may free its buffers after
+ * begin() returns. Returns NULL on memory/registration failure. */
+puci_http_req *puci_http_begin(const puci_allocator *alloc, puci_http_conn *conn,
+                               const puci_http_request *req,
+                               const puci_cancel_token *cancel,
+                               puci_http_stream_cb data_cb, void *userdata);
+
+/* Writes up to cap struct pollfd entries the host should poll into fds, and
+ * returns the count written. The session surfaces these so a host loop can
+ * poll libpuci's network activity alongside its own fds. Returns 0 if there
+ * is currently nothing to wait on. */
+size_t puci_http_get_fds(const puci_http_req *r, struct pollfd *fds, size_t cap);
+
+/* How many milliseconds the host may block in poll() before it must call
+ * puci_http_step again. -1 means "block indefinitely", 0 means "work is
+ * pending right now". Used to bound idle/reasoning-silence windows. */
+int puci_http_next_timeout_ms(const puci_http_req *r);
+
+/* Drives the request by one bounded step. Returns PUCI_OK while the request
+ * is still in progress. When the transfer has completed (success or error) it
+ * sets *done to 1 and returns a terminal puci_status:
+ *   PUCI_OK                : transfer completed (HTTP status in *http_status)
+ *   PUCI_ERR_CANCELLED     : cancellation observed mid-transfer
+ *   PUCI_ERR_TIMEOUT       : total or idle timeout
+ *   PUCI_ERR_NETWORK       : transport/connection failure
+ *   PUCI_ERR_UNKNOWN       : HTTP error status returned with a body
+ * On a terminal return a message is placed in err (if non-NULL, up to errlen).
+ * When *done is 0 the returned status is PUCI_OK and err is untouched.
+ * Various fds in the return of puci_http_get_fds may have been consumed (the
+ * host should re-query fds after every step). */
+puci_status puci_http_step(puci_http_req *r, int *done, int *http_status,
+                           char *err, size_t errlen);
+
+/* Finalises and frees a request handle after a terminal step. Marks the
+ * connection dirty if the transfer was aborted/cancelled/incomplete so the
+ * next request forces a fresh connection. NULL is a no-op. */
+void puci_http_end(puci_http_req *r);
 
 #endif /* PUCI_INTERNAL_NET_HTTP_H */

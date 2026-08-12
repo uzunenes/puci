@@ -107,3 +107,16 @@ test_conn = executable(
     dependencies: [puci_static_dep, threads_dep],
 )
 test('test_conn_reuse', test_conn, timeout: 120)
+
+# Non-blocking HTTP primitives integration test: drives puci_http_begin /
+# get_fds / next_timeout_ms / step / end from the caller's own poll() loop
+# against a streaming mock server, verifying full-body streaming and
+# mid-stream cancellation (with the connection marked dirty). Requires the
+# internal include path to reach net/http.h.
+test_http_async = executable(
+    'test_http_async',
+    'integration/test_http_async.c',
+    include_directories: [internal_inc],
+    dependencies: [puci_static_dep],
+)
+test('test_http_async', test_http_async, timeout: 120)

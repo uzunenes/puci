@@ -35,6 +35,38 @@ struct puci_http_conn {
     CURLM *multi; /* persistent multi handle (owns the connection cache) */
 };
 
+/* An in-flight streaming request driven externally through the curl multi
+ * interface. Owns copies of every string libcurl references for the duration
+ * of the transfer (URL, body, auth, headers), so the caller may free its
+ * buffers after puci_http_begin() returns. */
+struct puci_http_req {
+    puci_http_conn *conn;   /* borrowed, must outlive the request */
+    CURL *curl;             /* borrowed from conn->curl */
+    struct curl_slist *hdr; /* owned header list */
+
+    /* Owned buffers referenced by curl options. */
+    char *url;
+    char *body;             /* NULL unless body_len > 0 */
+    size_t body_len;
+    char *auth_value;       /* full header value, e.g. "Bearer <key>" */
+    char *content_type;
+    char *accept;
+    char *ca_bundle;
+    char *noproxy;
+
+    const puci_cancel_token *cancel; /* borrowed */
+    int *conn_dirty;                 /* borrowed; set on abort/incomplete end */
+    http_ctx hctx;
+    long long deadline_total_ms;     /* -1 = no total timeout */
+    int started;                     /* at least one step driven */
+    int done;
+    int http_status;
+    int idle_timed_out;
+    CURLcode rc;
+    puci_status terminal_status;     /* valid once done */
+    char errbuf[CURL_ERROR_SIZE];
+};
+
 puci_http_conn *puci_http_conn_create(void) {
     puci_http_conn *c = (puci_http_conn *)calloc(1, sizeof(puci_http_conn));
     if (!c) {
@@ -472,4 +504,425 @@ puci_status puci_http_post_stream(const puci_allocator *alloc,
         return PUCI_ERR_NETWORK;
     }
     return PUCI_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* Non-blocking request handle (external event-loop driving).          */
+/* ------------------------------------------------------------------ */
+
+static char *dupn(const char *s, size_t n) {
+    char *d = (char *)malloc(n + 1);
+    if (!d) {
+        return NULL;
+    }
+    if (n > 0) {
+        memcpy(d, s, n);
+    }
+    d[n] = '\0';
+    return d;
+}
+
+static void req_free(puci_http_req *r) {
+    if (!r) {
+        return;
+    }
+    if (r->hdr) {
+        curl_slist_free_all(r->hdr);
+    }
+    free(r->url);
+    free(r->body);
+    free(r->auth_value);
+    free(r->content_type);
+    free(r->accept);
+    free(r->ca_bundle);
+    free(r->noproxy);
+    free(r);
+}
+
+/* Configures r->curl from req, taking owned copies of every string libcurl
+ * references so the caller may free its buffers after begin(). Returns PUCI_OK
+ * on success or PUCI_ERR_NOMEM. On error r is left in a state safe for
+ * req_free(). */
+static puci_status req_config(puci_http_req *r, const puci_http_request *req) {
+    r->url = dupn(req->url, strlen(req->url));
+    if (!r->url) {
+        return PUCI_ERR_NOMEM;
+    }
+    if (req->body && req->body_len > 0) {
+        r->body = dupn(req->body, req->body_len);
+        if (!r->body) {
+            return PUCI_ERR_NOMEM;
+        }
+        r->body_len = req->body_len;
+    }
+    if (req->auth_header && req->auth_header[0]) {
+        size_t n = strlen("Authorization: ") + strlen(req->auth_header);
+        r->auth_value = (char *)malloc(n + 1);
+        if (!r->auth_value) {
+            return PUCI_ERR_NOMEM;
+        }
+        memcpy(r->auth_value, "Authorization: ", strlen("Authorization: "));
+        memcpy(r->auth_value + strlen("Authorization: "), req->auth_header,
+               strlen(req->auth_header) + 1);
+    }
+    if (req->content_type) {
+        r->content_type = dupn(req->content_type, strlen(req->content_type));
+        if (!r->content_type) {
+            return PUCI_ERR_NOMEM;
+        }
+    }
+    if (req->accept) {
+        r->accept = dupn(req->accept, strlen(req->accept));
+        if (!r->accept) {
+            return PUCI_ERR_NOMEM;
+        }
+    }
+    if (req->ca_bundle) {
+        r->ca_bundle = dupn(req->ca_bundle, strlen(req->ca_bundle));
+        if (!r->ca_bundle) {
+            return PUCI_ERR_NOMEM;
+        }
+    }
+
+    CURL *curl = r->curl;
+    curl_easy_reset(curl); /* clear any state from a previous transfer */
+
+    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, r->errbuf);
+    curl_easy_setopt(curl, CURLOPT_URL, r->url);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "puci/" PUCI_VERSION_STRING);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
+    int want_fresh = 0;
+    if (req->conn_dirty && *req->conn_dirty) {
+        want_fresh = 1;
+        *req->conn_dirty = 0;
+    }
+    if (want_fresh) {
+        curl_easy_setopt(curl, CURLOPT_FRESH_CONNECT, 1L);
+        curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, 1L);
+    } else {
+        curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, 0L);
+    }
+
+    if (req->timeout_ms > 0) {
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (long)req->timeout_ms);
+    }
+
+    if (r->body) {
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, r->body);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE,
+                         (curl_off_t)r->body_len);
+    } else {
+        curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+    }
+
+    if (r->content_type) {
+        size_t n = strlen("Content-Type: ") + strlen(r->content_type);
+        char *hv = (char *)malloc(n + 1);
+        if (!hv) {
+            return PUCI_ERR_NOMEM;
+        }
+        memcpy(hv, "Content-Type: ", strlen("Content-Type: "));
+        memcpy(hv + strlen("Content-Type: "), r->content_type,
+               strlen(r->content_type) + 1);
+        r->hdr = curl_slist_append(r->hdr, hv);
+        free(hv);
+    }
+    if (r->accept) {
+        size_t n = strlen("Accept: ") + strlen(r->accept);
+        char *hv = (char *)malloc(n + 1);
+        if (!hv) {
+            return PUCI_ERR_NOMEM;
+        }
+        memcpy(hv, "Accept: ", strlen("Accept: "));
+        memcpy(hv + strlen("Accept: "), r->accept, strlen(r->accept) + 1);
+        r->hdr = curl_slist_append(r->hdr, hv);
+        free(hv);
+    }
+    if (r->auth_value) {
+        r->hdr = curl_slist_append(r->hdr, r->auth_value);
+    }
+    if (r->hdr) {
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, r->hdr);
+    }
+
+    const char *noproxy = getenv("NO_PROXY");
+    if (!noproxy || !noproxy[0]) {
+        noproxy = getenv("no_proxy");
+    }
+    if (noproxy && noproxy[0]) {
+        r->noproxy = dupn(noproxy, strlen(noproxy));
+        if (!r->noproxy) {
+            return PUCI_ERR_NOMEM;
+        }
+        curl_easy_setopt(curl, CURLOPT_NOPROXY, r->noproxy);
+    }
+
+    if (r->ca_bundle) {
+        curl_easy_setopt(curl, CURLOPT_CAINFO, r->ca_bundle);
+    }
+    int relax = 0;
+    if (req->tls_verify == 0 && req->insecure_hosts && req->ninsecure_hosts) {
+        char host[256];
+        if (url_host(r->url, host, sizeof(host)) > 0 &&
+            host_in_allowlist(host, req->insecure_hosts,
+                              req->ninsecure_hosts)) {
+            relax = 1;
+        }
+    }
+    if (relax) {
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+        if (req->log_cb && PUCI_LOG_WARN >= req->log_level) {
+            char host[256];
+            if (url_host(r->url, host, sizeof(host)) > 0) {
+                char msg[320];
+                snprintf(msg, sizeof(msg),
+                         "TLS verification disabled for host '%s' (insecure "
+                         "allowlist)", host);
+                req->log_cb(req->log_userdata, PUCI_LOG_WARN, msg);
+            }
+        }
+    }
+
+    r->hctx.last_activity_ms = now_ms();
+    r->hctx.idle_timeout_ms = req->idle_timeout_ms > 0 ? req->idle_timeout_ms : 0;
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &r->hctx);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, xfer_cb);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &r->hctx);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+
+    r->deadline_total_ms =
+        req->timeout_ms > 0 ? now_ms() + (long long)req->timeout_ms : -1;
+    return PUCI_OK;
+}
+
+static puci_status req_terminal_status(puci_http_req *r, char *err,
+                                       size_t errlen) {
+    if (r->hctx.cancelled) {
+        if (err && errlen > 0) {
+            snprintf(err, errlen, "cancelled");
+        }
+        return PUCI_ERR_CANCELLED;
+    }
+    if (r->rc != CURLE_OK) {
+        const char *msg = r->errbuf[0] ? r->errbuf : curl_easy_strerror(r->rc);
+        if (r->idle_timed_out) {
+            if (err && errlen > 0) {
+                snprintf(err, errlen,
+                         "idle timeout exceeded (no data for %lld ms)",
+                         r->hctx.idle_timeout_ms);
+            }
+            return PUCI_ERR_TIMEOUT;
+        }
+        if (r->rc == CURLE_OPERATION_TIMEDOUT) {
+            if (err && errlen > 0) {
+                snprintf(err, errlen, "total request timeout: %s", msg);
+            }
+            return PUCI_ERR_TIMEOUT;
+        }
+        if (r->rc == CURLE_HTTP_RETURNED_ERROR) {
+            if (err && errlen > 0) {
+                snprintf(err, errlen, "%s", msg);
+            }
+            return PUCI_ERR_UNKNOWN;
+        }
+        if (err && errlen > 0) {
+            snprintf(err, errlen, "%s", msg);
+        }
+        return PUCI_ERR_NETWORK;
+    }
+    return PUCI_OK;
+}
+
+puci_http_req *puci_http_begin(const puci_allocator *alloc, puci_http_conn *conn,
+                               const puci_http_request *req,
+                               const puci_cancel_token *cancel,
+                               puci_http_stream_cb data_cb, void *userdata) {
+    (void)alloc;
+    if (!conn || !conn->curl || !conn->multi || !req || !req->url) {
+        return NULL;
+    }
+    puci_http_req *r = (puci_http_req *)calloc(1, sizeof(puci_http_req));
+    if (!r) {
+        return NULL;
+    }
+    r->conn = conn;
+    r->curl = conn->curl;
+    r->cancel = cancel;
+    r->conn_dirty = req->conn_dirty;
+    r->hctx.idle_timed_out = 0;
+    r->hctx.cancelled = 0;
+
+    curl_multi_remove_handle(conn->multi, r->curl); /* defensive */
+
+    if (req_config(r, req) != PUCI_OK) {
+        req_free(r);
+        return NULL;
+    }
+    r->hctx.cb = data_cb;
+    r->hctx.ud = userdata;
+    r->hctx.cancel = cancel;
+
+    if (curl_multi_add_handle(conn->multi, r->curl) != CURLM_OK) {
+        curl_easy_reset(r->curl);
+        req_free(r);
+        return NULL;
+    }
+    r->started = 1;
+    return r;
+}
+
+size_t puci_http_get_fds(const puci_http_req *r, struct pollfd *fds, size_t cap) {
+    if (!r || !r->started || r->done) {
+        return 0;
+    }
+    fd_set rd, wr, ex;
+    FD_ZERO(&rd);
+    FD_ZERO(&wr);
+    FD_ZERO(&ex);
+    int maxfd = -1;
+    (void)curl_multi_fdset(r->conn->multi, &rd, &wr, &ex, &maxfd);
+    size_t n = 0;
+    for (int fd = 0; fd <= maxfd && n < cap; fd++) {
+        short ev = 0;
+        if (FD_ISSET(fd, &rd)) {
+            ev |= POLLIN;
+        }
+        if (FD_ISSET(fd, &wr)) {
+            ev |= POLLOUT;
+        }
+        if (FD_ISSET(fd, &ex)) {
+            ev |= POLLERR;
+        }
+        if (ev) {
+            fds[n].fd = fd;
+            fds[n].events = ev;
+            fds[n].revents = 0;
+            n++;
+        }
+    }
+    return n;
+}
+
+int puci_http_next_timeout_ms(const puci_http_req *r) {
+    if (!r || !r->started || r->done) {
+        return -1;
+    }
+    long curl_ms = 0;
+    if (r->conn->multi && curl_multi_timeout(r->conn->multi, &curl_ms) != CURLM_OK) {
+        curl_ms = -1;
+    }
+    if (curl_ms < 0) {
+        curl_ms = 0;
+    }
+    if (r->deadline_total_ms > 0) {
+        long long rem = r->deadline_total_ms - now_ms();
+        if (rem <= 0) {
+            return 0;
+        }
+        if ((long long)curl_ms > rem) {
+            curl_ms = (long)rem;
+        }
+    }
+    return (int)curl_ms;
+}
+
+puci_status puci_http_step(puci_http_req *r, int *done, int *http_status,
+                           char *err, size_t errlen) {
+    if (done) {
+        *done = 0;
+    }
+    if (!r || !r->started) {
+        return PUCI_ERR_INVALID_ARG;
+    }
+    if (r->done) {
+        if (done) {
+            *done = 1;
+        }
+        if (http_status) {
+            *http_status = r->http_status;
+        }
+        return r->terminal_status;
+    }
+
+    if (r->hctx.idle_timeout_ms > 0 &&
+        now_ms() - r->hctx.last_activity_ms > r->hctx.idle_timeout_ms) {
+        r->idle_timed_out = 1;
+        r->rc = CURLE_ABORTED_BY_CALLBACK;
+        r->done = 1;
+        curl_multi_remove_handle(r->conn->multi, r->curl);
+        if (http_status) {
+            *http_status = 0;
+        }
+        r->terminal_status = req_terminal_status(r, err, errlen);
+        if (done) {
+            *done = 1;
+        }
+        return r->terminal_status;
+    }
+    if (cancel_pending(&r->hctx)) {
+        r->rc = CURLE_ABORTED_BY_CALLBACK;
+        r->done = 1;
+        curl_multi_remove_handle(r->conn->multi, r->curl);
+        if (http_status) {
+            *http_status = 0;
+        }
+        r->terminal_status = req_terminal_status(r, err, errlen);
+        if (done) {
+            *done = 1;
+        }
+        return r->terminal_status;
+    }
+
+    int running = 0;
+    (void)curl_multi_perform(r->conn->multi, &running);
+
+    int msgs = 0;
+    CURLMsg *info;
+    while ((info = curl_multi_info_read(r->conn->multi, &msgs)) != NULL) {
+        if (info->msg == CURLMSG_DONE && info->easy_handle == r->curl) {
+            r->rc = info->data.result;
+            r->done = 1;
+        }
+    }
+    if (r->done) {
+        curl_multi_remove_handle(r->conn->multi, r->curl);
+        long code = 0;
+        curl_easy_getinfo(r->curl, CURLINFO_RESPONSE_CODE, &code);
+        r->http_status = (int)code;
+        if (http_status) {
+            *http_status = r->http_status;
+        }
+        r->terminal_status = req_terminal_status(r, err, errlen);
+        if (done) {
+            *done = 1;
+        }
+        return r->terminal_status;
+    }
+    return PUCI_OK; /* still in progress */
+}
+
+void puci_http_end(puci_http_req *r) {
+    if (!r) {
+        return;
+    }
+    /* A transfer that was cancelled, or that failed at the transport level
+     * (as opposed to completing with an HTTP error status, which still
+     * delivered the full body) may leave the connection unusable; force a
+     * fresh connect on the next request. Aborted = the transfer did not run
+     * to a clean transport-level completion. */
+    int aborted = (r->done && (r->hctx.cancelled ||
+                               (r->rc != CURLE_OK &&
+                                r->rc != CURLE_HTTP_RETURNED_ERROR)));
+    if (aborted && r->conn_dirty) {
+        *(r->conn_dirty) = 1;
+    }
+    if (r->started && !r->done) {
+        curl_multi_remove_handle(r->conn->multi, r->curl);
+    }
+    req_free(r);
 }
