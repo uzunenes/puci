@@ -101,6 +101,9 @@ struct puci_turn {
     int had_reasoning;
     int stream_done;           /* [DONE] or finish_reason seen */
     int finish_reason_stop;    /* normal stop */
+    long long prompt_tokens;   /* reported usage (this turn), 0 if unspecified */
+    long long completion_tokens;
+    long long cached_tokens;
 };
 
 /* ------------------------------------------------------------------ */
@@ -125,6 +128,10 @@ struct puci_session {
     size_t messages_cap;
 
     size_t max_tool_iterations;
+
+    long long total_prompt_tokens;
+    long long total_completion_tokens;
+    long long total_cached_tokens;
 
     char **tool_names; /* names of tools enabled for this session */
     size_t ntools;

@@ -66,6 +66,14 @@ test_approval = executable(
 )
 test('test_approval', test_approval)
 
+test_session_api = executable(
+    'test_session_api',
+    'unit/test_session_api.c',
+    include_directories: [internal_inc],
+    dependencies: puci_static_dep,
+)
+test('test_session_api', test_session_api)
+
 # End-to-end agent loop test with an embedded mock SSE server.
 test_agent = executable(
     'test_agent_loop',

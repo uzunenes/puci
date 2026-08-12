@@ -460,6 +460,11 @@ puci_status puci_agent_run_turn(puci_session *sess, const char *msg) {
             return PUCI_ERR_PROTOCOL;
         }
 
+        /* Fold this request's reported usage into the session-wide totals. */
+        sess->total_prompt_tokens += b.turn.prompt_tokens;
+        sess->total_completion_tokens += b.turn.completion_tokens;
+        sess->total_cached_tokens += b.turn.cached_tokens;
+
         const char *text = puci_strbuf_cstr(&b.turn.text);
         int want_tools = tool_call_ready(&b.turn) &&
                          b.turn.had_tool_calls && iter + 1 < max_iter;

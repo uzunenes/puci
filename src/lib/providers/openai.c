@@ -160,6 +160,27 @@ static puci_status parse_stream(const puci_session *sess, puci_arena *scratch,
         }
         turn->stream_done = 1;
     }
+
+    /* Usage is reported on the final chunk as {"usage": {"prompt_tokens":N,
+     * "completion_tokens":M, "prompt_tokens_details":{"cached_tokens":K}}}. */
+    pj_val *usage = pj_get(root, "usage");
+    if (usage && usage->type == PJ_OBJ) {
+        pj_val *pt = pj_get(usage, "prompt_tokens");
+        if (pt && pt->type == PJ_NUM) {
+            turn->prompt_tokens = (long long)pt->u.num;
+        }
+        pj_val *ct = pj_get(usage, "completion_tokens");
+        if (ct && ct->type == PJ_NUM) {
+            turn->completion_tokens = (long long)ct->u.num;
+        }
+        pj_val *details = pj_get(usage, "prompt_tokens_details");
+        if (details && details->type == PJ_OBJ) {
+            pj_val *cached = pj_get(details, "cached_tokens");
+            if (cached && cached->type == PJ_NUM) {
+                turn->cached_tokens = (long long)cached->u.num;
+            }
+        }
+    }
     return PUCI_OK;
 }
 

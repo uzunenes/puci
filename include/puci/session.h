@@ -75,6 +75,22 @@ int puci_session_poll_fd(const puci_session *sess);
  *  from any thread. Returns PUCI_ERR_OUT_OF_STATE if the session is idle. */
 puci_status puci_session_cancel(puci_session *sess);
 
+/** Returns cumulative token usage reported by the provider across the whole
+ *  session. Any value may be left NULL to ignore it. Counts default to 0 when
+ *  the provider did not report usage. */
+void puci_session_get_usage(const puci_session *sess, long long *prompt_tokens,
+                            long long *completion_tokens,
+                            long long *cached_tokens);
+
+/** Replaces the session's model identifier for subsequent turns. The string is
+ *  copied. Returns PUCI_OK or PUCI_ERR_NOMEM. */
+puci_status puci_session_set_model(puci_session *sess, const char *model);
+
+/** Clears the conversation so the next send starts a fresh context, keeping the
+ *  provider config and enabled tools. The system prompt, if any, is restored.
+ *  Returns PUCI_OK. */
+puci_status puci_session_clear(puci_session *sess);
+
 #ifdef __cplusplus
 }
 #endif

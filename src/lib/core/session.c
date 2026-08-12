@@ -320,6 +320,49 @@ puci_status puci_session_cancel(puci_session *sess) {
     return PUCI_OK;
 }
 
+void puci_session_get_usage(const puci_session *sess, long long *prompt_tokens,
+                            long long *completion_tokens,
+                            long long *cached_tokens) {
+    if (!sess) {
+        return;
+    }
+    if (prompt_tokens) {
+        *prompt_tokens = sess->total_prompt_tokens;
+    }
+    if (completion_tokens) {
+        *completion_tokens = sess->total_completion_tokens;
+    }
+    if (cached_tokens) {
+        *cached_tokens = sess->total_cached_tokens;
+    }
+}
+
+puci_status puci_session_set_model(puci_session *sess, const char *model) {
+    if (!sess || !model) {
+        return PUCI_ERR_INVALID_ARG;
+    }
+    char *copy = puci_alloc_strdup(&sess->alloc, model);
+    if (!copy) {
+        return PUCI_ERR_NOMEM;
+    }
+    if (sess->cfg.model) {
+        puci_alloc_free(&sess->alloc, (void *)sess->cfg.model);
+    }
+    sess->cfg.model = copy;
+    return PUCI_OK;
+}
+
+puci_status puci_session_clear(puci_session *sess) {
+    if (!sess) {
+        return PUCI_ERR_INVALID_ARG;
+    }
+    for (size_t i = 0; i < sess->nmessages; i++) {
+        free_msg(sess, &sess->messages[i]);
+    }
+    sess->nmessages = 0;
+    return PUCI_OK;
+}
+
 puci_status puci_session_tool_register(puci_session *sess,
                                        const puci_tool_spec *spec,
                                        puci_tool_invoke_cb invoke_cb,
