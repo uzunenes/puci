@@ -1,0 +1,8 @@
+{"type":"message_start","message":{"id":"msg_mock","type":"message","role":"assistant","content":[],"model":"mock-claude","stop_reason":null}}
+{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello from the An"}}
+{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"thropic-shaped mock."}}
+{"type":"content_block_stop","index":0}
+{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":12}}
+{"type":"message_stop"}
+[DONE]

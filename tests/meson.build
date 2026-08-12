@@ -45,6 +45,19 @@ test_serialize = executable(
 )
 test('test_serialize', test_serialize)
 
+# Regression test for the per-provider SSE transcript fixtures: feeds each
+# transcript through the real OpenAI provider parser and checks reasoning stays
+# separate from the answer. Reads the fixtures from the source tree.
+test_pfx = executable(
+    'test_provider_fixtures',
+    'unit/test_provider_fixtures.c',
+    include_directories: [internal_inc],
+    dependencies: puci_static_dep,
+    c_args: '-DPUCI_FIXTURES_DIR="' +
+           meson.current_source_dir() + '/fixtures/transcripts"',
+)
+test('test_provider_fixtures', test_pfx)
+
 # End-to-end agent loop test with an embedded mock SSE server.
 test_agent = executable(
     'test_agent_loop',

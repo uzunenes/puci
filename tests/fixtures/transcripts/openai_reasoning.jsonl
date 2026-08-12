@@ -1,0 +1,6 @@
+{"id": "mock-0", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": null}]}
+{"id": "mock-reas-1", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"reasoning_content": "Let me compute this. "}, "finish_reason": null}]}
+{"id": "mock-reas-1", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"reasoning_content": "2 plus 3 is 5."}, "finish_reason": null}]}
+{"id": "mock-0", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "The answer is 5."}, "finish_reason": null}]}
+{"id": "mock-0", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+[DONE]
