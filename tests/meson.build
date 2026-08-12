@@ -58,6 +58,14 @@ test_pfx = executable(
 )
 test('test_provider_fixtures', test_pfx)
 
+test_approval = executable(
+    'test_approval',
+    'unit/test_approval.c',
+    include_directories: [internal_inc],
+    dependencies: puci_static_dep,
+)
+test('test_approval', test_approval)
+
 # End-to-end agent loop test with an embedded mock SSE server.
 test_agent = executable(
     'test_agent_loop',

@@ -185,6 +185,8 @@ puci_status puci_session_create(const puci_context *ctx,
     }
     sess->event_cb = opts->event_cb;
     sess->event_userdata = opts->event_userdata;
+    sess->approve_cb = opts->approve_cb;
+    sess->approve_userdata = opts->approve_userdata;
     sess->max_tool_iterations =
         opts->max_tool_iterations ? opts->max_tool_iterations : 32;
 

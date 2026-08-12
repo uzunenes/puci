@@ -116,6 +116,9 @@ struct puci_session {
     puci_session_event_cb event_cb;
     void *event_userdata;
 
+    puci_approval_cb approve_cb;
+    void *approve_userdata;
+
     char *system_prompt;
     puci_msg *messages;
     size_t nmessages;

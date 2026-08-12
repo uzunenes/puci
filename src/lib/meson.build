@@ -9,6 +9,7 @@ lib_sources = files(
     'core/context.c',
     'core/session.c',
     'core/agent.c',
+    'core/diff.c',
     'core/error.c',
     'net/http.c',
     'net/sse.c',
@@ -76,6 +77,8 @@ install_headers(
         '../../include/puci/tool.h',
         '../../include/puci/event.h',
         '../../include/puci/error.h',
+        '../../include/puci/approval.h',
+        '../../include/puci/diff.h',
     ),
     subdir: 'puci',
 )

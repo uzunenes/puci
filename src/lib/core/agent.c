@@ -168,6 +168,139 @@ static puci_status merge_extra_body(puci_session *sess, puci_strbuf *req) {
     return PUCI_OK;
 }
 
+/* Reads an entire file into a malloc'd NUL-terminated buffer. Returns PUCI_OK
+ * and sets *data and *len. If the file does not exist or cannot be read,
+ * returns PUCI_ERR_NOT_FOUND (with *data NULL). Caller frees *data. */
+static puci_status read_file_whole(const char *path, char **data, size_t *len) {
+    *data = NULL;
+    *len = 0;
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return PUCI_ERR_NOT_FOUND;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return PUCI_ERR_NOT_FOUND;
+    }
+    long sz = ftell(f);
+    if (sz < 0 || (unsigned long)sz > (size_t)-1 - 1) {
+        fclose(f);
+        return PUCI_ERR_NOT_FOUND;
+    }
+    rewind(f);
+    char *buf = (char *)malloc((size_t)sz + 1);
+    if (!buf) {
+        fclose(f);
+        return PUCI_ERR_NOMEM;
+    }
+    size_t got = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[got] = '\0';
+    *data = buf;
+    *len = got;
+    return PUCI_OK;
+}
+
+/* Builds the display argv listing (one element per line) for run_shell into a
+ * heap strbuf, then copies it into the arena. */
+static void build_argv_display(puci_arena *arena, puci_strbuf *sb,
+                               const char *const *argv, int argc) {
+    puci_strbuf_appendz(sb, "run_shell argv:");
+    for (int i = 0; i < argc; i++) {
+        puci_strbuf_append_fmt(sb, "\n  %d: ", i);
+        puci_strbuf_appendz(sb, argv[i] ? argv[i] : "");
+    }
+}
+
+/* Fills *req for a pending tool call using arena-scoped memory. If a diff is
+ * computed (write_file over an existing file), req->diff is heap-allocated and
+ * must be released by the caller via destroy_approval_request. */
+static void build_approval_request(puci_session *sess, const puci_tool_call *pub,
+                                   puci_arena *arena,
+                                   puci_approval_request *req) {
+    memset(req, 0, sizeof(*req));
+    req->tool = pub->name;
+    req->args_json = pub->args_json;
+
+    if (strcmp(pub->name, "run_shell") == 0) {
+        pj_val *root = NULL;
+        if (pub->args_json &&
+            pj_parse(arena, pub->args_json, strlen(pub->args_json), &root) == 0 &&
+            root) {
+            pj_val *cmdv = pj_get(root, "command");
+            const char *cmd = cmdv ? pj_str(cmdv) : NULL;
+            pj_val *argsv = pj_get(root, "args");
+            size_t nargs = argsv && argsv->type == PJ_ARR
+                               ? argsv->u.arr.len
+                               : 0;
+            if (cmd) {
+                size_t total = nargs + 1;
+                const char **argv = (const char **)puci_arena_alloc(
+                    arena, (total + 1) * sizeof(char *));
+                if (argv) {
+                    argv[0] = cmd;
+                    for (size_t i = 0; i < nargs; i++) {
+                        pj_val *a = argsv->u.arr.items[i];
+                        argv[i + 1] = a && a->type == PJ_STR ? a->u.str.s : "";
+                    }
+                    argv[total] = NULL;
+                    req->argv = argv;
+                    req->argc = (int)total;
+
+                    puci_strbuf sb;
+                    puci_strbuf_init(&sb, &sess->alloc);
+                    build_argv_display(arena, &sb, argv, (int)total);
+                    req->display = puci_arena_strdup(arena, puci_strbuf_cstr(&sb));
+                    puci_strbuf_destroy(&sb);
+                }
+            }
+        }
+    } else if (strcmp(pub->name, "write_file") == 0) {
+        pj_val *root = NULL;
+        if (pub->args_json &&
+            pj_parse(arena, pub->args_json, strlen(pub->args_json), &root) == 0 &&
+            root) {
+            pj_val *pathv = pj_get(root, "path");
+            pj_val *contentv = pj_get(root, "content");
+            const char *path = pathv ? pj_str(pathv) : NULL;
+            const char *content = contentv && contentv->type == PJ_STR
+                                      ? contentv->u.str.s
+                                      : NULL;
+            if (path && content) {
+                char *old = NULL;
+                size_t old_len = 0;
+                puci_status rst =
+                    read_file_whole(path, &old, &old_len);
+                if (rst == PUCI_OK) {
+                    req->file_existed = 1;
+                    req->diff = puci_compute_diff(old, old_len, content,
+                                                  contentv->u.str.len);
+                    free(old);
+                    if (req->diff) {
+                        req->display = req->diff;
+                    }
+                } else if (rst == PUCI_ERR_NOT_FOUND) {
+                    req->file_existed = 0;
+                    req->display = "create new file";
+                } else {
+                    req->display = "unable to read target file";
+                }
+            }
+        }
+    }
+
+    if (!req->display) {
+        req->display = pub->args_json ? pub->args_json : "";
+    }
+}
+
+static void destroy_approval_request(puci_approval_request *req) {
+    if (req->diff) {
+        puci_diff_free(req->diff);
+        req->diff = NULL;
+    }
+}
+
 puci_status puci_agent_run_turn(puci_session *sess, const char *msg) {
     puci_status st = session_msg_begin(sess, PUCI_ROLE_USER, msg);
     if (st != PUCI_OK) {
@@ -364,8 +497,28 @@ puci_status puci_agent_run_turn(puci_session *sess, const char *msg) {
                 if (puci_tools_lookup(sess->ctx, pub.name, &tool) &&
                     tool && tool->invoke) {
                     char *inv_res = NULL;
-                    int rcerr = tool->invoke(tool->userdata, pub.args_json,
+                    int rcerr = 0;
+                    int run = 1;
+                    if (sess->approve_cb) {
+                        puci_arena ar;
+                        puci_approval_request apreq;
+                        puci_arena_init(&ar, &sess->alloc, 0);
+                        build_approval_request(sess, &pub, &ar, &apreq);
+                        if (sess->approve_cb(&apreq, sess->approve_userdata) ==
+                            PUCI_APPROVAL_DENY) {
+                            run = 0;
+                            rcerr = 1;
+                            inv_res = strdup(
+                                "{\"ok\":false,\"error\":\"blocked by "
+                                "approval policy\"}");
+                        }
+                        destroy_approval_request(&apreq);
+                        puci_arena_destroy(&ar);
+                    }
+                    if (run) {
+                        rcerr = tool->invoke(tool->userdata, pub.args_json,
                                              &inv_res);
+                    }
                     content = inv_res;
                     if (!content) {
                         content =

@@ -19,6 +19,8 @@
 #include "puci/provider.h"
 #include "puci/tool.h"
 #include "puci/event.h"
+#include "puci/approval.h"
+#include "puci/diff.h"
 
 #ifdef __cplusplus
 extern "C" {

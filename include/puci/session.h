@@ -16,6 +16,7 @@
  */
 
 #include "puci/types.h"
+#include "puci/approval.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -35,6 +36,8 @@ typedef struct puci_session_options {
     void *event_userdata;           /**< passed to event_cb */
     const char *system_prompt;      /**< optional system prompt */
     size_t max_tool_iterations;     /**< cap on tool calls per turn, 0 = default(32) */
+    puci_approval_cb approve_cb;    /**< tool approval policy hook, invoked before each tool runs (optional) */
+    void *approve_userdata;         /**< passed to approve_cb */
 } puci_session_options;
 
 /** Creates a new session bound to a context. On success returns PUCI_OK and
