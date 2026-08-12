@@ -31,8 +31,14 @@ meson-info/
 
 # Secrets
 .env
+.env.*
 *.key
 *.pem
+
+# Local / live-config (never commit provider endpoints or credentials)
+*.local.toml
+config.local.toml
+bench/results-local/
 
 # Sessions / local data
 sessions/

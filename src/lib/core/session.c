@@ -335,6 +335,7 @@ puci_status puci_session_tool_register(puci_session *sess,
 /* Serializes the message history (plus an accumulating system prompt) into a
  * JSON array written to out. Owned strbuf passed in. */
 puci_status session_serialize_messages(puci_session *sess, puci_strbuf *out) {
+    puci_strbuf_append_char(out, '[');
     /* System prompt first. */
     if (sess->system_prompt) {
         puci_strbuf_appendz(out, "{\"role\":\"system\",\"content\":");
@@ -391,6 +392,7 @@ puci_status session_serialize_messages(puci_session *sess, puci_strbuf *out) {
         }
         puci_strbuf_append_char(out, '}');
     }
+    puci_strbuf_append_char(out, ']');
     return out->oom != PUCI_OK ? out->oom : PUCI_OK;
 }
 
@@ -400,6 +402,7 @@ puci_status session_serialize_tools(puci_session *sess, puci_strbuf *out) {
     if (sess->ntools == 0) {
         return PUCI_OK;
     }
+    puci_strbuf_append_char(out, '[');
     int wrote_any = 0;
     for (size_t i = 0; i < sess->ntools; i++) {
         const char *name = sess->tool_names[i];
@@ -423,8 +426,6 @@ puci_status session_serialize_tools(puci_session *sess, puci_strbuf *out) {
         puci_strbuf_appendz(out, t->spec.input_schema ? t->spec.input_schema : "{}");
         puci_strbuf_appendz(out, "}}");
     }
-    if (!wrote_any) {
-        return PUCI_OK;
-    }
+    puci_strbuf_append_char(out, ']');
     return out->oom != PUCI_OK ? out->oom : PUCI_OK;
 }

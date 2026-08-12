@@ -37,6 +37,14 @@ test_tools = executable(
 )
 test('test_tools', test_tools)
 
+test_serialize = executable(
+    'test_serialize',
+    'unit/test_serialize.c',
+    include_directories: [internal_inc],
+    dependencies: puci_static_dep,
+)
+test('test_serialize', test_serialize)
+
 # End-to-end agent loop test with an embedded mock SSE server.
 test_agent = executable(
     'test_agent_loop',
