@@ -1,0 +1,467 @@
+/*
+ * repl/repl.c - interactive REPL mode.
+ *
+ * `puci` with no subcommand enters an interactive loop: prompt, stream the
+ * response, execute tools, prompt again. Offers /slash-commands and the
+ * raw-mode line editor. Uses only the public libpuci API.
+ */
+
+#include "repl.h"
+#include "lineedit.h"
+#include "../cmd/config.h"
+
+#include <puci/puci.h>
+
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#define DEFAULT_SYSTEM_PROMPT                         \
+    "You are puci, a fast C coding agent. Be concise. "\
+    "Use the provided tools when they are the right way. "\
+    "For run_shell, always pass an explicit argv array."
+
+/* Session pointer for the SIGINT handler: cancel the in-flight turn when the
+ * user hits Ctrl-C during a streaming answer. */
+static volatile sig_atomic_t g_interrupt = 0;
+static volatile puci_session *g_cur_sess = NULL;
+
+static void on_sigint(int sig) {
+    (void)sig;
+    g_interrupt = 1;
+    if (g_cur_sess) {
+        puci_session_cancel((puci_session *)g_cur_sess);
+    }
+}
+
+typedef struct repl {
+    puci_context *ctx;
+    puci_session *sess;
+    ledit *ed;
+    const char *system_prompt; /* owned only when allocated */
+    int free_system_prompt;
+} repl;
+
+static void on_event(void *ud, puci_session *sess, puci_event ev,
+                     const void *ctx) {
+    (void)ud;
+    (void)sess;
+    switch (ev) {
+    case PUCI_EVENT_TOKEN_DELTA: {
+        const char *t = (const char *)ctx;
+        if (t) {
+            fputs(t, stdout);
+            fflush(stdout);
+        }
+        break;
+    }
+    case PUCI_EVENT_TOOL_CALL_START: {
+        const puci_tool_call *tc = (const puci_tool_call *)ctx;
+        if (tc) {
+            fprintf(stderr, "\n[tool] %s\n", tc->name);
+        }
+        break;
+    }
+    case PUCI_EVENT_TURN_COMPLETE:
+        fputs("\n", stdout);
+        fflush(stdout);
+        break;
+    default:
+        break;
+    }
+}
+
+/* Interactive approval policy: show the exact action (parsed argv or unified
+ * diff) and ask. Non-interactive stdin auto-allows so piped use still works. */
+static puci_approval policy(const puci_approval_request *req, void *ud) {
+    (void)ud;
+    fprintf(stderr, "\n[approve] %s\n", req->tool);
+    if (req->display && req->display[0]) {
+        fprintf(stderr, "%s\n", req->display);
+    }
+    if (!isatty(STDIN_FILENO)) {
+        /* Non-interactive: do not block; allow. */
+        return PUCI_APPROVAL_ALLOW;
+    }
+    fprintf(stderr, "Allow? [y]es [n]o: ");
+    fflush(stderr);
+    char b[64];
+    if (!fgets(b, sizeof(b), stdin)) {
+        return PUCI_APPROVAL_DENY;
+    }
+    return (b[0] == 'y' || b[0] == 'Y') ? PUCI_APPROVAL_ALLOW
+                                        : PUCI_APPROVAL_DENY;
+}
+
+/* ---- slash-command dispatch ---- */
+
+static void cmd_help(repl *r, const char *arg);
+static void cmd_model(repl *r, const char *arg);
+static void cmd_provider(repl *r, const char *arg);
+static void cmd_clear(repl *r, const char *arg);
+static void cmd_reset(repl *r, const char *arg);
+static void cmd_tools(repl *r, const char *arg);
+static void cmd_config(repl *r, const char *arg);
+static void cmd_cost(repl *r, const char *arg);
+static void cmd_plan(repl *r, const char *arg);
+static void cmd_quit(repl *r, const char *arg);
+
+typedef struct slash {
+    const char *name;
+    const char *desc;
+    void (*fn)(repl *, const char *);
+} slash;
+
+static const slash g_slash[] = {
+    {"help", "show this help", cmd_help},
+    {"model", "show or set the model (/model [name])", cmd_model},
+    {"provider", "show current provider", cmd_provider},
+    {"clear", "start a fresh conversation", cmd_clear},
+    {"reset", "reset the session", cmd_reset},
+    {"tools", "list enabled tools", cmd_tools},
+    {"config", "show provider configuration", cmd_config},
+    {"cost", "show token usage and cost", cmd_cost},
+    {"plan", "enter plan-only mode (Phase 3b)", cmd_plan},
+    {"quit", "exit the REPL", cmd_quit},
+    {"exit", "exit the REPL", cmd_quit},
+};
+#define N_SLASH ((size_t)(sizeof(g_slash) / sizeof(g_slash[0])))
+
+static void cmd_help(repl *r, const char *arg) {
+    (void)r;
+    (void)arg;
+    printf("Slash commands:\n");
+    for (size_t i = 0; i < N_SLASH; i++) {
+        printf("  /%-9s %s\n", g_slash[i].name, g_slash[i].desc);
+    }
+    printf("\nType a message to talk to the model, or /quit to exit.\n");
+}
+
+static void cmd_model(repl *r, const char *arg) {
+    if (arg && *arg) {
+        puci_status st = puci_session_set_model(r->sess, arg);
+        printf("%s\n", st == PUCI_OK ? "model set" : "failed to set model");
+    } else {
+        size_t count = 0;
+        (void)count;
+        const char *prov = NULL;
+        (void)prov;
+        /* Display the active model via a query of the public config is not
+         * available; report that /model <name> sets it. */
+        printf("usage: /model <name>\n");
+    }
+}
+
+static void cmd_provider(repl *r, const char *arg) {
+    (void)arg;
+    puci_provider_config *pc = puci_cli_provider("openai");
+    if (pc) {
+        printf("provider: %s\n  base_url: %s\n",
+               pc->name, pc->base_url ? pc->base_url : "(default)");
+    }
+    (void)r;
+}
+
+static void cmd_clear(repl *r, const char *arg) {
+    (void)arg;
+    puci_session_clear(r->sess);
+    printf("conversation cleared\n");
+}
+
+static void recreate_session(repl *r) {
+    if (r->sess) {
+        puci_session_destroy(r->sess);
+        r->sess = NULL;
+    }
+    puci_provider_config *pc = puci_cli_provider("openai");
+    puci_session_options op = {0};
+    op.provider = *pc;
+    op.event_cb = on_event;
+    op.system_prompt = r->system_prompt;
+    op.approve_cb = policy;
+    op.approve_userdata = r;
+    if (puci_session_create(r->ctx, &op, &r->sess) != PUCI_OK) {
+        fprintf(stderr, "puci: failed to create session\n");
+    }
+}
+
+static void cmd_reset(repl *r, const char *arg) {
+    (void)arg;
+    recreate_session(r);
+    printf("session reset\n");
+}
+
+static void cmd_tools(repl *r, const char *arg) {
+    (void)arg;
+    size_t count = 0;
+    const char *const *tools = puci_session_tools(r->sess, &count);
+    printf("tools (%zu):\n", count);
+    for (size_t i = 0; i < count; i++) {
+        printf("  %s\n", tools[i]);
+    }
+}
+
+static void cmd_config(repl *r, const char *arg) {
+    (void)arg;
+    puci_provider_config *pc = puci_cli_provider("openai");
+    printf("config:\n");
+    printf("  name:       %s\n", pc->name);
+    printf("  base_url:   %s\n", pc->base_url ? pc->base_url : "(default)");
+    printf("  api_key:    %s\n", pc->api_key ? "<set>" : "<missing>");
+    printf("  tls_verify: %s\n", pc->tls_verify ? "on" : "off");
+    printf("  idle_timeout_ms: %d\n", (int)pc->stream_idle_timeout_ms);
+    (void)r;
+}
+
+static double price_per_token(const char *envname) {
+    const char *v = getenv(envname);
+    if (!v || !*v) {
+        return -1.0;
+    }
+    char *end = NULL;
+    double p = strtod(v, &end);
+    if (end == v || p < 0.0) {
+        return -1.0;
+    }
+    return p / 1000.0;
+}
+
+static void cmd_cost(repl *r, const char *arg) {
+    (void)arg;
+    long long p = 0, c = 0, cached = 0;
+    puci_session_get_usage(r->sess, &p, &c, &cached);
+    printf("tokens: %lld prompt, %lld cached, %lld completion\n",
+           (long long)p, (long long)cached, (long long)c);
+    double pp = price_per_token("PUCI_PRICE_PER_1K_PROMPT");
+    double cp = price_per_token("PUCI_PRICE_PER_1K_COMPLETION");
+    if (pp >= 0.0 && cp >= 0.0) {
+        double kp = price_per_token("PUCI_PRICE_PER_1K_CACHED_PROMPT");
+        if (kp < 0.0) {
+            kp = pp;
+        }
+        double cost = (double)p * pp + (double)c * cp + (double)cached * kp;
+        printf("cost: $%.6f\n", cost);
+    } else {
+        printf("cost: (no price table; set PUCI_PRICE_PER_1K_PROMPT/COMPLETION)\n");
+    }
+}
+
+static void cmd_plan(repl *r, const char *arg) {
+    (void)r;
+    (void)arg;
+    printf("plan mode is added in Phase 3b.\n");
+}
+
+static void cmd_quit(repl *r, const char *arg) {
+    (void)r;
+    (void)arg;
+    printf("bye\n");
+}
+
+static int dispatch_slash(repl *r, const char *line) {
+    const char *name = line + 1;
+    const char *arg = NULL;
+    size_t namelen = 0;
+    for (const char *p = name; *p && *p != ' ' && *p != '\t'; p++) {
+        namelen++;
+    }
+    arg = name + namelen;
+    while (*arg == ' ' || *arg == '\t') {
+        arg++;
+    }
+
+    const slash *match = NULL;
+    int nmatches = 0;
+    for (size_t i = 0; i < N_SLASH; i++) {
+        if (strncmp(g_slash[i].name, name, namelen) == 0) {
+            nmatches++;
+            match = &g_slash[i];
+        }
+    }
+    if (nmatches == 1 && match) {
+        match->fn(r, arg);
+        return (strcmp(match->name, "quit") == 0 ||
+                strcmp(match->name, "exit") == 0);
+    }
+    if (nmatches > 1) {
+        printf("ambiguous '/%.*s':", (int)namelen, name);
+        for (size_t i = 0; i < N_SLASH; i++) {
+            if (strncmp(g_slash[i].name, name, namelen) == 0) {
+                printf(" %s", g_slash[i].name);
+            }
+        }
+        printf("\n");
+    } else {
+        printf("unknown '/%.*s'; try /help\n", (int)namelen, name);
+    }
+    return 0;
+}
+
+/* ---- project context detection (2.5) ---- */
+
+static int has_file(const char *path) {
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static const char *detect_project_type(void) {
+    if (has_file("Cargo.toml")) return "rust";
+    if (has_file("package.json")) return "node";
+    if (has_file("go.mod")) return "go";
+    if (has_file("pyproject.toml")) return "python";
+    if (has_file("meson.build")) return "meson";
+    if (has_file("CMakeLists.txt")) return "cmake";
+    if (has_file("Makefile")) return "make";
+    if (has_file("pom.xml")) return "java";
+    return NULL;
+}
+
+static void read_cmd(FILE *f, char *out, size_t cap) {
+    out[0] = '\0';
+    size_t n = fread(out, 1, cap - 1, f);
+    while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r')) {
+        out[--n] = '\0';
+    }
+    out[n] = '\0';
+}
+
+static char *build_project_context(char *branch, size_t branch_cap,
+                                   char *listing, size_t listing_cap) {
+    /* git branch (presentation only; no secret data). */
+    FILE *f = popen("git rev-parse --abbrev-ref HEAD 2>/dev/null", "r");
+    if (f) {
+        read_cmd(f, branch, branch_cap);
+        (void)pclose(f);
+    }
+    /* shallow listing */
+    listing[0] = '\0';
+    f = popen("find . -maxdepth 1 -not -path './.git' -not -path './.git/*' "
+              "2>/dev/null | head -24",
+              "r");
+    if (f) {
+        read_cmd(f, listing, listing_cap);
+        (void)pclose(f);
+    }
+
+    char *out = (char *)malloc(1024);
+    if (!out) {
+        return NULL;
+    }
+    snprintf(out, 1024,
+             "\n\n[project context]\n  branch: %s\n  type: %s\n%s",
+             branch[0] ? branch : "(not a git repo)",
+             detect_project_type() ? detect_project_type() : "(unknown)",
+             listing);
+    return out;
+}
+
+/* ---- main loop ---- */
+
+int puci_cli_repl(void) {
+    puci_context *ctx = NULL;
+    if (puci_context_create(NULL, &ctx) != PUCI_OK) {
+        fprintf(stderr, "puci: failed to create context\n");
+        return 1;
+    }
+    puci_provider_config *pc = puci_cli_provider("openai");
+    if (puci_context_set_provider(ctx, pc) != PUCI_OK) {
+        fprintf(stderr, "puci: failed to set provider\n");
+        puci_context_destroy(ctx);
+        return 1;
+    }
+
+    repl r;
+    memset(&r, 0, sizeof(r));
+    r.ctx = ctx;
+    r.ed = ledit_new(200);
+    r.system_prompt = DEFAULT_SYSTEM_PROMPT;
+    r.free_system_prompt = 0;
+
+    /* Optional project context appended to the system prompt. */
+    {
+        char branch[256];
+        char listing[1024];
+        char *pctx = build_project_context(branch, sizeof(branch), listing,
+                                           sizeof(listing));
+        if (pctx) {
+            size_t base = strlen(DEFAULT_SYSTEM_PROMPT);
+            size_t add = strlen(pctx);
+            char *full = (char *)malloc(base + add + 1);
+            if (full) {
+                memcpy(full, DEFAULT_SYSTEM_PROMPT, base);
+                memcpy(full + base, pctx, add + 1);
+                r.system_prompt = full;
+                r.free_system_prompt = 1;
+            }
+            free(pctx);
+        }
+    }
+
+    signal(SIGINT, on_sigint);
+    recreate_session(&r);
+
+    printf("puci REPL. /help for commands, /quit to exit.\n");
+    if (isatty(STDOUT_FILENO)) {
+        printf("(project: %s)\n",
+               detect_project_type() ? detect_project_type() : "none");
+    }
+
+    int quit = 0;
+    while (!quit) {
+        char *line = NULL;
+        int rc = ledit_readline(r.ed, "puci> ", &line);
+        if (rc == LEDIT_EOF) {
+            printf("\n");
+            break;
+        }
+        if (rc == LEDIT_INTERRUPT) {
+            continue;
+        }
+        if (!line) {
+            break;
+        }
+        if (line[0] == '\0') {
+            free(line);
+            continue;
+        }
+
+        if (line[0] == '/') {
+            quit = dispatch_slash(&r, line);
+            ledit_history_add(r.ed, line);
+            free(line);
+            continue;
+        }
+
+        ledit_history_add(r.ed, line);
+
+        g_interrupt = 0;
+        g_cur_sess = r.sess;
+        puci_status st = puci_session_send(r.sess, line);
+        g_cur_sess = NULL;
+
+        if (st != PUCI_OK) {
+            fprintf(stderr, "puci: %s\n", puci_status_string(st));
+            const char *err = puci_session_error(r.sess);
+            if (err) {
+                fprintf(stderr, "  %s\n", err);
+            }
+        }
+        free(line);
+    }
+
+    if (r.ed) {
+        ledit_free(r.ed);
+    }
+    if (r.sess) {
+        puci_session_destroy(r.sess);
+    }
+    if (r.free_system_prompt) {
+        free((void *)r.system_prompt);
+    }
+    puci_context_destroy(ctx);
+    signal(SIGINT, SIG_DFL);
+    return 0;
+}

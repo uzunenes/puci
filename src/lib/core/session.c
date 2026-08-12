@@ -363,6 +363,19 @@ puci_status puci_session_clear(puci_session *sess) {
     return PUCI_OK;
 }
 
+const char *const *puci_session_tools(const puci_session *sess, size_t *count) {
+    if (count) {
+        *count = 0;
+    }
+    if (!sess || sess->ntools == 0) {
+        return NULL;
+    }
+    if (count) {
+        *count = sess->ntools;
+    }
+    return (const char *const *)sess->tool_names;
+}
+
 puci_status puci_session_tool_register(puci_session *sess,
                                        const puci_tool_spec *spec,
                                        puci_tool_invoke_cb invoke_cb,

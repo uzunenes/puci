@@ -10,6 +10,9 @@ cli_inc = include_directories('../../include')
 cli_sources = files(
     'main.c',
     'cmd/run.c',
+    'cmd/config.c',
+    'repl/repl.c',
+    'repl/lineedit.c',
 )
 
 cli_deps = [puci_dep]

@@ -91,6 +91,11 @@ puci_status puci_session_set_model(puci_session *sess, const char *model);
  *  Returns PUCI_OK. */
 puci_status puci_session_clear(puci_session *sess);
 
+/** Returns the session's enabled tool names as an array owned by the session,
+ *  with the count written to *count. Valid until the session is mutated or
+ *  destroyed. Returns NULL and sets *count to 0 if there are none. */
+const char *const *puci_session_tools(const puci_session *sess, size_t *count);
+
 #ifdef __cplusplus
 }
 #endif

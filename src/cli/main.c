@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "cmd/cmd.h"
+#include "repl/repl.h"
 
 static void print_help(FILE *f) {
     fprintf(f,
@@ -18,6 +19,7 @@ static void print_help(FILE *f) {
             "\n"
             "Usage:\n"
             "  puci run \"<prompt>\"   Run a one-shot, non-interactive agent turn\n"
+            "  puci                  Start the interactive REPL\n"
             "  puci --version        Print version\n"
             "  puci --help           Show this help\n"
             "\n"
@@ -33,8 +35,7 @@ static void print_version(void) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        print_help(stderr);
-        return 2;
+        return puci_cli_repl();
     }
     const char *a1 = argv[1];
     if (strcmp(a1, "--help") == 0 || strcmp(a1, "-h") == 0) {
