@@ -23,4 +23,10 @@ if get_option('examples')
         dependencies: puci_dep,
         install: false,
     )
+    executable(
+        'poll_loop',
+        'poll_loop.c',
+        dependencies: puci_dep,
+        install: false,
+    )
 endif
