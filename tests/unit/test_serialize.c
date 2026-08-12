@@ -43,10 +43,10 @@ static void test_messages_and_tools_are_json_arrays(void) {
         puci_arena_init(&a, NULL, 0);
         pj_val *root = NULL;
         int rc = pj_parse(&a, puci_strbuf_cstr(&msgs), msgs.len, &root);
-        puci_arena_destroy(&a);
         CHECK(rc == 0);
         CHECK(root && root->type == PJ_ARR);
         CHECK(pj_arr_len(root) == 2);
+        puci_arena_destroy(&a);
     }
 
     /* Tools must serialize to a JSON array of the 3 built-in tools. */
@@ -58,10 +58,10 @@ static void test_messages_and_tools_are_json_arrays(void) {
         puci_arena_init(&a, NULL, 0);
         pj_val *root = NULL;
         int rc = pj_parse(&a, puci_strbuf_cstr(&tools), tools.len, &root);
-        puci_arena_destroy(&a);
         CHECK(rc == 0);
         CHECK(root && root->type == PJ_ARR);
         CHECK(pj_arr_len(root) == 3);
+        puci_arena_destroy(&a);
     }
 
     /* An assistant tool-call message must also serialize validly. */
@@ -88,10 +88,10 @@ static void test_messages_and_tools_are_json_arrays(void) {
         puci_arena_init(&a, NULL, 0);
         pj_val *root = NULL;
         int rc = pj_parse(&a, puci_strbuf_cstr(&msgs2), msgs2.len, &root);
-        puci_arena_destroy(&a);
         CHECK(rc == 0);
         CHECK(root && root->type == PJ_ARR);
         CHECK(pj_arr_len(root) == 3);
+        puci_arena_destroy(&a);
     }
 
     puci_strbuf_destroy(&msgs);
