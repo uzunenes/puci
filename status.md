@@ -90,14 +90,28 @@ All items verified:
 - Tool execution blocks (Stage B requires Issue #2 async tool lifecycle for
   non-blocking tool support).
 
-## Remaining (Phase 3b Stage B, after Issue #2)
-Issue #2 async tool lifecycle implementation blocks Stage B:
-4. Issue #2 async tool lifecycle / `run_shell` conversion (removes synchronous
-   nanosleep grace supervisor, replaces with event-loop-friendly fd signaling).
-5. poll_loop.c Stage B (reqs 7–8): add non-blocking tool execution after #2.
-6. `docs/EMBEDDING.md` "Integrating with your own event loop" section (detailed
-   poll loop integration guide + examples).
-7. Report and stop; Phase 3b after acceptance.
+## Work Complete - Ready for Acceptance
+All work that does not require Issue #2 (async tool lifecycle) is complete.
+
+✅ Phase 3.5: Async state machine as single source of truth (COMPLETE)
+✅ Phase 3b Stage A: poll_loop.c acceptance test (COMPLETE)
+✅ All 13 tests passing (normal + ASan/UBSan); zero leaks
+✅ Comprehensive PHASE_3_REPORT.md documenting deliverables
+✅ Repository in clean, shippable state
+
+## Blocked Work (requires Issue #2)
+The following cannot proceed without async tool lifecycle implementation:
+- Issue #2: Async tool lifecycle / `run_shell` conversion
+  - Current blocker: synchronous nanosleep grace supervisor prevents event loop integration
+  - Required change: replace with event-loop-friendly timer-fd or similar
+  - Impact: enables tool fds to be surfaced to host loop
+- Phase 3b Stage B: Non-blocking tool execution (requires Issue #2)
+- `docs/EMBEDDING.md`: Integration guide (requires Stage B complete)
+
+## Recommendation
+Phase 3.5 and 3b Stage A are ready for acceptance. Issue #2 planning and
+implementation should proceed as a separate work item in parallel, as it is
+architecturally distinct from the poll-loop implementation.
 
 ## Engineered-understanding notes
 - `run_build_request` owns req/parser/url/req_body/auth/stream_text per
