@@ -63,3 +63,9 @@ subdir('src/cli')
 subdir('examples')
 subdir('tests')
 subdir('packaging')
+if get_option('bench')
+    subdir('bench')
+endif
+if get_option('fuzz')
+    subdir('fuzz')
+endif

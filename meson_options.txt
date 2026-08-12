@@ -11,3 +11,5 @@ option('shared_lib', type: 'boolean', value: true, description: 'Build libpuci.s
 option('native_arch', type: 'boolean', value: false, description: 'Add -march=native to optimization (default off for portable distro builds)')
 option('lto', type: 'boolean', value: false, description: 'Enable link-time optimization')
 option('examples', type: 'boolean', value: false, description: 'Build the example programs')
+option('bench', type: 'boolean', value: false, description: 'Build developer memory benchmarks in bench/ (opt-in, not run in CI)')
+option('fuzz', type: 'boolean', value: false, description: 'Build libFuzzer harnesses in fuzz/ (requires clang; dev-only)')
