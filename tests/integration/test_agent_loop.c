@@ -141,13 +141,17 @@ static void server_child(int pipe_w) {
     getsockname(srv, (struct sockaddr *)&addr, &alen);
     int port = ntohs(addr.sin_port);
 
+    /* Listen before signalling the port so the parent's first connect is never
+     * refused by a not-yet-listening socket. */
+    if (listen(srv, 8) != 0) {
+        _exit(1);
+    }
+
     /* Send port to parent. */
     char pbuf[16];
     int n = snprintf(pbuf, sizeof(pbuf), "%d\n", port);
     write_all(pipe_w, pbuf, (size_t)n);
     close(pipe_w);
-
-    listen(srv, 8);
 
     /* Request 1: tool call. */
     int c1 = accept(srv, NULL, NULL);
