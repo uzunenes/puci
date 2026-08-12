@@ -238,6 +238,10 @@ void puci_session_destroy(puci_session *sess) {
     if (!sess) {
         return;
     }
+    /* Tear down any in-flight turn (streaming or tool execution) and flush the
+     * event queue, so destroying an agent mid-turn leaks nothing (requirement 8).
+     * Does so before closing the persistent HTTP connection it may be using. */
+    turn_run_force_teardown(sess);
     puci_arena_destroy(&sess->scratch);
     for (size_t i = 0; i < sess->nmessages; i++) {
         free_msg(sess, &sess->messages[i]);
@@ -306,29 +310,51 @@ void session_set_err(puci_session *sess, const char *msg) {
     }
 }
 
+/* The blocking convenience API is a thin wrapper over the non-blocking state
+ * machine (puci_agent_*): it pumps the loop and forwards every queued event to
+ * the session's event callback synchronously. All turn logic lives in the
+ * state machine, so the two entry points cannot diverge. */
 puci_status puci_session_send(puci_session *sess, const char *message) {
     if (!sess || !message) {
         return PUCI_ERR_INVALID_ARG;
     }
-    if (sess->running) {
+    if (sess->run) {
         return PUCI_ERR_OUT_OF_STATE;
     }
     sess->running = 1;
-    sess->cancelled = 0;
     puci_status st = puci_agent_run_turn(sess, message);
     sess->running = 0;
     return st;
 }
 
-puci_status puci_session_poll(puci_session *sess) {
-    (void)sess;
-    /* Non-blocking pollable mode is not yet available on this build path. */
-    return PUCI_ERR_OUT_OF_STATE;
+/* --- Non-blocking, poll-loop friendly agent driving ---
+ * These forward directly to the state machine in core/agent.c; see the fd and
+ * threading contract documented in include/puci/session.h. */
+
+puci_status puci_session_begin_turn(puci_session *sess, const char *message) {
+    return puci_agent_begin_turn(sess, message);
 }
 
-int puci_session_poll_fd(const puci_session *sess) {
-    (void)sess;
-    return -1;
+puci_status puci_session_get_fds(puci_session *sess, struct pollfd *fds,
+                                 size_t cap, size_t *out_count) {
+    return puci_agent_get_fds(sess, fds, cap, out_count);
+}
+
+puci_status puci_session_next_timeout_ms(puci_session *sess, int *out_ms) {
+    return puci_agent_next_timeout_ms(sess, out_ms);
+}
+
+puci_status puci_session_process(puci_session *sess, const struct pollfd *fds,
+                                 size_t count) {
+    return puci_agent_process(sess, fds, count);
+}
+
+int puci_session_next_event(puci_session *sess, puci_event *out) {
+    return puci_agent_next_event(sess, out);
+}
+
+puci_status puci_session_last_status(const puci_session *sess) {
+    return puci_agent_last_status(sess);
 }
 
 /* --- Cancellation transport --- */
@@ -367,6 +393,29 @@ int session_ensure_cancel_fd(puci_session *sess) {
 void session_build_cancel_token(puci_session *sess, puci_cancel_token *tok) {
     tok->flag = &sess->cancelled;
     tok->fd = (sess->cancel_fd >= 0) ? sess->cancel_fd : -1;
+}
+
+/* Clears the latched cancel flag and drains any pending notification from the
+ * cancel transport, so the next turn starts with a clean state. The flag must
+ * be cleared before the next puci_agent_begin_turn; draining the fd is what
+ * stops a host pump that polled on the cancel fd from busy-spinning on the
+ * leftover readable byte. Not async-signal-safe (called from the driver
+ * thread between turns, never from a signal handler). */
+void session_cancel_clear(puci_session *sess) {
+    if (!sess) {
+        return;
+    }
+    sess->cancelled = 0;
+    if (sess->cancel_fd >= 0) {
+#ifdef __linux__
+        (void)eventfd_read(sess->cancel_fd, NULL);
+#else
+        char tmp[64];
+        while (read(sess->cancel_fd, tmp, sizeof(tmp)) > 0) {
+            /* drain until EAGAIN */
+        }
+#endif
+    }
 }
 
 puci_status puci_session_cancel(puci_session *sess) {

@@ -776,6 +776,27 @@ puci_http_req *puci_http_begin(const puci_allocator *alloc, puci_http_conn *conn
     return r;
 }
 
+/* Number of distinct fds curl currently wants polled for this request. Used to
+ * report the required count for a cap==0 sizing query. */
+size_t puci_http_fd_count(const puci_http_req *r) {
+    if (!r || !r->started || r->done) {
+        return 0;
+    }
+    fd_set rd, wr, ex;
+    FD_ZERO(&rd);
+    FD_ZERO(&wr);
+    FD_ZERO(&ex);
+    int maxfd = -1;
+    (void)curl_multi_fdset(r->conn->multi, &rd, &wr, &ex, &maxfd);
+    size_t n = 0;
+    for (int fd = 0; fd <= maxfd; fd++) {
+        if (FD_ISSET(fd, &rd) || FD_ISSET(fd, &wr) || FD_ISSET(fd, &ex)) {
+            n++;
+        }
+    }
+    return n;
+}
+
 size_t puci_http_get_fds(const puci_http_req *r, struct pollfd *fds, size_t cap) {
     if (!r || !r->started || r->done) {
         return 0;
@@ -829,6 +850,23 @@ int puci_http_next_timeout_ms(const puci_http_req *r) {
         }
     }
     return (int)curl_ms;
+}
+
+puci_status puci_http_process_fds(puci_http_req *r, const struct pollfd *fds,
+                                  size_t count) {
+    (void)fds;
+    (void)count;
+    /* This function is a no-op in the fdset+poll model. The poll() call
+     * informs the OS which sockets we care about; curl_multi_perform (called
+     * in puci_http_step) will do non-blocking I/O on any that are ready. We
+     * don't need to explicitly feed back the poll results to curl when using
+     * curl_multi_fdset. The purpose of this stub is to document the contract
+     * and allow future implementations (e.g., socket callback mode) to use
+     * curl_multi_socket_action if needed. */
+    if (!r || !r->started || r->done) {
+        return PUCI_OK;
+    }
+    return PUCI_OK;
 }
 
 puci_status puci_http_step(puci_http_req *r, int *done, int *http_status,

@@ -120,3 +120,16 @@ test_http_async = executable(
     dependencies: [puci_static_dep],
 )
 test('test_http_async', test_http_async, timeout: 120)
+
+# Async-loop busy-spin regression test: drives one full turn through the public
+# non-blocking API (begin_turn / get_fds / next_timeout_ms / process / next_event)
+# from a caller-owned poll() loop against a dribbling SSE mock server, counting
+# process() calls. Asserts the count stays bounded (no busy-spin when curl_multi
+# reports a 0 timeout) and that the full streamed text arrives and the turn
+# completes. Public API only.
+test_async_loop = executable(
+    'test_async_loop',
+    'integration/test_async_loop.c',
+    dependencies: puci_static_dep,
+)
+test('test_async_loop', test_async_loop, timeout: 120)

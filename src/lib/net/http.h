@@ -155,10 +155,23 @@ puci_http_req *puci_http_begin(const puci_allocator *alloc, puci_http_conn *conn
  * is currently nothing to wait on. */
 size_t puci_http_get_fds(const puci_http_req *r, struct pollfd *fds, size_t cap);
 
+/* Number of fds curl currently wants polled for this request (the count
+ * puci_http_get_fds would write given enough capacity). Useful for a cap==0
+ * sizing query. Returns 0 if there is nothing to wait on. */
+size_t puci_http_fd_count(const puci_http_req *r);
+
 /* How many milliseconds the host may block in poll() before it must call
  * puci_http_step again. -1 means "block indefinitely", 0 means "work is
  * pending right now". Used to bound idle/reasoning-silence windows. */
 int puci_http_next_timeout_ms(const puci_http_req *r);
+
+/* Processes poll results for a request. Given an array of pollfd entries
+ * (as returned by poll after waiting on fds from puci_http_get_fds), informs
+ * libcurl about which sockets are ready for I/O so it can make efficient
+ * progress. This should be called BEFORE puci_http_step to feed poll results
+ * into the curl multi handle. Returns PUCI_OK on success. */
+puci_status puci_http_process_fds(puci_http_req *r, const struct pollfd *fds,
+                                  size_t count);
 
 /* Drives the request by one bounded step. Returns PUCI_OK while the request
  * is still in progress. When the transfer has completed (success or error) it
