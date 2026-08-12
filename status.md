@@ -72,28 +72,32 @@ All items verified:
 - `.vscode/.checkmarxIgnored`       — build config
 - `status.md`                       — this file
 
-## Remaining (next phase - 3b)
-Phase 3.5 Issue #1 (async state machine) is complete. Proceeding to Phase 3b
-requires explicit specification of poll_loop.c Stage A requirements (reqs 1-6).
+## Phase 3b Status (Stage A Complete)
+✅ STAGE A COMPLETE (commit d0a2041)
 
-Current understanding:
-- Issue #1 is resolved: poll-loop API (get_fds/next_timeout_ms/process/next_event)
-  is single source of truth; blocking API is thin wrapper.
-- test_async_loop regression test verifies efficiency: <20k process calls for
-  300-chunk stream (honest cost ~300; busy-spin would be hundreds of thousands).
-- Stage A: poll_loop.c example should demonstrate public non-blocking API usage
-  from host event loop (poll()), with synchronous tool execution (Stage B needs
-  async tools / Issue #2).
-- Stage B: add non-blocking tool execution after Issue #2 async tool lifecycle.
+### What was completed
+- Implemented `examples/poll_loop.c`: acceptance test demonstrating the public
+  non-blocking API (begin_turn / get_fds / next_timeout_ms / process / next_event)
+  driving a session from a host-owned poll() loop.
+- Demonstrates proper poll timeout flooring (curl_multi_timeout==0 is upper bound).
+- Interactive prompt-per-line interface; event counting (tokens, tools, completion).
+- Compiles without warnings; all 13 tests pass.
 
-Next actions (pending specification):
-1. Clarify poll_loop.c Stage A requirements (reqs 1–6)
-2. Implement examples/poll_loop.c Stage A
-3. Verify against acceptance criteria
-4. Issue #2 async tool lifecycle / `run_shell` conversion
-5. poll_loop.c Stage B (reqs 7–8)
-6. `docs/EMBEDDING.md` "Integrating with your own event loop" section
-7. Report and stop; Phase 3b after acceptance
+### Limitations (known and documented)
+- Non-blocking next_event() does not expose event payloads (token text, tool
+  call details); payloads are freed after delivery. Full text requires blocking
+  send() API or external callback infrastructure.
+- Tool execution blocks (Stage B requires Issue #2 async tool lifecycle for
+  non-blocking tool support).
+
+## Remaining (Phase 3b Stage B, after Issue #2)
+Issue #2 async tool lifecycle implementation blocks Stage B:
+4. Issue #2 async tool lifecycle / `run_shell` conversion (removes synchronous
+   nanosleep grace supervisor, replaces with event-loop-friendly fd signaling).
+5. poll_loop.c Stage B (reqs 7–8): add non-blocking tool execution after #2.
+6. `docs/EMBEDDING.md` "Integrating with your own event loop" section (detailed
+   poll loop integration guide + examples).
+7. Report and stop; Phase 3b after acceptance.
 
 ## Engineered-understanding notes
 - `run_build_request` owns req/parser/url/req_body/auth/stream_text per
