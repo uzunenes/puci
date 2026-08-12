@@ -167,6 +167,14 @@ puci_status puci_http_post_stream(const puci_allocator *alloc,
     /* Never let libcurl use signals for its timeouts (e.g. DNS). Signals are
      * process-global and unsafe in a library and in threaded hosts. Required. */
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    /* Each puci_http_post_stream performs exactly one request on its own
+     * connection, so never reuse a cached connection (which may be stale from a
+     * cancelled transfer, a known libcurl global-cache hazard) and never cache
+     * this one for later reuse. Otherwise, a cancel followed by a normal turn
+     * on the same session would silently reuse the just-aborted, reset
+     * connection and fail with a spurious "Connection reset by peer". */
+    curl_easy_setopt(curl, CURLOPT_FRESH_CONNECT, 1L);
+    curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, 1L);
 
     if (req->timeout_ms > 0) {
         curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (long)req->timeout_ms);

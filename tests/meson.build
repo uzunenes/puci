@@ -81,3 +81,18 @@ test_agent = executable(
     dependencies: puci_static_dep,
 )
 test('test_agent_loop', test_agent)
+
+# Interrupt / cancellation test: drives the agent loop against a forked mock SSE
+# server and cancels in-flight turns from a separate thread at reproducible,
+# seeded points (mid-stream x100, reasoning-silence gap, during tool
+# execution, and while the approval policy is waiting for input). The
+# 100-iteration loop forks, streams, cancels, and recovers every iteration, so
+# it gets a generous timeout.
+threads_dep = dependency('threads')
+test_cancel = executable(
+    'test_cancel',
+    'integration/test_cancel.c',
+    include_directories: [internal_inc],
+    dependencies: [puci_static_dep, threads_dep],
+)
+test('test_cancel', test_cancel, timeout: 300)
