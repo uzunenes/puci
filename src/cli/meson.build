@@ -7,6 +7,16 @@
 
 cli_inc = include_directories('../../include')
 
+# Let `puci doctor` report how the CLI itself links libpuci: shared (the
+# default consumer path) or static. This is a build-time fact, not something
+# we can discover at runtime, so fold it into a macro scoped to this target.
+cli_c_args = []
+if get_option('shared_lib')
+    cli_c_args += '-DPUCI_CLI_LINK_SHARED=1'
+else
+    cli_c_args += '-DPUCI_CLI_LINK_STATIC=1'
+endif
+
 cli_sources = files(
     'main.c',
     'cmd/run.c',
@@ -33,6 +43,7 @@ if get_option('cli')
         cli_sources,
         include_directories: cli_inc,
         dependencies: cli_deps,
+        c_args: cli_c_args,
         install: true,
     )
 endif

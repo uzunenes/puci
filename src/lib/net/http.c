@@ -27,6 +27,46 @@ typedef struct http_ctx {
     int cancelled;               /* latched when cancel observed */
 } http_ctx;
 
+/* Opaque persistent connection: wraps a long-lived libcurl easy handle so the
+ * underlying TCP/TLS connection survives across requests (keep-alive + TLS
+ * session resumption). */
+struct puci_http_conn {
+    CURL *curl;  /* persistent easy handle (owns connection cache for reuse) */
+    CURLM *multi; /* persistent multi handle (owns the connection cache) */
+};
+
+puci_http_conn *puci_http_conn_create(void) {
+    puci_http_conn *c = (puci_http_conn *)calloc(1, sizeof(puci_http_conn));
+    if (!c) {
+        return NULL;
+    }
+    c->curl = curl_easy_init();
+    if (!c->curl) {
+        free(c);
+        return NULL;
+    }
+    c->multi = curl_multi_init();
+    if (!c->multi) {
+        curl_easy_cleanup(c->curl);
+        free(c);
+        return NULL;
+    }
+    return c;
+}
+
+void puci_http_conn_destroy(puci_http_conn *conn) {
+    if (!conn) {
+        return;
+    }
+    if (conn->multi) {
+        curl_multi_cleanup(conn->multi);
+    }
+    if (conn->curl) {
+        curl_easy_cleanup(conn->curl);
+    }
+    free(conn);
+}
+
 static long long now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -150,13 +190,21 @@ puci_status puci_http_post_stream(const puci_allocator *alloc,
         return PUCI_ERR_INVALID_ARG;
     }
 
-    CURL *curl = curl_easy_init();
-    if (!curl) {
-        if (err && errlen > 0) {
-            snprintf(err, errlen, "failed to initialise curl");
+    int own_curl = 1;
+    CURL *curl = NULL;
+    if (req->conn && req->conn->curl) {
+        curl = req->conn->curl; /* reuse the session's persistent handle */
+        own_curl = 0;
+    } else {
+        curl = curl_easy_init();
+        if (!curl) {
+            if (err && errlen > 0) {
+                snprintf(err, errlen, "failed to initialise curl");
+            }
+            return PUCI_ERR_UNKNOWN;
         }
-        return PUCI_ERR_UNKNOWN;
     }
+    curl_easy_reset(curl); /* clear any state from a previous transfer */
 
     char errbuf[CURL_ERROR_SIZE];
     errbuf[0] = '\0';
@@ -167,14 +215,25 @@ puci_status puci_http_post_stream(const puci_allocator *alloc,
     /* Never let libcurl use signals for its timeouts (e.g. DNS). Signals are
      * process-global and unsafe in a library and in threaded hosts. Required. */
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-    /* Each puci_http_post_stream performs exactly one request on its own
-     * connection, so never reuse a cached connection (which may be stale from a
-     * cancelled transfer, a known libcurl global-cache hazard) and never cache
-     * this one for later reuse. Otherwise, a cancel followed by a normal turn
-     * on the same session would silently reuse the just-aborted, reset
-     * connection and fail with a spurious "Connection reset by peer". */
-    curl_easy_setopt(curl, CURLOPT_FRESH_CONNECT, 1L);
-    curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, 1L);
+    /* Keep-alive is on by default so consecutive normal turns reuse the same
+     * connection (no repeated TCP/TLS handshake). Only when the session's
+     * connection-dirty flag is set do we force a fresh connection for THIS
+     * request, then clear the flag: a transfer that was aborted, cancelled, or
+     * ended with an incomplete body may have left a stale/reset connection in
+     * libcurl's global cache, and silently reusing it on the next turn would
+     * fail with a spurious "Connection reset by peer". Normal turns therefore
+     * pay the handshake cost at most once and resume the connection after. */
+    int want_fresh = 0;
+    if (req->conn_dirty && *req->conn_dirty) {
+        want_fresh = 1;
+        *req->conn_dirty = 0; /* consumed: applies to this request only */
+    }
+    if (want_fresh) {
+        curl_easy_setopt(curl, CURLOPT_FRESH_CONNECT, 1L);
+        curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, 1L);
+    } else {
+        curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, 0L);
+    }
 
     if (req->timeout_ms > 0) {
         curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (long)req->timeout_ms);
@@ -282,16 +341,30 @@ puci_status puci_http_post_stream(const puci_allocator *alloc,
      * easy interface, so we can also wait on the caller's cancel fd and abort
      * promptly at any point (handshake, mid-stream, or silent reasoning gap),
      * and so an external event loop can adopt the transfer (curl_multi_fdset). */
-    CURLM *multi = curl_multi_init();
+    int own_multi = 0;
+    CURLM *multi = NULL;
+    if (req->conn && req->conn->multi) {
+        multi = req->conn->multi;            /* persistent per-session multi */
+        curl_multi_remove_handle(multi, curl); /* defensive: not currently added */
+    } else {
+        multi = curl_multi_init();
+        own_multi = 1;
+    }
     if (!multi) {
         curl_slist_free_all(hdr);
-        curl_easy_cleanup(curl);
+        if (own_curl) {
+            curl_easy_cleanup(curl);
+        }
         return PUCI_ERR_UNKNOWN;
     }
     if (curl_multi_add_handle(multi, curl) != CURLM_OK) {
-        curl_multi_cleanup(multi);
+        if (own_multi) {
+            curl_multi_cleanup(multi);
+        }
         curl_slist_free_all(hdr);
-        curl_easy_cleanup(curl);
+        if (own_curl) {
+            curl_easy_cleanup(curl);
+        }
         return PUCI_ERR_UNKNOWN;
     }
 
@@ -339,8 +412,23 @@ puci_status puci_http_post_stream(const puci_allocator *alloc,
 
     const int was_cancelled = cancel_pending(&hctx);
 
+    /* A transfer that was cancelled, or that failed at the transport level (as
+     * opposed to completing with an HTTP error status, which still delivered
+     * the full body) may have aborted its connection before the body was fully
+     * consumed. Mark the session's connection dirty so the NEXT request forces
+     * a fresh connection instead of silently reusing the stale one. */
+    {
+        int aborted = was_cancelled ||
+                      (rc != CURLE_OK && rc != CURLE_HTTP_RETURNED_ERROR);
+        if (aborted && req->conn_dirty) {
+            *req->conn_dirty = 1;
+        }
+    }
+
     curl_multi_remove_handle(multi, curl);
-    curl_multi_cleanup(multi);
+    if (own_multi) {
+        curl_multi_cleanup(multi);
+    }
 
     long code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
@@ -349,7 +437,9 @@ puci_status puci_http_post_stream(const puci_allocator *alloc,
     }
 
     curl_slist_free_all(hdr);
-    curl_easy_cleanup(curl);
+    if (own_curl) {
+        curl_easy_cleanup(curl);
+    }
 
     if (was_cancelled) {
         if (err && errlen > 0) {

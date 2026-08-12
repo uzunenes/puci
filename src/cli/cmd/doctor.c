@@ -65,6 +65,38 @@ int puci_cli_doctor(void) {
     printf("  version: %s (ABI v%d)\n", puci_version_string(),
            puci_abi_version());
 
+    /* Build facts: what features this binary was compiled with and how it
+     * links libpuci. These macros are injected by meson.build; they are the
+     * first thing to ask for in any embedder bug report. */
+    HEAD("build");
+    printf("  ABI version      : %d\n", puci_abi_version());
+#if PUCI_FEATURE_TUI
+    printf("  features         : tui");
+#else
+    printf("  features         : (none)");
+#endif
+#if PUCI_FEATURE_MEMORY
+    printf(" memory");
+#endif
+#if PUCI_FEATURE_SWARM
+    printf(" swarm");
+#endif
+#if PUCI_FEATURE_BROWSER
+    printf(" browser");
+#endif
+#if PUCI_FEATURE_MCP
+    printf(" mcp");
+#endif
+#if PUCI_FEATURE_LTO
+    printf(" lto");
+#endif
+    printf("\n");
+#if PUCI_CLI_LINK_SHARED
+    printf("  libpuci link     : shared (%s)\n", "libpuci.so");
+#else
+    printf("  libpuci link     : static (%s)\n", "libpuci.a");
+#endif
+
     HEAD("config");
     puci_provider_config *pc = puci_cli_provider("openai");
     printf("  name:     %s\n", pc->name);

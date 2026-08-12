@@ -320,6 +320,16 @@ puci_status puci_agent_run_turn(puci_session *sess, const char *msg) {
      * exists before any blocking work can observe cancellation. */
     session_ensure_cancel_fd(sess);
 
+    /* Lazily create the persistent per-session HTTP connection (keeps the
+     * TCP/TLS connection alive and reusable across turns for keep-alive). */
+    if (!sess->http_conn) {
+        sess->http_conn = puci_http_conn_create();
+        if (!sess->http_conn) {
+            session_set_err(sess, "failed to create HTTP connection");
+            return PUCI_ERR_NOMEM;
+        }
+    }
+
     puci_status st = session_msg_begin(sess, PUCI_ROLE_USER, msg);
     if (st != PUCI_OK) {
         return st;
@@ -435,6 +445,8 @@ puci_status puci_agent_run_turn(puci_session *sess, const char *msg) {
         hreq.idle_timeout_ms = sess->cfg.stream_idle_timeout_ms;
         hreq.ca_bundle = sess->cfg.ca_bundle;
         hreq.tls_verify = sess->cfg.tls_verify;
+        hreq.conn_dirty = &sess->conn_dirty;
+        hreq.conn = sess->http_conn;
         if (sess->ctx->ninsecure_hosts > 0) {
             hreq.insecure_hosts = (const char *const *)sess->ctx->insecure_hosts;
             hreq.ninsecure_hosts = sess->ctx->ninsecure_hosts;

@@ -18,6 +18,18 @@
 #include <stddef.h>
 #include "puci/puci.h"
 
+/* Opaque persistent HTTP connection (owns a libcurl handle). Keeping one alive
+ * across turns lets libcurl reuse the underlying TCP/TLS connection (keep-alive
+ * + TLS session resumption), so consecutive normal turns avoid a fresh
+ * handshake. Destroy with puci_http_conn_destroy. A session owns one. */
+typedef struct puci_http_conn puci_http_conn;
+
+/* Creates a persistent connection handle, or NULL on failure. */
+puci_http_conn *puci_http_conn_create(void);
+
+/* Frees a persistent connection handle. NULL is a no-op. */
+void puci_http_conn_destroy(puci_http_conn *conn);
+
 /* Called with each chunk of the response body. May be called any number of
  * times including zero. The pointer is only valid for the duration of the
  * callback. */
@@ -62,6 +74,21 @@ typedef struct puci_http_request {
     puci_log_cb log_cb;
     void *log_userdata;
     puci_log_level log_level;
+
+    /* Optional caller-owned, session-persistent connection-dirty flag. The
+     * HTTP layer reads it before starting the request: if non-zero, it forces
+     * a fresh connection (CURLOPT_FRESH_CONNECT) for THIS request only and
+     * then clears it, preserving keep-alive for all normal turns. After the
+     * transfer, if it ended aborted / cancelled / with an incomplete body, the
+     * layer sets the flag again so the next request starts clean instead of
+     * silently reusing a just-aborted connection. May be NULL to disable. */
+    int *conn_dirty;
+
+    /* Optional persistent connection handle owned by the caller (the session).
+     * When non-NULL the underlying libcurl handle is reused across requests,
+     * so the TCP/TLS connection is kept alive and reused for normal turns.
+     * When NULL a fresh libcurl handle is created for this request only. */
+    puci_http_conn *conn;
 } puci_http_request;
 
 /* Performs a streaming HTTP request.

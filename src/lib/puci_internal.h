@@ -110,6 +110,8 @@ struct puci_turn {
 /* Session.                                                            */
 /* ------------------------------------------------------------------ */
 
+struct puci_http_conn; /* net/http.h; opaque persistent HTTP connection */
+
 struct puci_session {
     struct puci_context *ctx;
     puci_allocator alloc; /* resolved context allocator (copy) */
@@ -150,6 +152,15 @@ struct puci_session {
     int cancel_fd_write;
 
     char *errmsg; /* last error message, owned */
+
+    /* Connection-dirty flag for the HTTP layer: set when the previous transfer
+     * was aborted/cancelled/incomplete so the next request forces a fresh
+     * connection; cleared once consumed. Preserves keep-alive for normal turns. */
+    int conn_dirty;
+    /* Persistent HTTP connection (owns a libcurl easy+multi handle), reused
+     * across turns so the TCP/TLS connection can be kept alive. NULL until
+     * first needed; freed in puci_session_destroy. */
+    struct puci_http_conn *http_conn;
 };
 
 /* ------------------------------------------------------------------ */

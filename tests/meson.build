@@ -96,3 +96,14 @@ test_cancel = executable(
     dependencies: [puci_static_dep, threads_dep],
 )
 test('test_cancel', test_cancel, timeout: 300)
+
+# Connection / keep-alive regression test: verifies the Task-0 scope-down of
+# CURLOPT_FRESH_CONNECT (normal turns reuse one connection; the turn after a
+# cancellation opens a fresh one). Uses a keep-alive and a streaming mock
+# server, plus a caretaker thread for the cancellation.
+test_conn = executable(
+    'test_conn_reuse',
+    'integration/test_conn_reuse.c',
+    dependencies: [puci_static_dep, threads_dep],
+)
+test('test_conn_reuse', test_conn, timeout: 120)

@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include "json/json.h"
+#include "net/http.h"
 
 #ifdef __linux__
 #include <sys/eventfd.h>
@@ -282,6 +283,10 @@ void puci_session_destroy(puci_session *sess) {
     }
     if (sess->cancel_fd_write >= 0 && sess->cancel_fd_write != sess->cancel_fd) {
         close(sess->cancel_fd_write);
+    }
+    if (sess->http_conn) {
+        puci_http_conn_destroy(sess->http_conn);
+        sess->http_conn = NULL;
     }
     puci_alloc_free(&sess->alloc, sess);
 }
