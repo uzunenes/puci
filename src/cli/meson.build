@@ -11,6 +11,7 @@ cli_sources = files(
     'main.c',
     'cmd/run.c',
     'cmd/config.c',
+    'cmd/doctor.c',
     'repl/repl.c',
     'repl/lineedit.c',
 )

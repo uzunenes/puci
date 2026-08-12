@@ -20,6 +20,7 @@ static void print_help(FILE *f) {
             "Usage:\n"
             "  puci run \"<prompt>\"   Run a one-shot, non-interactive agent turn\n"
             "  puci                  Start the interactive REPL\n"
+            "  puci doctor           Diagnose config, credentials, and reachability\n"
             "  puci --version        Print version\n"
             "  puci --help           Show this help\n"
             "\n"
@@ -48,6 +49,9 @@ int main(int argc, char **argv) {
     }
     if (strcmp(a1, "run") == 0) {
         return puci_cli_run(argc - 1, argv + 1);
+    }
+    if (strcmp(a1, "doctor") == 0) {
+        return puci_cli_doctor();
     }
     fprintf(stderr, "puci: unknown command or flag '%s'\n", a1);
     print_help(stderr);

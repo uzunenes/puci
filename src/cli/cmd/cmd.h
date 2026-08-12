@@ -12,4 +12,8 @@
  * exit code (0 success, 1 runtime error, 2 usage). */
 int puci_cli_run(int argc, char **argv);
 
+/* Handles `puci doctor`: runs environment/credential/reachability/tool checks
+ * and prints actionable diagnostics. Returns 0 if all checks pass, 1 otherwise. */
+int puci_cli_doctor(void);
+
 #endif /* PUCI_CLI_CMD_H */
