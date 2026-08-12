@@ -20,6 +20,7 @@ lib_sources = files(
     'tools/run_shell.c',
     'config/config.c',
     'util/arena.c',
+    'util/alloc.c',
     'util/strbuf.c',
     'util/log.c',
     'version.c',
@@ -29,11 +30,12 @@ if get_option('memory').enabled()
     lib_sources += files('tools/memory.c')
 endif
 
-libgen = []
+libpuci_static = []
+libpuci_shared = []
 
-# Shared library, soname derived from ABI version.
+# Shared library, soname derived from the ABI version.
 if get_option('shared_lib')
-    libgen += shared_library(
+    libpuci_shared = shared_library(
         'puci',
         lib_sources,
         include_directories: lib_inc,
@@ -46,7 +48,7 @@ endif
 
 # Static library.
 if get_option('static_lib')
-    libgen += static_library(
+    libpuci_static = static_library(
         'puci',
         lib_sources,
         include_directories: lib_inc,
@@ -55,7 +57,13 @@ if get_option('static_lib')
     )
 endif
 
-libpuci = libgen
+libpuci_targets = []
+if get_option('static_lib')
+    libpuci_targets += libpuci_static
+endif
+if get_option('shared_lib')
+    libpuci_targets += libpuci_shared
+endif
 
 # Install the public headers.
 install_headers(
@@ -72,20 +80,32 @@ install_headers(
     subdir: 'puci',
 )
 
-# pkg-config file.
-pkgconf = configuration_data()
-pkgconf.set('version', meson.project_version())
-pkgconf.set('abi_version', PUCI_ABI_VERSION)
-configure_file(
-    input: 'puci.pc.in',
-    output: 'puci.pc',
-    configuration: pkgconf,
-    install_dir: get_option('libdir') / 'pkgconfig',
+# pkg-config file so downstream consumers link with `pkg-config --cflags --libs puci`.
+pkg_mod = import('pkgconfig')
+pkg_mod.generate(
+    libraries: libpuci_targets,
+    name: 'puci',
+    description: 'Minimal C17 AI coding agent harness core library',
+    version: meson.project_version(),
 )
 
-# Abstract the curl dependency so consumer targets link cleanly.
+# Consumer-facing dependency. Link the shared library when available (the
+# normal way downstream embeds libpuci), falling back to the static library.
+if get_option('shared_lib')
+    consumer_target = libpuci_shared
+else
+    consumer_target = libpuci_static
+endif
 puci_dep = declare_dependency(
-    link_with: libgen,
+    link_with: consumer_target,
+    include_directories: lib_inc,
+    dependencies: [curl_dep],
+)
+
+# Static-only dependency for the test suite so internal (non-public) symbols
+# can be exercised from unit tests.
+puci_static_dep = declare_dependency(
+    link_with: libpuci_static,
     include_directories: lib_inc,
     dependencies: [curl_dep],
 )

@@ -21,6 +21,9 @@ c_args = [
     '-Werror',
     '-Wconversion',
     '-Wno-unused-parameter',
+    # libpuci targets POSIX (fork+exec, pipes, clock_gettime, strdup). Expose
+    # the POSIX API surface under the strict -std=c17 flag.
+    '-D_POSIX_C_SOURCE=200809L',
 ]
 
 if get_option('native_arch')
