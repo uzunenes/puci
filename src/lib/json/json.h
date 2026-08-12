@@ -18,6 +18,7 @@
 
 #include <stddef.h>
 #include "util/arena.h"
+#include "util/strbuf.h"
 
 typedef enum pj_type {
     PJ_NULL = 0,
@@ -85,5 +86,9 @@ pj_val *pj_arr_get(const pj_val *v, size_t i);
 
 /* Returns the number of keys in an object, or 0 if not an object. */
 size_t pj_obj_len(const pj_val *v);
+
+/* Serializes a value back to compact JSON text appended to out. Used, e.g. to
+ * merge caller-supplied extra request fields into a generated body. */
+void pj_serialize(const pj_val *v, puci_strbuf *out);
 
 #endif /* PUCI_INTERNAL_JSON_H */

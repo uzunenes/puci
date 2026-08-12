@@ -9,6 +9,7 @@
 
 #include "json/json.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -530,4 +531,70 @@ pj_val *pj_arr_get(const pj_val *v, size_t i) {
 
 size_t pj_obj_len(const pj_val *v) {
     return (v && v->type == PJ_OBJ) ? v->u.obj.len : 0;
+}
+static void pj_serialize_value(const pj_val *v, puci_strbuf *out) {
+    switch (v->type) {
+    case PJ_NULL:
+        puci_strbuf_appendz(out, "null");
+        break;
+    case PJ_BOOL:
+        puci_strbuf_appendz(out, v->u.bval ? "true" : "false");
+        break;
+    case PJ_NUM:
+        {
+            double d = v->u.num;
+            if (d == (double)(long long)d && d >= -9007199254740992.0 &&
+                d <= 9007199254740992.0) {
+                puci_strbuf_append_fmt(out, "%lld", (long long)d);
+            } else {
+                char buf[48];
+                snprintf(buf, sizeof(buf), "%.17g", d);
+                size_t n = strlen(buf);
+                if (n > 1 && buf[n - 1] == '0' && strchr(buf, '.') &&
+                    !strchr(buf, 'e') && !strchr(buf, 'E')) {
+                    while (n > 1 && buf[n - 1] == '0') {
+                        n--;
+                    }
+                    if (buf[n - 1] == '.') {
+                        n--;
+                    }
+                    buf[n] = '\0';
+                }
+                puci_strbuf_appendz(out, buf);
+            }
+        }
+        break;
+    case PJ_STR:
+        puci_strbuf_append_json_string(out, v->u.str.s);
+        break;
+    case PJ_ARR:
+        puci_strbuf_append_char(out, '[');
+        for (size_t i = 0; i < v->u.arr.len; i++) {
+            if (i > 0) {
+                puci_strbuf_append_char(out, ',');
+            }
+            pj_serialize_value(v->u.arr.items[i], out);
+        }
+        puci_strbuf_append_char(out, ']');
+        break;
+    case PJ_OBJ:
+        puci_strbuf_append_char(out, '{');
+        for (size_t i = 0; i < v->u.obj.len; i++) {
+            if (i > 0) {
+                puci_strbuf_append_char(out, ',');
+            }
+            puci_strbuf_append_json_string(out, v->u.obj.keys[i]);
+            puci_strbuf_append_char(out, ':');
+            pj_serialize_value(v->u.obj.vals[i], out);
+        }
+        puci_strbuf_append_char(out, '}');
+        break;
+    }
+}
+
+void pj_serialize(const pj_val *v, puci_strbuf *out) {
+    if (!v) {
+        return;
+    }
+    pj_serialize_value(v, out);
 }

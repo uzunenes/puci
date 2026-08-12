@@ -152,6 +152,28 @@ puci_status puci_session_create(const puci_context *ctx,
             ? puci_alloc_strdup(&sess->alloc, opts->provider.api_key)
             : NULL;
     sess->cfg.timeout_ms = opts->provider.timeout_ms;
+    sess->cfg.tls_verify = opts->provider.tls_verify;
+    /* Default the per-stream idle timeout to 180s when not configured. */
+    sess->cfg.stream_idle_timeout_ms =
+        opts->provider.stream_idle_timeout_ms != 0
+            ? opts->provider.stream_idle_timeout_ms
+            : 180000;
+    sess->cfg.ca_bundle =
+        opts->provider.ca_bundle
+            ? puci_alloc_strdup(&sess->alloc, opts->provider.ca_bundle)
+            : NULL;
+    if (opts->provider.ca_bundle && !sess->cfg.ca_bundle) {
+        puci_session_destroy(sess);
+        return PUCI_ERR_NOMEM;
+    }
+    sess->cfg.extra_body =
+        opts->provider.extra_body
+            ? puci_alloc_strdup(&sess->alloc, opts->provider.extra_body)
+            : NULL;
+    if (opts->provider.extra_body && !sess->cfg.extra_body) {
+        puci_session_destroy(sess);
+        return PUCI_ERR_NOMEM;
+    }
 
     /* Copy system prompt. */
     if (opts->system_prompt) {
@@ -235,6 +257,12 @@ void puci_session_destroy(puci_session *sess) {
     }
     if (sess->cfg.api_key) {
         puci_alloc_free(&sess->alloc, (void *)sess->cfg.api_key);
+    }
+    if (sess->cfg.ca_bundle) {
+        puci_alloc_free(&sess->alloc, (void *)sess->cfg.ca_bundle);
+    }
+    if (sess->cfg.extra_body) {
+        puci_alloc_free(&sess->alloc, (void *)sess->cfg.extra_body);
     }
     puci_alloc_free(&sess->alloc, sess);
 }

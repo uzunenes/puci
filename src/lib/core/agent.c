@@ -26,6 +26,7 @@ typedef struct sse_bridge {
     puci_turn turn;
     const puci_provider_vtable *vt;
     size_t prev_text_len;
+    size_t prev_reasoning_len;
     puci_status first_error;
     int at_least_one_event;
 } sse_bridge;
@@ -42,7 +43,17 @@ static void on_sse_event(void *ud, const char *data, size_t len) {
         return;
     }
     b->at_least_one_event = 1;
-    /* Emit a delta for the newly appended text. */
+    /* Emit a delta for the newly appended reasoning content (shown separately,
+     * never concatenated into the answer). */
+    if (b->turn.reasoning.len > b->prev_reasoning_len && b->sess->event_cb) {
+        const char *newr = b->turn.reasoning.data + b->prev_reasoning_len;
+        size_t n = b->turn.reasoning.len - b->prev_reasoning_len;
+        b->prev_reasoning_len = b->turn.reasoning.len;
+        b->sess->event_cb(b->sess->event_userdata, b->sess,
+                          PUCI_EVENT_REASONING_DELTA, (const void *)newr);
+        (void)n;
+    }
+    /* Emit a delta for the newly appended answer text. */
     if (b->turn.text.len > b->prev_text_len && b->sess->event_cb) {
         const char *newtxt = b->turn.text.data + b->prev_text_len;
         size_t n = b->turn.text.len - b->prev_text_len;
@@ -87,6 +98,73 @@ static puci_status build_url(puci_session *sess, const char *endpoint,
     memcpy(url, base, blen);
     memcpy(url + blen, endpoint, strlen(endpoint) + 1);
     *out_url = url;
+    return PUCI_OK;
+}
+
+/* Merges caller-supplied extra_body (a JSON object string) into the generated
+ * request body stored in *req. extra_body keys override generated keys. Invalid
+ * extra_body is logged and ignored (never fatal). */
+static puci_status merge_extra_body(puci_session *sess, puci_strbuf *req) {
+    if (!sess->cfg.extra_body || !sess->cfg.extra_body[0]) {
+        return PUCI_OK;
+    }
+    puci_arena a;
+    puci_arena_init(&a, &sess->alloc, 0);
+    pj_val *reqdom = NULL;
+    pj_val *extra = NULL;
+    const char *body = puci_strbuf_cstr(req);
+    if (pj_parse(&a, body, req->len, &reqdom) != 0 ||
+        pj_parse(&a, sess->cfg.extra_body, strlen(sess->cfg.extra_body),
+                 &extra) != 0 ||
+        !reqdom || reqdom->type != PJ_OBJ || !extra || extra->type != PJ_OBJ) {
+        puci_logf(sess->ctx, PUCI_LOG_WARN,
+                  "extra_body ignored: could not parse as a JSON object");
+        puci_arena_destroy(&a);
+        return PUCI_OK;
+    }
+
+    /* Build a merged object in the arena, then serialize. */
+    pj_val *merged = (pj_val *)puci_arena_calloc(&a, sizeof(pj_val));
+    if (!merged) {
+        puci_arena_destroy(&a);
+        return PUCI_ERR_NOMEM;
+    }
+    merged->type = PJ_OBJ;
+    size_t cap = reqdom->u.obj.len + extra->u.obj.len + 1;
+    merged->u.obj.keys = (char **)puci_arena_alloc(&a, cap * sizeof(char *));
+    merged->u.obj.vals = (pj_val **)puci_arena_alloc(&a, cap * sizeof(pj_val *));
+    if (!merged->u.obj.keys || !merged->u.obj.vals) {
+        puci_arena_destroy(&a);
+        return PUCI_ERR_NOMEM;
+    }
+    for (size_t i = 0; i < reqdom->u.obj.len; i++) {
+        merged->u.obj.keys[merged->u.obj.len] = reqdom->u.obj.keys[i];
+        merged->u.obj.vals[merged->u.obj.len] = reqdom->u.obj.vals[i];
+        merged->u.obj.len++;
+    }
+    for (size_t i = 0; i < extra->u.obj.len; i++) {
+        int found = -1;
+        for (size_t j = 0; j < merged->u.obj.len; j++) {
+            if (strcmp(merged->u.obj.keys[j], extra->u.obj.keys[i]) == 0) {
+                found = (int)j;
+                break;
+            }
+        }
+        if (found >= 0) {
+            merged->u.obj.vals[(size_t)found] = extra->u.obj.vals[i];
+        } else {
+            merged->u.obj.keys[merged->u.obj.len] = extra->u.obj.keys[i];
+            merged->u.obj.vals[merged->u.obj.len] = extra->u.obj.vals[i];
+            merged->u.obj.len++;
+        }
+    }
+
+    puci_strbuf newreq;
+    puci_strbuf_init(&newreq, &sess->alloc);
+    pj_serialize(merged, &newreq);
+    puci_strbuf_destroy(req);
+    *req = newreq;
+    puci_arena_destroy(&a);
     return PUCI_OK;
 }
 
@@ -169,23 +247,52 @@ puci_status puci_agent_run_turn(puci_session *sess, const char *msg) {
         b.vt = vt;
         b.first_error = PUCI_OK;
         puci_strbuf_init(&b.turn.text, &sess->alloc);
+        puci_strbuf_init(&b.turn.reasoning, &sess->alloc);
         b.parser = puci_sse_parser_create(&sess->alloc);
         if (!b.parser) {
             puci_strbuf_destroy(&auth);
             puci_alloc_free(&sess->alloc, url);
             puci_strbuf_destroy(&req);
             puci_strbuf_destroy(&b.turn.text);
+            puci_strbuf_destroy(&b.turn.reasoning);
             return PUCI_ERR_NOMEM;
+        }
+
+        st = merge_extra_body(sess, &req);
+        if (st != PUCI_OK) {
+            puci_strbuf_destroy(&auth);
+            puci_alloc_free(&sess->alloc, url);
+            puci_strbuf_destroy(&req);
+            puci_strbuf_destroy(&b.turn.text);
+            puci_strbuf_destroy(&b.turn.reasoning);
+            return st;
         }
 
         const char *auth_header = auth.len > 0 ? puci_strbuf_cstr(&auth) : NULL;
         int http_status = 0;
         char errbuf[256];
         errbuf[0] = '\0';
-        st = puci_http_post_stream(
-            &sess->alloc, url, puci_strbuf_cstr(&req), req.len, auth_header,
-            "application/json", "text/event-stream", sess->cfg.timeout_ms,
-            on_http_data, &b, &http_status, errbuf, sizeof(errbuf));
+        puci_http_request hreq;
+        memset(&hreq, 0, sizeof(hreq));
+        hreq.url = url;
+        hreq.body = puci_strbuf_cstr(&req);
+        hreq.body_len = req.len;
+        hreq.auth_header = auth_header;
+        hreq.content_type = "application/json";
+        hreq.accept = "text/event-stream";
+        hreq.timeout_ms = sess->cfg.timeout_ms;
+        hreq.idle_timeout_ms = sess->cfg.stream_idle_timeout_ms;
+        hreq.ca_bundle = sess->cfg.ca_bundle;
+        hreq.tls_verify = sess->cfg.tls_verify;
+        if (sess->ctx->ninsecure_hosts > 0) {
+            hreq.insecure_hosts = (const char *const *)sess->ctx->insecure_hosts;
+            hreq.ninsecure_hosts = sess->ctx->ninsecure_hosts;
+        }
+        hreq.log_cb = sess->ctx->log_cb;
+        hreq.log_userdata = sess->ctx->log_userdata;
+        hreq.log_level = sess->ctx->log_level;
+        st = puci_http_post_stream(&sess->alloc, &hreq, on_http_data, &b,
+                                   &http_status, errbuf, sizeof(errbuf));
 
         /* Flush any trailing SSE event. */
         puci_sse_parser_flush(b.parser, on_sse_event, &b);
@@ -198,6 +305,7 @@ puci_status puci_agent_run_turn(puci_session *sess, const char *msg) {
         if (st != PUCI_OK) {
             session_set_err(sess, errbuf[0] ? errbuf : "network error");
             puci_strbuf_destroy(&b.turn.text);
+            puci_strbuf_destroy(&b.turn.reasoning);
             return st;
         }
         if (http_status >= 400) {
@@ -207,6 +315,7 @@ puci_status puci_agent_run_turn(puci_session *sess, const char *msg) {
                      errbuf[0] ? errbuf : "");
             session_set_err(sess, msg);
             puci_strbuf_destroy(&b.turn.text);
+            puci_strbuf_destroy(&b.turn.reasoning);
             return (http_status == 401 || http_status == 403)
                        ? PUCI_ERR_UNAUTHORIZED
                        : PUCI_ERR_PROTOCOL;
@@ -214,6 +323,7 @@ puci_status puci_agent_run_turn(puci_session *sess, const char *msg) {
         if (b.first_error != PUCI_OK) {
             session_set_err(sess, "malformed stream from provider");
             puci_strbuf_destroy(&b.turn.text);
+            puci_strbuf_destroy(&b.turn.reasoning);
             return PUCI_ERR_PROTOCOL;
         }
 
@@ -289,6 +399,7 @@ puci_status puci_agent_run_turn(puci_session *sess, const char *msg) {
                         }
                         free(results);
                         puci_strbuf_destroy(&b.turn.text);
+                        puci_strbuf_destroy(&b.turn.reasoning);
                         return PUCI_ERR_NOMEM;
                     }
                     results = nr;
@@ -307,6 +418,7 @@ puci_status puci_agent_run_turn(puci_session *sess, const char *msg) {
                 }
                 free(results);
                 puci_strbuf_destroy(&b.turn.text);
+                puci_strbuf_destroy(&b.turn.reasoning);
                 return st;
             }
             st = session_msg_finish_assistant(sess, text, b.turn.tool_calls,
@@ -315,6 +427,7 @@ puci_status puci_agent_run_turn(puci_session *sess, const char *msg) {
             b.turn.ntool_calls = 0;
             b.turn.tool_calls_cap = 0;
             puci_strbuf_destroy(&b.turn.text);
+            puci_strbuf_destroy(&b.turn.reasoning);
             if (st != PUCI_OK) {
                 for (size_t i = 0; i < nresults; i++) {
                     free(results[i].content);
@@ -341,11 +454,13 @@ puci_status puci_agent_run_turn(puci_session *sess, const char *msg) {
         st = session_msg_begin(sess, PUCI_ROLE_ASSISTANT, NULL);
         if (st != PUCI_OK) {
             puci_strbuf_destroy(&b.turn.text);
+            puci_strbuf_destroy(&b.turn.reasoning);
             return st;
         }
         session_msg_finish_assistant(sess, text, NULL, 0);
         done_text = sess->messages[sess->nmessages - 1].content;
         puci_strbuf_destroy(&b.turn.text);
+        puci_strbuf_destroy(&b.turn.reasoning);
         break;
     }
 

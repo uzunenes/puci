@@ -14,6 +14,45 @@
 
 #include "tools/tools_internal.h"
 
+/* Replaces every occurrence of a secret substring in the byte string data
+ * (NUL-terminated, up to full is read up to the first NUL and written back
+ * in place) with asterisks of equal length (>=1) so the output never grows and
+ * never leaks the secret. Returns the new length. */
+static size_t redact_one(char *data, size_t cap, const char *secret) {
+    size_t slen = strlen(secret);
+    if (slen == 0) {
+        return strlen(data);
+    }
+    size_t out = 0;
+    size_t dlen = strlen(data);
+    size_t i = 0;
+    while (i < dlen && out < cap) {
+        if (out + slen < cap && dlen - i >= slen && memcmp(data + i, secret, slen) == 0) {
+            for (size_t k = 0; k < slen && out < cap; k++, out++) {
+                data[out] = '*';
+            }
+            i += slen;
+        } else {
+            data[out++] = data[i++];
+        }
+    }
+    if (out < cap) {
+        data[out] = '\0';
+    }
+    return out;
+}
+
+static void redact_in_place(puci_context *ctx, char *buf, size_t cap) {
+    if (!ctx || ctx->nsecrets == 0) {
+        return;
+    }
+    for (size_t s = 0; s < ctx->nsecrets; s++) {
+        if (ctx->secrets[s] && ctx->secrets[s][0]) {
+            redact_one(buf, cap, ctx->secrets[s]);
+        }
+    }
+}
+
 void puci_logf(puci_context *ctx, puci_log_level level, const char *fmt, ...) {
     if (!ctx || !ctx->log_cb || level < ctx->log_level) {
         return;
@@ -23,7 +62,39 @@ void puci_logf(puci_context *ctx, puci_log_level level, const char *fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
+    redact_in_place(ctx, buf, sizeof(buf));
     ctx->log_cb(ctx->log_userdata, level, buf);
+}
+
+/* Registers a credential value to be redacted from all log output. The value
+ * is copied. Duplicate or empty values are ignored. */
+void puci_secret_add(puci_context *ctx, const char *value) {
+    if (!ctx || !value || !value[0]) {
+        return;
+    }
+    for (size_t i = 0; i < ctx->nsecrets; i++) {
+        if (ctx->secrets[i] && strcmp(ctx->secrets[i], value) == 0) {
+            return;
+        }
+    }
+    if (ctx->nsecrets == ctx->secrets_cap) {
+        size_t ncap = ctx->secrets_cap ? ctx->secrets_cap * 2 : 8;
+        char **ns = (char **)puci_alloc_malloc(&ctx->alloc, ncap * sizeof(char *));
+        if (!ns) {
+            return;
+        }
+        if (ctx->secrets) {
+            memcpy(ns, ctx->secrets, ctx->nsecrets * sizeof(char *));
+            puci_alloc_free(&ctx->alloc, ctx->secrets);
+        }
+        ctx->secrets = ns;
+        ctx->secrets_cap = ncap;
+    }
+    char *copy = puci_alloc_strdup(&ctx->alloc, value);
+    if (!copy) {
+        return;
+    }
+    ctx->secrets[ctx->nsecrets++] = copy;
 }
 
 static void set_err(puci_context *ctx, const char *msg) {
@@ -33,6 +104,69 @@ static void set_err(puci_context *ctx, const char *msg) {
     }
     if (msg) {
         ctx->errmsg = puci_alloc_strdup(&ctx->alloc, msg);
+    }
+}
+
+static void add_insecure_host(puci_context *ctx, const char *host) {
+    if (!host || !host[0]) {
+        return;
+    }
+    if (ctx->ninsecure_hosts == ctx->insecure_hosts_cap) {
+        size_t ncap = ctx->insecure_hosts_cap ? ctx->insecure_hosts_cap * 2 : 8;
+        char **nh = (char **)puci_alloc_malloc(&ctx->alloc, ncap * sizeof(char *));
+        if (!nh) {
+            return;
+        }
+        if (ctx->insecure_hosts) {
+            memcpy(nh, ctx->insecure_hosts, ctx->ninsecure_hosts * sizeof(char *));
+            puci_alloc_free(&ctx->alloc, ctx->insecure_hosts);
+        }
+        ctx->insecure_hosts = nh;
+        ctx->insecure_hosts_cap = ncap;
+    }
+    char *copy = puci_alloc_strdup(&ctx->alloc, host);
+    if (!copy) {
+        return;
+    }
+    ctx->insecure_hosts[ctx->ninsecure_hosts++] = copy;
+}
+
+/* Reads the comma-separated PUCI_INSECURE_TLS_HOSTS allowlist into the context.
+ * This is the opt-in mechanism that gates TLS verification relaxation. */
+static void load_insecure_hosts_from_env(puci_context *ctx) {
+    const char *v = getenv("PUCI_INSECURE_TLS_HOSTS");
+    if (!v || !v[0]) {
+        return;
+    }
+    const char *p = v;
+    while (*p) {
+        while (*p == ',') {
+            p++;
+        }
+        const char *start = p;
+        while (*p && *p != ',') {
+            p++;
+        }
+        size_t n = (size_t)(p - start);
+        while (n > 0 && (start[n - 1] == ' ' || start[n - 1] == '\t')) {
+            n--;
+        }
+        while (n > 0 && (*start == ' ' || *start == '\t')) {
+            start++;
+            n--;
+        }
+        if (n > 0) {
+            /* Strip any scheme prefix like "https://". */
+            const char *slash = memchr(start, '/', n);
+            if (slash) {
+                n = (size_t)(slash - start);
+            }
+            char *host = puci_alloc_strndup(&ctx->alloc, start, n);
+            if (host) {
+                add_insecure_host(ctx, host);
+                puci_alloc_free(&ctx->alloc, host);
+            }
+        }
     }
 }
 
@@ -71,6 +205,8 @@ puci_status puci_context_create(const puci_context_options *opts,
         puci_context_destroy(ctx);
         return st;
     }
+
+    load_insecure_hosts_from_env(ctx);
 
     *out = ctx;
     return PUCI_OK;
@@ -154,6 +290,22 @@ void puci_context_destroy(puci_context *ctx) {
     free_tools(ctx);
     free_providers(ctx);
     free_configs(ctx);
+    for (size_t i = 0; i < ctx->ninsecure_hosts; i++) {
+        if (ctx->insecure_hosts[i]) {
+            puci_alloc_free(&ctx->alloc, ctx->insecure_hosts[i]);
+        }
+    }
+    if (ctx->insecure_hosts) {
+        puci_alloc_free(&ctx->alloc, ctx->insecure_hosts);
+    }
+    for (size_t i = 0; i < ctx->nsecrets; i++) {
+        if (ctx->secrets[i]) {
+            puci_alloc_free(&ctx->alloc, ctx->secrets[i]);
+        }
+    }
+    if (ctx->secrets) {
+        puci_alloc_free(&ctx->alloc, ctx->secrets);
+    }
     if (ctx->errmsg) {
         puci_alloc_free(&ctx->alloc, (void *)ctx->errmsg);
     }
@@ -248,6 +400,10 @@ puci_status puci_context_set_provider(puci_context *ctx,
     slot->name = name;
     slot->base_url = base;
     slot->api_key = key;
+    /* Credentials must never reach a log callback, including header dumps. */
+    if (slot->api_key) {
+        puci_secret_add(ctx, slot->api_key);
+    }
     slot->model = model;
     slot->extra_headers = extra;
     slot->timeout_ms = config->timeout_ms;

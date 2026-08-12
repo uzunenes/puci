@@ -90,6 +90,17 @@ static puci_status parse_stream(const puci_session *sess, puci_arena *scratch,
                 return PUCI_ERR_NOMEM;
             }
         }
+        /* Reasoning content, if the model emits it separately, is accumulated
+         * into its own buffer so it can be surfaced as distinct events and is
+         * never concatenated into the final answer text. */
+        pj_val *reasoning = pj_get(delta, "reasoning_content");
+        if (reasoning && reasoning->type == PJ_STR) {
+            turn->had_reasoning = 1;
+            if (puci_strbuf_append(&turn->reasoning, reasoning->u.str.s,
+                                   reasoning->u.str.len) != PUCI_OK) {
+                return PUCI_ERR_NOMEM;
+            }
+        }
         pj_val *tool_calls = pj_get(delta, "tool_calls");
         if (tool_calls && tool_calls->type == PJ_ARR) {
             turn->had_tool_calls = 1;

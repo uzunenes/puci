@@ -77,6 +77,26 @@ int puci_cli_run(int argc, char **argv) {
         model = "gpt-4o-mini";
     }
 
+    /* Live-robustness overrides. TLS always verifies by default; relaxation is
+     * only possible when the user explicitly opts in via PUCI_TLS_VERIFY=0 AND
+     * the host is allowlisted through PUCI_INSECURE_TLS_HOSTS. */
+    const char *cafile = getenv("PUCI_CA_BUNDLE");
+    const char *extra = getenv("PUCI_EXTRA_BODY");
+    const char *tls = getenv("PUCI_TLS_VERIFY");
+    int tls_verify = 1;
+    if (tls && *tls && (strcmp(tls, "0") == 0 || strcmp(tls, "false") == 0 ||
+                        strcmp(tls, "off") == 0)) {
+        tls_verify = 0;
+    }
+    const char *idle = getenv("PUCI_STREAM_IDLE_TIMEOUT_SECS");
+    int idle_ms = 0;
+    if (idle && *idle) {
+        long secs = strtol(idle, NULL, 10);
+        if (secs > 0 && secs <= 2147483) {
+            idle_ms = (int)(secs * 1000);
+        }
+    }
+
     puci_context *ctx = NULL;
     if (puci_context_create(NULL, &ctx) != PUCI_OK) {
         fprintf(stderr, "puci: failed to create context\n");
@@ -90,6 +110,10 @@ int puci_cli_run(int argc, char **argv) {
         .api_key = key,
         .model = model,
         .timeout_ms = 120000,
+        .tls_verify = tls_verify,
+        .stream_idle_timeout_ms = idle_ms,
+        .ca_bundle = cafile,
+        .extra_body = extra,
     };
     puci_status st = puci_context_set_provider(ctx, &pcfg);
     if (st != PUCI_OK) {

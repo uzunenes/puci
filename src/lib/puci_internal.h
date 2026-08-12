@@ -93,10 +93,12 @@ struct puci_provider {
 
 struct puci_turn {
     puci_strbuf text;          /* accumulated assistant text */
+    puci_strbuf reasoning;     /* accumulated reasoning content (kept separate) */
     puci_internal_tool_call *tool_calls; /* tool calls being assembled */
     size_t ntool_calls;
     size_t tool_calls_cap;
     int had_tool_calls;
+    int had_reasoning;
     int stream_done;           /* [DONE] or finish_reason seen */
     int finish_reason_stop;    /* normal stop */
 };
@@ -156,6 +158,18 @@ struct puci_context {
     puci_tool **tools;
     size_t ntools;
     size_t tools_cap;
+
+    /* Hosts for which TLS verification may be relaxed (opt-in allowlist).
+     * Populated from PUCI_INSECURE_TLS_HOSTS and/or config. */
+    char **insecure_hosts;
+    size_t ninsecure_hosts;
+    size_t insecure_hosts_cap;
+
+    /* Credential values to redact (replace with "***") before any string
+     * reaches a log callback, including HTTP header dumps. */
+    char **secrets;
+    size_t nsecrets;
+    size_t secrets_cap;
 };
 
 /* ------------------------------------------------------------------ */
@@ -189,6 +203,8 @@ typedef struct puci_json puci_json;
 
 /* core/context.c - logging */
 void puci_logf(struct puci_context *ctx, puci_log_level level, const char *fmt, ...);
+/* Registers a credential value to be redacted from log output. */
+void puci_secret_add(struct puci_context *ctx, const char *value);
 
 /* tools/ internal registry helpers shared with built-in tools */
 int puci_tools_lookup(struct puci_context *ctx, const char *name,

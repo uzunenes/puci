@@ -89,6 +89,11 @@ typedef enum puci_event {
     PUCI_EVENT_TURN_COMPLETE,
     /** An error occurred. ctx = const char* (message). */
     PUCI_EVENT_ERROR,
+    /** A reasoning/thinking delta from a reasoning model, surfaced separately
+     *  from the final answer so consumers may display or discard it. Never
+     *  concatenated into the answer text. ctx = const char* (recent delta text);
+     *  consumers accumulate across deltas. */
+    PUCI_EVENT_REASONING_DELTA,
 } puci_event;
 
 /** A tool call being executed by the agent loop. */
@@ -113,6 +118,24 @@ typedef struct puci_provider_config {
     const char *model;      /**< model identifier */
     int timeout_ms;         /**< per-request timeout in ms, 0 = default */
     const char *extra_headers; /**< optional JSON object of extra HTTP headers */
+
+    /* New fields (keep appended; extending a public struct is ABI-visible). */
+
+    /** Set to 0 to explicitly allow TLS verification relaxation for this
+     *  provider's host. Default is 1 (verify). Relaxing TLS is a MITM risk and
+     *  must be gated behind a host allowlist (see PUCI_INSECURE_TLS_HOSTS) and
+     *  never enabled silently. */
+    int tls_verify;
+    /** Path to a custom CA bundle (PEM) used instead of the default store.
+     *  The preferred alternative to disabling verification. May be NULL. */
+    const char *ca_bundle;
+    /** JSON object string of extra TOP-LEVEL request fields merged verbatim
+     *  into the request body. Keys here override generated fields. May be NULL. */
+    const char *extra_body;
+    /** Idle/stream timeout in ms: if no bytes arrive within this window the
+     *  request is aborted with a distinct idle-timeout error. 0 = default
+     *  (180000 ms). */
+    int stream_idle_timeout_ms;
 } puci_provider_config;
 
 /** Options passed to puci_context_create. Zero-init and set only what you need. */
