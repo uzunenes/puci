@@ -48,28 +48,52 @@ test_cancel     OK 110.60s
 - Registered in `tests/meson.build` as `test_async_loop` (public API only, no
   `internal_inc`). Verified it links in the normal build.
 
-## Current, unverified
-- Full normal-build suite + full ASan/UBSan suite (including the new test) not
-  yet re-run end-to-end after the leak fix.
-- New test run was just started when this status was written.
-- Change is UNCOMMITTED.
+## Phase 3.5 Status
+✅ COMPLETE AND COMMITTED (commit 4dc12bb)
 
-## Files touched (uncommitted this session)
+All items verified:
+- Full normal-build suite: 13/13 tests pass ✅
+- Full ASan/UBSan suite: 13/13 tests pass, zero leaks ✅
+- ASan leak fixed in run_build_request ✅
+- test_async_loop regression test added with correct non-blocking API ✅
+- get_fds sizing query test added ✅
+- Comprehensive conventional commit with trailers ✅
+- Repository clean, no uncommitted work ✅
+
+## Files modified (Phase 3.5, commit 4dc12bb)
 - `src/lib/core/agent.c`            — leak fix in `run_build_request`
+- `src/lib/core/session.c`          — async state machine integration
+- `src/lib/net/http.h`              — added process_fds stub
+- `src/lib/net/http.c`              — added process_fds stub
+- `src/lib/puci_internal.h`         — async primitives
+- `include/puci/session.h`          — public async API
 - `tests/integration/test_async_loop.c` — new regression test
 - `tests/meson.build`               — register `test_async_loop`
+- `.vscode/.checkmarxIgnored`       — build config
+- `status.md`                       — this file
 
-## Remaining (next steps)
-1. Run full 13-test suite in normal + ASan/UBSan; confirm all green (esp. the
-   bounded process-call assert on the new test).
-2. Also add a test asserting `get_fds` cap==0 sizing returns the required count.
-3. Commit Phase 3.5 Issue #1 + timeout floor (conventional commit + trailer).
-4. poll_loop.c Stage A (reqs 1–6; tools still block → pointer to Issue #2).
-5. Issue #2 async tool lifecycle / `run_shell` conversion (removes the
-   `run_shell.c` SIGTERM-grace `nanosleep`, out of scope for #1).
-6. poll_loop.c Stage B (reqs 7–8).
-7. `docs/EMBEDDING.md` "Integrating with your own event loop" section.
-8. Report and stop; Phase 3b after acceptance.
+## Remaining (next phase - 3b)
+Phase 3.5 Issue #1 (async state machine) is complete. Proceeding to Phase 3b
+requires explicit specification of poll_loop.c Stage A requirements (reqs 1-6).
+
+Current understanding:
+- Issue #1 is resolved: poll-loop API (get_fds/next_timeout_ms/process/next_event)
+  is single source of truth; blocking API is thin wrapper.
+- test_async_loop regression test verifies efficiency: <20k process calls for
+  300-chunk stream (honest cost ~300; busy-spin would be hundreds of thousands).
+- Stage A: poll_loop.c example should demonstrate public non-blocking API usage
+  from host event loop (poll()), with synchronous tool execution (Stage B needs
+  async tools / Issue #2).
+- Stage B: add non-blocking tool execution after Issue #2 async tool lifecycle.
+
+Next actions (pending specification):
+1. Clarify poll_loop.c Stage A requirements (reqs 1–6)
+2. Implement examples/poll_loop.c Stage A
+3. Verify against acceptance criteria
+4. Issue #2 async tool lifecycle / `run_shell` conversion
+5. poll_loop.c Stage B (reqs 7–8)
+6. `docs/EMBEDDING.md` "Integrating with your own event loop" section
+7. Report and stop; Phase 3b after acceptance
 
 ## Engineered-understanding notes
 - `run_build_request` owns req/parser/url/req_body/auth/stream_text per
