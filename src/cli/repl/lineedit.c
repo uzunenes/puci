@@ -34,6 +34,9 @@ struct ledit {
 
     struct termios orig;
     int raw; /* 1 if raw mode is active */
+
+    /* The raw termios currently applied (used to re-apply after a suspend). */
+    struct termios rawset;
 };
 
 static ledit *ledit_alloc(void) {
@@ -125,7 +128,9 @@ static int enable_raw(ledit *ed) {
     if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) != 0) {
         return -1;
     }
+    ed->rawset = raw;
     ed->raw = 1;
+    ledit_arm_restore(ed);
     return 0;
 }
 
@@ -133,6 +138,36 @@ static void restore(ledit *ed) {
     if (ed->raw) {
         tcsetattr(STDIN_FILENO, TCSANOW, &ed->orig);
         ed->raw = 0;
+        ledit_arm_restore(ed);
+    }
+}
+
+/* ---- process-global terminal restoration snapshot ---- */
+
+static struct termios g_orig;
+static struct termios g_rawset;
+static int g_raw_active;
+
+void ledit_arm_restore(ledit *ed) {
+    if (ed && ed->raw) {
+        g_orig = ed->orig;
+        g_rawset = ed->rawset;
+        g_raw_active = 1;
+    } else if (ed) {
+        g_raw_active = 0;
+    }
+}
+
+void ledit_restore_global(void) {
+    if (g_raw_active) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &g_orig);
+        g_raw_active = 0;
+    }
+}
+
+void ledit_resume_global(void) {
+    if (g_raw_active) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &g_rawset);
     }
 }
 

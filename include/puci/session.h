@@ -71,9 +71,41 @@ puci_status puci_session_poll(puci_session *sess);
  *  only valid until the next call to a session function. */
 int puci_session_poll_fd(const puci_session *sess);
 
-/** Requests cancellation of any in-flight work on the session. Safe to call
- *  from any thread. Returns PUCI_ERR_OUT_OF_STATE if the session is idle. */
+/** Requests cancellation of any in-flight work on the session.
+ *
+ *  Async-signal-safe: this may be called from a signal handler or any thread.
+ *  It is guaranteed not to allocate, lock, call into libcurl, or block; all it
+ *  does is set a `volatile sig_atomic_t` flag and, if the session has a cancel
+ *  fd, write a single byte to it. See puci_session_cancel_fd.
+ *
+ *  Returns PUCI_OK. Calling it on an idle session (no in-flight turn) is a
+ *  harmless no-op that returns success, not an error. When a turn is in flight,
+ *  the session's driver thread observes the request at the next cancellation
+ *  point, stops, and finishes with PUCI_ERR_CANCELLED. */
 puci_status puci_session_cancel(puci_session *sess);
+
+/** Returns a file descriptor that becomes readable (and may be read to drain)
+ *  when puci_session_cancel has been called while a turn is in flight. This is
+ *  the read end of an eventfd (Linux) or self-pipe (elsewhere), marked
+ *  O_NONBLOCK and FD_CLOEXEC. It lets an external event loop observe
+ *  cancellation without spinning on the flag: select/poll/epoll on it, and on
+ *  readability treat the in-flight request as cancelled.
+ *
+ *  The fd is owned by the session, remains valid until the session is
+ *  destroyed, and is shared by cancel requests across turns. Reading from it
+ *  drains the pending notification but does not cancel again. Returns -1 if the
+ *  session has no cancel fd (e.g. the fd could not be created). */
+int puci_session_cancel_fd(puci_session *sess);
+
+/** Validates the session's message history invariants, primarily that every
+ *  assistant tool call has a matching tool result immediately following it (no
+ *  dangling tool_call_id, which OpenAI-compatible endpoints reject on the next
+ *  turn). Returns PUCI_OK if the history is consistent, or PUCI_ERR_PROTOCOL
+ *  (with puci_session_error set) if an invariant is violated. This is a
+ *  diagnostic/sanity helper; the engine maintains these invariants itself
+ *  (including synthesising results for dangling calls on cancellation), so a
+ *  non-cancelled well-behaved session always validates. */
+puci_status puci_session_validate(const puci_session *sess);
 
 /** Returns cumulative token usage reported by the provider across the whole
  *  session. Any value may be left NULL to ignore it. Counts default to 0 when

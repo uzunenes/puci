@@ -35,7 +35,9 @@ typedef struct arun {
     puci_approval decision;
 } arun;
 
-static int approve_me_invoke(void *ud, const char *args_json, char **out) {
+static int approve_me_invoke(void *ud, const puci_cancel_token *cancel,
+                             const char *args_json, char **out) {
+    (void)cancel;
     (void)args_json;
     arun *a = (arun *)ud;
     a->ran = 1;

@@ -34,6 +34,8 @@ const char *puci_event_name(puci_event event) {
         return "error";
     case PUCI_EVENT_REASONING_DELTA:
         return "reasoning_delta";
+    case PUCI_EVENT_TURN_CANCELLED:
+        return "turn_cancelled";
     }
     return "unknown";
 }

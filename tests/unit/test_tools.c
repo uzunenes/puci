@@ -7,15 +7,19 @@
 
 #include "../test_util.h"
 
-static int invoke_echo(void *ud, const char *args_json, char **out) {
+static int invoke_echo(void *ud, const puci_cancel_token *cancel,
+                       const char *args_json, char **out) {
     (void)ud;
+    (void)cancel;
     (void)args_json;
     *out = strdup("echo-reply");
     return 0;
 }
 
-static int invoke_failing(void *ud, const char *args_json, char **out) {
+static int invoke_failing(void *ud, const puci_cancel_token *cancel,
+                          const char *args_json, char **out) {
     (void)ud;
+    (void)cancel;
     (void)args_json;
     (void)out;
     return 1;
@@ -60,7 +64,7 @@ static void test_custom_tool_via_registry_path(void) {
     CHECK(puci_tools_lookup(ctx, "echo_tool", &t) == 1);
     CHECK(t && t->invoke);
     char *res = NULL;
-    int rc = t->invoke(t->userdata, "{}", &res);
+    int rc = t->invoke(t->userdata, NULL, "{}", &res);
     CHECK(rc == 0);
     CHECK(res && strcmp(res, "echo-reply") == 0);
     free(res);
@@ -69,7 +73,7 @@ static void test_custom_tool_via_registry_path(void) {
     CHECK(puci_tool_register(ctx, &spec, invoke_failing, NULL) == PUCI_OK);
     CHECK(puci_tools_lookup(ctx, "echo_tool", &t) == 1);
     res = NULL;
-    rc = t->invoke(t->userdata, "{}", &res);
+    rc = t->invoke(t->userdata, NULL, "{}", &res);
     CHECK(rc == 1);
     if (res) {
         free(res);

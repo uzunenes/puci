@@ -301,7 +301,23 @@ static void destroy_approval_request(puci_approval_request *req) {
     }
 }
 
+/* Shared exit path when cancellation is detected: ensure the message history
+ * stays valid for the next turn (synthesise any missing tool results), emit the
+ * distinct cancelled event, and return PUCI_ERR_CANCELLED. */
+static puci_status agent_cancel_exit(puci_session *sess) {
+    (void)session_fixup_dangling_tool_calls(sess);
+    if (sess->event_cb) {
+        sess->event_cb(sess->event_userdata, sess, PUCI_EVENT_TURN_CANCELLED,
+                       NULL);
+    }
+    return PUCI_ERR_CANCELLED;
+}
+
 puci_status puci_agent_run_turn(puci_session *sess, const char *msg) {
+    /* The HTTP layer and run_shell select on the cancel fd, so make sure it
+     * exists before any blocking work can observe cancellation. */
+    session_ensure_cancel_fd(sess);
+
     puci_status st = session_msg_begin(sess, PUCI_ROLE_USER, msg);
     if (st != PUCI_OK) {
         return st;
@@ -321,7 +337,7 @@ puci_status puci_agent_run_turn(puci_session *sess, const char *msg) {
 
     while (iter < max_iter) {
         if (sess->cancelled) {
-            return PUCI_ERR_CANCELLED;
+            return agent_cancel_exit(sess);
         }
 
         /* Serialize messages once per round. */
@@ -424,7 +440,9 @@ puci_status puci_agent_run_turn(puci_session *sess, const char *msg) {
         hreq.log_cb = sess->ctx->log_cb;
         hreq.log_userdata = sess->ctx->log_userdata;
         hreq.log_level = sess->ctx->log_level;
-        st = puci_http_post_stream(&sess->alloc, &hreq, on_http_data, &b,
+        puci_cancel_token ctok;
+        session_build_cancel_token(sess, &ctok);
+        st = puci_http_post_stream(&sess->alloc, &hreq, &ctok, on_http_data, &b,
                                    &http_status, errbuf, sizeof(errbuf));
 
         /* Flush any trailing SSE event. */
@@ -435,6 +453,14 @@ puci_status puci_agent_run_turn(puci_session *sess, const char *msg) {
         puci_alloc_free(&sess->alloc, url);
         puci_strbuf_destroy(&req);
 
+        if (st == PUCI_ERR_CANCELLED) {
+            /* Cancelled during the request (connect, mid-stream, or a silent
+             * reasoning gap). Discard the partial turn; history stays valid. */
+            session_set_err(sess, "cancelled");
+            puci_strbuf_destroy(&b.turn.text);
+            puci_strbuf_destroy(&b.turn.reasoning);
+            return agent_cancel_exit(sess);
+        }
         if (st != PUCI_OK) {
             session_set_err(sess, errbuf[0] ? errbuf : "network error");
             puci_strbuf_destroy(&b.turn.text);
@@ -480,8 +506,17 @@ puci_status puci_agent_run_turn(puci_session *sess, const char *msg) {
             tresult *results = NULL;
             size_t nresults = 0;
             size_t results_cap = 0;
+            puci_cancel_token ctok;
+            session_build_cancel_token(sess, &ctok);
 
             for (size_t k = 0; k < b.turn.ntool_calls; k++) {
+                if (sess->cancelled) {
+                    /* Cancelled before (or during) tool execution. Stop running
+                     * further tools; the commit below still records everything
+                     * that already ran and the dangling-call fixup completes the
+                     * rest with a synthetic result. */
+                    break;
+                }
                 puci_internal_tool_call *slot = &b.turn.tool_calls[k];
                 if (slot->name.len == 0) {
                     continue;
@@ -521,8 +556,8 @@ puci_status puci_agent_run_turn(puci_session *sess, const char *msg) {
                         puci_arena_destroy(&ar);
                     }
                     if (run) {
-                        rcerr = tool->invoke(tool->userdata, pub.args_json,
-                                             &inv_res);
+                        rcerr = tool->invoke(tool->userdata, &ctok,
+                                             pub.args_json, &inv_res);
                     }
                     content = inv_res;
                     if (!content) {
@@ -605,6 +640,13 @@ puci_status puci_agent_run_turn(puci_session *sess, const char *msg) {
             free(results);
 
             iter++;
+            /* If cancellation was requested during/after tool execution, the
+             * assistant and committed results are already in the history and
+             * the fixup fills any dangling tool calls, so the session stays
+             * usable for the next turn. */
+            if (sess->cancelled) {
+                return agent_cancel_exit(sess);
+            }
             continue;
         }
 

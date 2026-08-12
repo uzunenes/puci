@@ -29,14 +29,23 @@ typedef struct puci_tool_spec {
 
 /** Custom tool invocation callback.
  *  @param userdata opaque pointer supplied at registration
+ *  @param cancel cancellation token for the in-flight turn. Use it to abort a
+ *         long-running or blocking tool (e.g. one that spawns a subprocess) when
+ *         the caller cancels: check `cancel->flag` and/or poll `cancel->fd`.
+ *         NEVER wait on or block inside the tool; the token is advisory. It is
+ *         non-NULL during a normal invocation and valid only for the duration of
+ *         the call. May be NULL if the engine was built without cancellation.
  *  @param args_json the tool arguments as JSON text (owned by session, valid
  *         for the duration of the call)
  *  @param out_result set to a NUL-terminated result string. On success the
  *         library copies it; on error set *out_result to NULL and return a
  *         non-zero status.
- *  @return 0 on success, non-zero on tool failure. */
-typedef int (*puci_tool_invoke_cb)(void *userdata, const char *args_json,
-                                   char **out_result);
+ *  @return 0 on success, non-zero on tool failure. If the tool aborts because
+ *         cancellation was requested, treat it as a normal tool error and set
+ *         *out_result to a JSON string describing the abort. */
+typedef int (*puci_tool_invoke_cb)(void *userdata,
+                                   const puci_cancel_token *cancel,
+                                   const char *args_json, char **out_result);
 
 /** Registers a custom tool with the context. The name, description, and
  *  schema strings are copied. If a tool with the same name already exists,

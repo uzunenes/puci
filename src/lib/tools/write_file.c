@@ -19,8 +19,9 @@
 
 /* Invoke callback: args_json = {"path": "...", "content": "..."}. Result is
  * allocated with malloc. */
-static int invoke_write(void *userdata, const char *args_json,
-                        char **out_result) {
+static int invoke_write(void *userdata, const puci_cancel_token *cancel,
+                        const char *args_json, char **out_result) {
+    (void)cancel;
     (void)userdata;
     *out_result = NULL;
 

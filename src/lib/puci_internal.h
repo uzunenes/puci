@@ -139,7 +139,15 @@ struct puci_session {
 
     puci_arena scratch;
     int running;
-    int cancelled;
+    /* Set (non-zero) by puci_session_cancel. volatile sig_atomic_t so it can be
+     * written from a signal handler (async-signal-safe). Read on the driver
+     * thread at every cancellation point. */
+    volatile sig_atomic_t cancelled;
+    /* Readable end of the cancel transport (eventfd on Linux, self-pipe
+     * elsewhere); -1 until first created. Written by puci_session_cancel. */
+    int cancel_fd;
+    /* Write end used to notify the transport. Equals cancel_fd for eventfd. */
+    int cancel_fd_write;
 
     char *errmsg; /* last error message, owned */
 };
@@ -207,6 +215,14 @@ puci_status session_msg_finish_assistant(puci_session *sess, const char *text,
 void session_set_err(puci_session *sess, const char *msg);
 puci_status session_serialize_messages(puci_session *sess, puci_strbuf *out);
 puci_status session_serialize_tools(puci_session *sess, puci_strbuf *out);
+
+/* Cancel transport helpers (core/session.c). */
+int session_ensure_cancel_fd(puci_session *sess);
+void session_build_cancel_token(puci_session *sess, puci_cancel_token *tok);
+/* Synthesises a tool result for every assistant tool call that is not followed
+ * by a matching tool result message, so the history stays valid for the next
+ * turn even after an interruption. Returns PUCI_OK or PUCI_ERR_NOMEM. */
+puci_status session_fixup_dangling_tool_calls(puci_session *sess);
 
 /* json/json.h helpers for message serialization */
 typedef struct puci_json puci_json;

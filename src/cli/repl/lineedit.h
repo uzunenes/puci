@@ -37,6 +37,26 @@ void ledit_history_add(ledit *ed, const char *line);
  * ledit_history_add with it when it is a real command. */
 int ledit_readline(ledit *ed, const char *prompt, char **out);
 
+/* ---- Terminal-restoration hooks for the host CLI ---------------------------
+ * The host may need to restore or re-apply raw mode from outside the editor:
+ * on exit (atexit), on a double-interrupt hard exit (signal handler), and on
+ * resume after suspend (SIGCONT). These use a process-global snapshot of the
+ * single active editor, which is the normal case for the puci REPL. */
+
+/* Refresh the global raw-mode snapshot from the editor (arm if raw is active,
+ * clear if not). Call after entering or leaving raw mode. */
+void ledit_arm_restore(ledit *ed);
+
+/* Restore the terminal to its original (cooked) settings if the snapshot
+ * recorded raw mode as active. Suitable for atexit and best-effort signal
+ * paths. Safe to call when no raw mode was active. */
+void ledit_restore_global(void);
+
+/* Re-apply raw mode if the snapshot recorded it as active. For SIGCONT: resume
+ * from a suspend restores the terminal to its original settings, so re-apply
+ * the raw termios to get back to the editing state. */
+void ledit_resume_global(void);
+
 /* If the terminal is not a TTY, the editor returns lines verbatim (no raw
  * mode), so puci still works piped (non-interactive). */
 

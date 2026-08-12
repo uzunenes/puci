@@ -18,9 +18,10 @@
 
 /* Custom tool callback: returns the current Unix time. args_json is parsed but
  * not required here. The result string must be allocated with malloc(). */
-static int invoke_greeting(void *userdata, const char *args_json,
-                           char **out_result) {
+static int invoke_greeting(void *userdata, const puci_cancel_token *cancel,
+                           const char *args_json, char **out_result) {
     (void)userdata;
+    (void)cancel;
     (void)args_json;
     /* A plausible tool result we might otherwise compose from real state. */
     char buf[128];

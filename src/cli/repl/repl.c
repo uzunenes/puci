@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #define DEFAULT_SYSTEM_PROMPT                         \
@@ -24,17 +25,66 @@
     "Use the provided tools when they are the right way. "\
     "For run_shell, always pass an explicit argv array."
 
-/* Session pointer for the SIGINT handler: cancel the in-flight turn when the
- * user hits Ctrl-C during a streaming answer. */
-static volatile sig_atomic_t g_interrupt = 0;
+/* ---- Signal handling ------------------------------------------------------
+ * libpuci never installs handlers; signal disposition is the CLI's job. The
+ * SIGINT handler cancels the in-flight turn (async-signal-safe inside the
+ * library), and a second Ctrl-C within 2s is a hard exit. SIGCONT re-applies
+ * raw mode after suspend/resume. The terminal is restored on all exit paths. */
+
 static volatile puci_session *g_cur_sess = NULL;
+static volatile long long g_last_sigint_ms = -1;
+
+static long long now_ms_ssafe(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
 static void on_sigint(int sig) {
     (void)sig;
-    g_interrupt = 1;
+    long long now = now_ms_ssafe();
+    if (g_last_sigint_ms >= 0 && (now - g_last_sigint_ms) < 2000) {
+        /* Second Ctrl-C within 2s: hard exit. Restore the terminal best
+         * effort then _exit — no graceful network teardown that could hang. */
+        ledit_restore_global();
+        _exit(130);
+    }
+    g_last_sigint_ms = now;
     if (g_cur_sess) {
         puci_session_cancel((puci_session *)g_cur_sess);
     }
+}
+
+static void on_sigcont(int sig) {
+    (void)sig;
+    /* On resume, the kernel restores the original termios; re-apply raw mode
+     * if it was active when we were suspended. */
+    ledit_resume_global();
+}
+
+static void install_signal_handlers(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_sigint;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART; /* restart interrupted blocking calls cleanly */
+    sigaction(SIGINT, &sa, NULL);
+
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_sigcont;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    sigaction(SIGCONT, &sa, NULL);
+
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = SIG_IGN;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGPIPE, &sa, NULL);
+
+    /* Restore the terminal on every normal exit path. The hard-exit path
+     * (double Ctrl-C) restores it directly in the signal handler. */
+    atexit(ledit_restore_global);
 }
 
 typedef struct repl {
@@ -68,6 +118,10 @@ static void on_event(void *ud, puci_session *sess, puci_event ev,
     case PUCI_EVENT_TURN_COMPLETE:
         fputs("\n", stdout);
         fflush(stdout);
+        break;
+    case PUCI_EVENT_TURN_CANCELLED:
+        fputs("\n[cancelled]\n", stderr);
+        fflush(stderr);
         break;
     default:
         break;
@@ -400,7 +454,7 @@ int puci_cli_repl(void) {
         }
     }
 
-    signal(SIGINT, on_sigint);
+    install_signal_handlers();
     recreate_session(&r);
 
     printf("puci REPL. /help for commands, /quit to exit.\n");
@@ -437,16 +491,17 @@ int puci_cli_repl(void) {
 
         ledit_history_add(r.ed, line);
 
-        g_interrupt = 0;
         g_cur_sess = r.sess;
         puci_status st = puci_session_send(r.sess, line);
         g_cur_sess = NULL;
 
         if (st != PUCI_OK) {
-            fprintf(stderr, "puci: %s\n", puci_status_string(st));
-            const char *err = puci_session_error(r.sess);
-            if (err) {
-                fprintf(stderr, "  %s\n", err);
+            if (st != PUCI_ERR_CANCELLED) {
+                fprintf(stderr, "puci: %s\n", puci_status_string(st));
+                const char *err = puci_session_error(r.sess);
+                if (err) {
+                    fprintf(stderr, "  %s\n", err);
+                }
             }
         }
         free(line);

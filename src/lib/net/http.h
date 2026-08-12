@@ -70,14 +70,22 @@ typedef struct puci_http_request {
  * On failure returns a negative puci_status with a distinguishing value:
  *  - PUCI_ERR_TIMEOUT    : either the total timeout or the idle timeout expired.
  *  - PUCI_ERR_NETWORK    : connection/TLS/transport failure.
+ *  - PUCI_ERR_CANCELLED  : cancel was requested (cancel flag set / fd readable)
+ *                          while the transfer was in progress.
  * A short human-readable message (which the agent loop refines further) is
  * written into err (up to errlen bytes) if err is non-NULL.
+ *
+ * cancel may be NULL; if provided it is polled (flag token and/or fd) so the
+ * transfer aborts promptly with PUCI_ERR_CANCELLED when the caller requests
+ * cancellation, at any point: during the connect/TLS handshake, mid-stream
+ * between chunks, or during a silent (reasoning) period.
  *
  * The standard NO_PROXY / no_proxy environment variables are honored: we never
  * override the proxy configuration, and curl's native proxy handling respects
  * the bypass list. */
 puci_status puci_http_post_stream(const puci_allocator *alloc,
                                   const puci_http_request *req,
+                                  const puci_cancel_token *cancel,
                                   puci_http_stream_cb data_cb, void *userdata,
                                   int *out_status, char *err, size_t errlen);
 

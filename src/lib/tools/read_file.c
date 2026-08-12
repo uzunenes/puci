@@ -21,7 +21,9 @@
 #define MAX_READ_BYTES ((size_t)8 * 1024 * 1024)
 
 /* Invoke callback: args_json = {"path": "..."}. Result alloc'd with malloc. */
-static int invoke_read(void *userdata, const char *args_json, char **out_result) {
+static int invoke_read(void *userdata, const puci_cancel_token *cancel,
+                       const char *args_json, char **out_result) {
+    (void)cancel;
     (void)userdata;
     *out_result = NULL;
 

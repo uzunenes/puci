@@ -4,9 +4,17 @@
 
 #include "puci_internal.h"
 
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "json/json.h"
+
+#ifdef __linux__
+#include <sys/eventfd.h>
+#endif
 
 /* --- Message lifecycle helpers (used by the agent loop) --- */
 
@@ -130,6 +138,8 @@ puci_status puci_session_create(const puci_context *ctx,
     }
     sess->ctx = (puci_context *)ctx;
     puci_alloc_resolve(&sess->alloc, &ctx->alloc);
+    sess->cancel_fd = -1;
+    sess->cancel_fd_write = -1;
 
     /* Copy provider config. Defaults resolve from the context's stored config
      * for the named provider. */
@@ -266,6 +276,13 @@ void puci_session_destroy(puci_session *sess) {
     if (sess->cfg.extra_body) {
         puci_alloc_free(&sess->alloc, (void *)sess->cfg.extra_body);
     }
+    /* Close the cancel transport (eventfd or self-pipe). */
+    if (sess->cancel_fd >= 0) {
+        close(sess->cancel_fd);
+    }
+    if (sess->cancel_fd_write >= 0 && sess->cancel_fd_write != sess->cancel_fd) {
+        close(sess->cancel_fd_write);
+    }
     puci_alloc_free(&sess->alloc, sess);
 }
 
@@ -309,14 +326,139 @@ int puci_session_poll_fd(const puci_session *sess) {
     return -1;
 }
 
+/* --- Cancellation transport --- */
+
+int session_ensure_cancel_fd(puci_session *sess) {
+    if (!sess) {
+        return -1;
+    }
+    if (sess->cancel_fd >= 0) {
+        return sess->cancel_fd;
+    }
+#ifdef __linux__
+    int fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    if (fd >= 0) {
+        sess->cancel_fd = fd;
+        sess->cancel_fd_write = fd; /* eventfd is single-fd; write == read fd */
+        return fd;
+    }
+#endif
+    /* Fallback: self-pipe (POSIX, any platform). */
+    int p[2];
+    if (pipe(p) != 0) {
+        return -1;
+    }
+    int fl = fcntl(p[0], F_GETFL, 0);
+    fcntl(p[0], F_SETFL, fl | O_NONBLOCK);
+    fl = fcntl(p[1], F_GETFL, 0);
+    fcntl(p[1], F_SETFL, fl | O_NONBLOCK);
+    (void)fcntl(p[0], F_SETFD, FD_CLOEXEC);
+    (void)fcntl(p[1], F_SETFD, FD_CLOEXEC);
+    sess->cancel_fd = p[0];
+    sess->cancel_fd_write = p[1];
+    return p[0];
+}
+
+void session_build_cancel_token(puci_session *sess, puci_cancel_token *tok) {
+    tok->flag = &sess->cancelled;
+    tok->fd = (sess->cancel_fd >= 0) ? sess->cancel_fd : -1;
+}
+
 puci_status puci_session_cancel(puci_session *sess) {
     if (!sess) {
         return PUCI_ERR_INVALID_ARG;
     }
-    if (!sess->running) {
-        return PUCI_ERR_OUT_OF_STATE;
-    }
+    /* Async-signal-safe body: set a volatile flag and, if the cancel transport
+     * exists, write one byte. No allocation, no locking, no libcurl. On an idle
+     * session this is a harmless no-op that returns success. */
     sess->cancelled = 1;
+    if (sess->cancel_fd_write >= 0) {
+#ifdef __linux__
+        (void)eventfd_write(sess->cancel_fd_write, 1);
+#else
+        static const char byte = 1;
+        (void)write(sess->cancel_fd_write, &byte, 1);
+#endif
+    }
+    return PUCI_OK;
+}
+
+int puci_session_cancel_fd(puci_session *sess) {
+    return session_ensure_cancel_fd(sess);
+}
+
+#define PUCI_CANCEL_RESULT "{\"ok\":false,\"error\":\"cancelled by user\"}"
+
+/* Synthesises a tool result for every assistant tool call not already followed
+ * by a matching tool-result message, keeping the history valid for the next
+ * turn even after an interruption (e.g. cancel before tools ran). */
+puci_status session_fixup_dangling_tool_calls(puci_session *sess) {
+    size_t n0 = sess->nmessages;
+    for (size_t i = 0; i < n0; i++) {
+        puci_msg *m = &sess->messages[i];
+        if (m->role != PUCI_ROLE_ASSISTANT || m->ntool_calls == 0) {
+            continue;
+        }
+        for (size_t k = 0; k < m->ntool_calls; k++) {
+            const char *id = m->tool_calls[k].id ? m->tool_calls[k].id : "";
+            int found = 0;
+            for (size_t p = i + 1; p < n0; p++) {
+                puci_msg *tm = &sess->messages[p];
+                if (tm->role != PUCI_ROLE_TOOL) {
+                    break;
+                }
+                if (tm->tool_call_id && strcmp(tm->tool_call_id, id) == 0) {
+                    found = 1;
+                    break;
+                }
+            }
+            if (found) {
+                continue;
+            }
+            /* Append a synthetic result. Appends land beyond n0 so they are not
+             * revisited; id and the tool_calls array it points into live on
+             * separate heap allocations and stay valid across the append. */
+            puci_status st = session_msg_begin(sess, PUCI_ROLE_TOOL,
+                                               PUCI_CANCEL_RESULT);
+            if (st != PUCI_OK) {
+                return st;
+            }
+            st = session_msg_set_tool_call_id(sess, id);
+            if (st != PUCI_OK) {
+                return st;
+            }
+        }
+    }
+    return PUCI_OK;
+}
+
+puci_status puci_session_validate(const puci_session *sess) {
+    if (!sess) {
+        return PUCI_ERR_INVALID_ARG;
+    }
+    for (size_t i = 0; i < sess->nmessages; i++) {
+        const puci_msg *m = &sess->messages[i];
+        if (m->role != PUCI_ROLE_ASSISTANT || m->ntool_calls == 0) {
+            continue;
+        }
+        for (size_t k = 0; k < m->ntool_calls; k++) {
+            const char *id = m->tool_calls[k].id ? m->tool_calls[k].id : "";
+            int found = 0;
+            for (size_t p = i + 1; p < sess->nmessages; p++) {
+                const puci_msg *tm = &sess->messages[p];
+                if (tm->role != PUCI_ROLE_TOOL) {
+                    break;
+                }
+                if (tm->tool_call_id && strcmp(tm->tool_call_id, id) == 0) {
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) {
+                return PUCI_ERR_PROTOCOL;
+            }
+        }
+    }
     return PUCI_OK;
 }
 

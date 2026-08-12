@@ -12,6 +12,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <signal.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -94,6 +95,10 @@ typedef enum puci_event {
      *  concatenated into the answer text. ctx = const char* (recent delta text);
      *  consumers accumulate across deltas. */
     PUCI_EVENT_REASONING_DELTA,
+    /** The current turn was cancelled by the caller (puci_session_cancel).
+     *  Distinct from PUCI_EVENT_ERROR so consumers can tell user intent from a
+     *  failure. The session remains usable for a subsequent turn. ctx = NULL. */
+    PUCI_EVENT_TURN_CANCELLED,
 } puci_event;
 
 /** A tool call being executed by the agent loop. */
@@ -137,6 +142,22 @@ typedef struct puci_provider_config {
      *  (180000 ms). */
     int stream_idle_timeout_ms;
 } puci_provider_config;
+
+/** Cancellation signalling shared across blocking operations (streaming HTTP,
+ *  tool execution). Filled in by the engine and passed to tool invoke callbacks
+ *  and the internal HTTP layer so a long-running operation can abort promptly
+ *  when the caller requests cancellation.
+ *
+ *  `flag`, when non-NULL, points to a `volatile sig_atomic_t` owned by the
+ *  library that is set (non-zero) once cancellation is requested. It may be
+ *  polled from the driver thread. `fd`, when >= 0, is a readable
+ *  eventfd/self-pipe that becomes readable on cancellation, suitable for
+ *  select/poll/epoll in a host event loop. Both may be read freely; a blocking
+ *  operation should treat either signal as "abort now". */
+typedef struct puci_cancel_token {
+    volatile sig_atomic_t *flag; /**< library-owned flag, set to non-zero on cancel; may be NULL */
+    int fd;                      /**< readable cancel fd, or -1 if none */
+} puci_cancel_token;
 
 /** Options passed to puci_context_create. Zero-init and set only what you need. */
 typedef struct puci_context_options {

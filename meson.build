@@ -40,7 +40,7 @@ endif
 add_project_arguments(c_args, language: 'c')
 
 # ---- Library ABI version (must match include/puci/version.h) ---------------
-PUCI_ABI_VERSION = 1
+PUCI_ABI_VERSION = 2
 
 # ---- Dependencies ---------------------------------------------------------
 curl_dep = dependency('libcurl')

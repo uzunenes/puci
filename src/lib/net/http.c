@@ -6,21 +6,27 @@
 
 #include <curl/curl.h>
 #include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "util/strbuf.h"
 
 /* Context delivered to curl's write + progress callbacks as WRITEDATA /
- * XFERINFODATA. */
+ * XFERINFODATA. Also carries the cancellation token so a blocked transfer can
+ * abort promptly. */
 typedef struct http_ctx {
     puci_http_stream_cb cb;
     void *ud;
     long long last_activity_ms;  /* monotonic ms of last received bytes */
     long long idle_timeout_ms;   /* 0 = disabled */
     int idle_timed_out;
+    const puci_cancel_token *cancel; /* may be NULL */
+    int cancelled;               /* latched when cancel observed */
 } http_ctx;
 
 static long long now_ms(void) {
@@ -29,9 +35,27 @@ static long long now_ms(void) {
     return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+/* Returns non-zero once cancellation has been requested. Safe to call from the
+ * driver thread and from curl callbacks on the same thread. Latches the flag so
+ * the caller can distinguish "cancelled" after the transfer returns. */
+static int cancel_pending(http_ctx *h) {
+    if (h->cancelled) {
+        return 1;
+    }
+    if (h->cancel && h->cancel->flag && *h->cancel->flag) {
+        h->cancelled = 1;
+        return 1;
+    }
+    return 0;
+}
+
 static size_t write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
     http_ctx *h = (http_ctx *)userdata;
     size_t total = size * nmemb;
+    if (cancel_pending(h)) {
+        /* Aborts the transfer with CURLE_WRITE_ERROR. */
+        return 0;
+    }
     if (total > 0) {
         h->last_activity_ms = now_ms();
         h->cb(h->ud, ptr, total);
@@ -49,6 +73,9 @@ static int xfer_cb(void *clientp, curl_off_t dltotal, curl_off_t dlnow,
     (void)ultotal;
     (void)ulnow;
     http_ctx *h = (http_ctx *)clientp;
+    if (cancel_pending(h)) {
+        return 1; /* abort the transfer */
+    }
     if (h->idle_timeout_ms > 0 &&
         now_ms() - h->last_activity_ms > h->idle_timeout_ms) {
         h->idle_timed_out = 1;
@@ -118,6 +145,7 @@ static int host_in_allowlist(const char *host, const char *const *hosts,
 
 puci_status puci_http_post_stream(const puci_allocator *alloc,
                                   const puci_http_request *req,
+                                  const puci_cancel_token *cancel,
                                   puci_http_stream_cb data_cb, void *userdata,
                                   int *out_status, char *err, size_t errlen) {
     if (!req || !req->url || !data_cb) {
@@ -138,6 +166,9 @@ puci_status puci_http_post_stream(const puci_allocator *alloc,
     curl_easy_setopt(curl, CURLOPT_URL, req->url);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "puci/" PUCI_VERSION_STRING);
+    /* Never let libcurl use signals for its timeouts (e.g. DNS). Signals are
+     * process-global and unsafe in a library and in threaded hosts. Required. */
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
 
     if (req->timeout_ms > 0) {
         curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (long)req->timeout_ms);
@@ -227,20 +258,111 @@ puci_status puci_http_post_stream(const puci_allocator *alloc,
         }
     }
 
-    /* Response delivery + idle timeout tracking. */
+    /* Response delivery + idle timeout tracking + cancellation. */
     http_ctx hctx;
     memset(&hctx, 0, sizeof(hctx));
     hctx.cb = data_cb;
     hctx.ud = userdata;
     hctx.last_activity_ms = now_ms();
     hctx.idle_timeout_ms = req->idle_timeout_ms > 0 ? req->idle_timeout_ms : 0;
+    hctx.cancel = cancel;
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &hctx);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, xfer_cb);
     curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &hctx);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
 
-    CURLcode rc = curl_easy_perform(curl);
+    /* Drive the transfer with the curl multi interface rather than the blocking
+     * easy interface, so we can also wait on the caller's cancel fd and abort
+     * promptly at any point (handshake, mid-stream, or silent reasoning gap),
+     * and so an external event loop can adopt the transfer (curl_multi_fdset). */
+    CURLM *multi = curl_multi_init();
+    if (!multi) {
+        curl_slist_free_all(hdr);
+        curl_easy_cleanup(curl);
+        return PUCI_ERR_UNKNOWN;
+    }
+    if (curl_multi_add_handle(multi, curl) != CURLM_OK) {
+        curl_multi_cleanup(multi);
+        curl_slist_free_all(hdr);
+        curl_easy_cleanup(curl);
+        return PUCI_ERR_UNKNOWN;
+    }
+
+    /* Bound each wait so idle-timeout and cancel-flag checks stay timely and we
+     * never block indefinitely on a silent (reasoning) stream. */
+    const long CAP_MS = 250;
+    int running = 1;
+    CURLcode rc = CURLE_OK;
+    while (running) {
+        if (hctx.idle_timeout_ms > 0 &&
+            now_ms() - hctx.last_activity_ms > hctx.idle_timeout_ms) {
+            hctx.idle_timed_out = 1;
+            rc = CURLE_ABORTED_BY_CALLBACK;
+            break;
+        }
+        if (cancel_pending(&hctx)) {
+            rc = CURLE_ABORTED_BY_CALLBACK;
+            break;
+        }
+
+        curl_multi_perform(multi, &running);
+
+        int msgs = 0;
+        CURLMsg *info;
+        while ((info = curl_multi_info_read(multi, &msgs)) != NULL) {
+            if (info->msg == CURLMSG_DONE) {
+                rc = info->data.result;
+                running = 0;
+            }
+        }
+        if (!running) {
+            break;
+        }
+
+        fd_set rfd, wfd, efd;
+        FD_ZERO(&rfd);
+        FD_ZERO(&wfd);
+        FD_ZERO(&efd);
+        int maxfd = -1;
+        curl_multi_fdset(multi, &rfd, &wfd, &efd, &maxfd);
+        int have_cancel = (cancel && cancel->fd >= 0);
+        if (have_cancel) {
+            FD_SET(cancel->fd, &rfd);
+            if (cancel->fd > maxfd) {
+                maxfd = cancel->fd;
+            }
+        }
+
+        long ctimeout_ms = -1;
+        curl_multi_timeout(multi, &ctimeout_ms);
+        long wait_ms = (ctimeout_ms >= 0) ? ctimeout_ms : -1;
+        long effective = (wait_ms < 0 || wait_ms > CAP_MS) ? CAP_MS : wait_ms;
+        struct timeval tv;
+        tv.tv_sec = effective / 1000;
+        tv.tv_usec = (long)(effective % 1000) * 1000;
+
+        int sret = select(maxfd + 1, &rfd, &wfd, &efd, &tv);
+        if (sret < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            rc = CURLE_READ_ERROR;
+            break;
+        }
+        if (have_cancel && FD_ISSET(cancel->fd, &rfd)) {
+            /* Cancel notify was signalled; confirm via the flag. */
+            if (cancel_pending(&hctx)) {
+                rc = CURLE_ABORTED_BY_CALLBACK;
+                break;
+            }
+        }
+    }
+
+    const int was_cancelled = cancel_pending(&hctx);
+
+    curl_multi_remove_handle(multi, curl);
+    curl_multi_cleanup(multi);
 
     long code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
@@ -251,6 +373,12 @@ puci_status puci_http_post_stream(const puci_allocator *alloc,
     curl_slist_free_all(hdr);
     curl_easy_cleanup(curl);
 
+    if (was_cancelled) {
+        if (err && errlen > 0) {
+            snprintf(err, errlen, "cancelled");
+        }
+        return PUCI_ERR_CANCELLED;
+    }
     if (rc != CURLE_OK) {
         const char *msg = errbuf[0] ? errbuf : curl_easy_strerror(rc);
         if (err && errlen > 0) {

@@ -4,8 +4,14 @@
  * Executes a command in a child process with an explicit argv array using
  * fork + execvp. `system()` is deliberately never used (shell injection
  * vector). stdout and stderr are captured through pipes, bounded, and returned
- * with the exit code. A timeout kills the child.
+ * with the exit code. A timeout or cancellation kills the child's process group.
  */
+
+/* killpg() needs _XOPEN_SOURCE, which the global -D_POSIX_C_SOURCE=200809L does
+ * not enable. Must precede any system header. */
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
+#endif
 
 #include "puci_internal.h"
 #include "tools/tools_internal.h"
@@ -54,8 +60,55 @@ static int bounded_append(puci_strbuf *buf, const char *data, size_t len) {
     return buf->len >= CAPTURE_CAP;
 }
 
-static int invoke_shell(void *userdata, const char *args_json,
-                        char **out_result) {
+static int cancel_requested(const volatile sig_atomic_t *flag) {
+    return flag && *flag;
+}
+
+/* Terminates the child's process group after cancellation: SIGTERM, wait up to
+ * grace_ms for it to exit, then SIGKILL, reaping so no zombie remains. All
+ * reaps handle EINTR. */
+static void terminate_group(pid_t pid, long grace_ms) {
+    (void)killpg(pid, SIGTERM);
+    long long deadline = now_ms() + grace_ms;
+    int ws;
+    for (;;) {
+        if (now_ms() >= deadline) {
+            break;
+        }
+        pid_t r = waitpid(pid, &ws, WNOHANG);
+        if (r == pid) {
+            return; /* reaped during the grace period */
+        }
+        if (r < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == ECHILD) {
+                return; /* already gone */
+            }
+            break;
+        }
+        /* Still running; give it a few ms and recheck the deadline. */
+        struct timespec ts = {0, 10 * 1000 * 1000}; /* 10 ms */
+        (void)nanosleep(&ts, NULL);
+    }
+    (void)killpg(pid, SIGKILL);
+    for (;;) {
+        pid_t r = waitpid(pid, &ws, 0);
+        if (r == pid || (r < 0 && errno == ECHILD)) {
+            break;
+        }
+        if (r < 0 && errno == EINTR) {
+            continue;
+        }
+        if (r < 0) {
+            break;
+        }
+    }
+}
+
+static int invoke_shell(void *userdata, const puci_cancel_token *cancel,
+                        const char *args_json, char **out_result) {
     (void)userdata;
     *out_result = NULL;
 
@@ -105,6 +158,19 @@ static int invoke_shell(void *userdata, const char *args_json,
         timeout_ms = 0;
     }
 
+    /* Grace period (ms) between SIGTERM and SIGKILL when the tool is
+     * cancelled. Default 2000. */
+    pj_val *gv = pj_get(root, "cancel_grace_ms");
+    long cancel_grace_ms = gv && gv->type == PJ_NUM ? (long)gv->u.num : 2000;
+    if (cancel_grace_ms < 0) {
+        cancel_grace_ms = 0;
+    }
+    /* Cancel signalling: the token may be NULL if the engine did not provide
+     * one; on ISIGless/raw hosts cancel only surfaces via the fd. */
+    const volatile sig_atomic_t *cancel_flag =
+        cancel ? cancel->flag : NULL;
+    int cancel_fd = (cancel && cancel->fd >= 0) ? cancel->fd : -1;
+
     int out_fds[2] = {-1, -1};
     int err_fds[2] = {-1, -1};
     if (pipe(out_fds) != 0 || pipe(err_fds) != 0) {
@@ -127,7 +193,9 @@ static int invoke_shell(void *userdata, const char *args_json,
     }
 
     if (pid == 0) {
-        /* Child. */
+        /* Child. Put the child in its own process group so running grandchildren
+         * can be signalled together on cancel (killpg). */
+        (void)setpgid(0, 0);
         close(out_fds[0]);
         close(err_fds[0]);
         if (dup2(out_fds[1], STDOUT_FILENO) < 0) {
@@ -150,6 +218,10 @@ static int invoke_shell(void *userdata, const char *args_json,
     close(err_fds[1]);
     free(argv);
 
+    /* Give the child its own process group from the parent side too, closing
+     * the window before the child's own setpgid() runs. */
+    (void)setpgid(pid, pid);
+
     set_nonblocking(out_fds[0]);
     set_nonblocking(err_fds[0]);
 
@@ -158,18 +230,22 @@ static int invoke_shell(void *userdata, const char *args_json,
     puci_strbuf_init(&out, NULL);
     puci_strbuf_init(&err, NULL);
 
-    struct pollfd fds[2] = {
-        {out_fds[0], POLLIN, 0},
-        {err_fds[0], POLLIN, 0},
-    };
+    struct pollfd fds[3];
     int status = -1;
     int timed_out = 0;
+    int was_cancelled = 0;
     int out_eof = 0;
     int err_eof = 0;
     long long deadline = timeout_ms > 0 ? now_ms() + (long long)timeout_ms : -1;
 
     while (1) {
-        /* Reap the child non-blocking. */
+        /* Cancellation may be requested from another thread / signal path at
+         * any moment, including mid-run. */
+        if (cancel_requested(cancel_flag)) {
+            was_cancelled = 1;
+            break;
+        }
+        /* Reap the child non-blocking (EINTR-safe). */
         int ws;
         pid_t r = waitpid(pid, &ws, WNOHANG);
         if (r == pid) {
@@ -187,6 +263,7 @@ static int invoke_shell(void *userdata, const char *args_json,
         if (!err_eof) {
             fds[nfds++] = (struct pollfd){err_fds[0], POLLIN, 0};
         }
+        fds[nfds++] = (struct pollfd){cancel_fd, POLLIN, 0};
         if (nfds == 0) {
             /* Everything EOF: wait for child. */
             waitpid(pid, &ws, 0);
@@ -220,18 +297,22 @@ static int invoke_shell(void *userdata, const char *args_json,
         }
 
         for (int i = 0; i < nfds; i++) {
-            int which = !out_eof ? 0 : 1;
             int fd = fds[i].fd;
             if (fds[i].revents & (POLLIN | POLLHUP | POLLERR)) {
+                if (fd == cancel_fd && cancel_fd >= 0) {
+                    was_cancelled = 1;
+                    break;
+                }
+                int is_out = (fd == out_fds[0]);
+                puci_strbuf *target = is_out ? &out : &err;
                 char buf[8192];
                 for (;;) {
                     ssize_t nr = read(fd, buf, sizeof(buf));
                     if (nr > 0) {
-                        puci_strbuf *target = (which == 0) ? &out : &err;
                         bounded_append(target, buf, (size_t)nr);
                     } else if (nr == 0) {
                         close(fd);
-                        if (which == 0) {
+                        if (is_out) {
                             out_eof = 1;
                         } else {
                             err_eof = 1;
@@ -249,6 +330,16 @@ static int invoke_shell(void *userdata, const char *args_json,
                 }
             }
         }
+        if (was_cancelled) {
+            break;
+        }
+    }
+
+    /* On cancellation, terminate the child's process group and reap it so no
+     * zombie (or surviving grandchild) is left behind. */
+    if (was_cancelled) {
+        terminate_group(pid, cancel_grace_ms);
+        status = 130; /* 128 + SIGINT, by convention */
     }
 
     /* Drain any leftover output after child exit. */
@@ -272,9 +363,11 @@ static int invoke_shell(void *userdata, const char *args_json,
     puci_strbuf res;
     puci_strbuf_init(&res, NULL);
     puci_strbuf_append_fmt(&res,
-                           "{\"ok\":true,\"exit_code\":%d,\"timed_out\":%s,"
-                           "\"stdout\":",
-                           status, timed_out ? "true" : "false");
+                           "{\"ok\":%s,\"exit_code\":%d,\"timed_out\":%s,"
+                           "\"cancelled\":%s,\"stdout\":",
+                           was_cancelled ? "false" : "true",
+                           status, timed_out ? "true" : "false",
+                           was_cancelled ? "true" : "false");
     puci_strbuf_append_json_string(&res, puci_strbuf_cstr(&out));
     puci_strbuf_appendz(&res, ",\"stderr\":");
     puci_strbuf_append_json_string(&res, puci_strbuf_cstr(&err));
