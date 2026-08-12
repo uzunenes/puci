@@ -6,11 +6,9 @@
 
 #include <curl/curl.h>
 #include <ctype.h>
-#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/select.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -320,43 +318,15 @@ puci_status puci_http_post_stream(const puci_allocator *alloc,
             break;
         }
 
-        fd_set rfd, wfd, efd;
-        FD_ZERO(&rfd);
-        FD_ZERO(&wfd);
-        FD_ZERO(&efd);
-        int maxfd = -1;
-        curl_multi_fdset(multi, &rfd, &wfd, &efd, &maxfd);
-        int have_cancel = (cancel && cancel->fd >= 0);
-        if (have_cancel) {
-            FD_SET(cancel->fd, &rfd);
-            if (cancel->fd > maxfd) {
-                maxfd = cancel->fd;
-            }
-        }
-
-        long ctimeout_ms = -1;
-        curl_multi_timeout(multi, &ctimeout_ms);
-        long wait_ms = (ctimeout_ms >= 0) ? ctimeout_ms : -1;
-        long effective = (wait_ms < 0 || wait_ms > CAP_MS) ? CAP_MS : wait_ms;
-        struct timeval tv;
-        tv.tv_sec = effective / 1000;
-        tv.tv_usec = (long)(effective % 1000) * 1000;
-
-        int sret = select(maxfd + 1, &rfd, &wfd, &efd, &tv);
-        if (sret < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
+        if (curl_multi_wait(multi, NULL, 0, CAP_MS, NULL) != CURLM_OK) {
             rc = CURLE_READ_ERROR;
             break;
         }
-        if (have_cancel && FD_ISSET(cancel->fd, &rfd)) {
-            /* Cancel notify was signalled; confirm via the flag. */
-            if (cancel_pending(&hctx)) {
-                rc = CURLE_ABORTED_BY_CALLBACK;
-                break;
-            }
-        }
+        /* Retry the loop: curl_multi_wait blocks up to CAP_MS for activity on
+         * the transfer's own fds, then wakes so the idle-timeout and cancel
+         * flag checks at the top stay timely even on a silent (reasoning)
+         * stream. Cancellation is also aborted promptly inside the write /
+         * progress callbacks. EINTR is handled internally by curl_multi_wait. */
     }
 
     const int was_cancelled = cancel_pending(&hctx);

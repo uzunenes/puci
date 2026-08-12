@@ -217,10 +217,12 @@ static void build_argv_display(puci_arena *arena, puci_strbuf *sb,
  * must be released by the caller via destroy_approval_request. */
 static void build_approval_request(puci_session *sess, const puci_tool_call *pub,
                                    puci_arena *arena,
-                                   puci_approval_request *req) {
+                                   puci_approval_request *req,
+                                   const puci_cancel_token *cancel) {
     memset(req, 0, sizeof(*req));
     req->tool = pub->name;
     req->args_json = pub->args_json;
+    req->cancel = cancel;
 
     if (strcmp(pub->name, "run_shell") == 0) {
         pj_val *root = NULL;
@@ -543,9 +545,20 @@ puci_status puci_agent_run_turn(puci_session *sess, const char *msg) {
                         puci_arena ar;
                         puci_approval_request apreq;
                         puci_arena_init(&ar, &sess->alloc, 0);
-                        build_approval_request(sess, &pub, &ar, &apreq);
-                        if (sess->approve_cb(&apreq, sess->approve_userdata) ==
-                            PUCI_APPROVAL_DENY) {
+                        build_approval_request(sess, &pub, &ar, &apreq, &ctok);
+                        int ap_cancelled = 0;
+                        if (sess->cancelled) {
+                            ap_cancelled = 1;
+                        }
+                        puci_approval ap = ap_cancelled
+                                               ? PUCI_APPROVAL_DENY
+                                               : sess->approve_cb(&apreq,
+                                                                  sess->approve_userdata);
+                        if (sess->cancelled) {
+                            ap_cancelled = 1;
+                        }
+                        if (!ap_cancelled &&
+                            ap == PUCI_APPROVAL_DENY) {
                             run = 0;
                             rcerr = 1;
                             inv_res = strdup(
@@ -554,6 +567,13 @@ puci_status puci_agent_run_turn(puci_session *sess, const char *msg) {
                         }
                         destroy_approval_request(&apreq);
                         puci_arena_destroy(&ar);
+                        if (ap_cancelled) {
+                            /* The host policy observed cancellation (or it was
+                             * requested while the policy ran). Stop the turn;
+                             * dangling calls will be fixed up on exit. */
+                            free(inv_res);
+                            break;
+                        }
                     }
                     if (run) {
                         rcerr = tool->invoke(tool->userdata, &ctok,

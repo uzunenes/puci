@@ -256,20 +256,23 @@ static int invoke_shell(void *userdata, const puci_cancel_token *cancel,
             break;
         }
 
-        int nfds = 0;
+        int npipe = 0;
         if (!out_eof) {
-            fds[nfds++] = (struct pollfd){out_fds[0], POLLIN, 0};
+            fds[npipe].fd = out_fds[0];
+            fds[npipe].events = POLLIN;
+            fds[npipe].revents = 0;
+            npipe++;
         }
         if (!err_eof) {
-            fds[nfds++] = (struct pollfd){err_fds[0], POLLIN, 0};
+            fds[npipe].fd = err_fds[0];
+            fds[npipe].events = POLLIN;
+            fds[npipe].revents = 0;
+            npipe++;
         }
-        fds[nfds++] = (struct pollfd){cancel_fd, POLLIN, 0};
-        if (nfds == 0) {
-            /* Everything EOF: wait for child. */
-            waitpid(pid, &ws, 0);
-            status = WIFEXITED(ws) ? WEXITSTATUS(ws) : (WIFSIGNALED(ws) ? 128 + WTERMSIG(ws) : 1);
-            break;
-        }
+        fds[npipe].fd = cancel_fd;
+        fds[npipe].events = POLLIN;
+        fds[npipe].revents = 0;
+        int nfds = npipe + 1;
 
         int to = -1;
         if (timeout_ms > 0) {
@@ -279,6 +282,13 @@ static int invoke_shell(void *userdata, const puci_cancel_token *cancel,
             } else {
                 to = rem > 0x7FFFFFFFLL ? 0x7FFFFFFF : (int)rem;
             }
+        } else if (npipe == 0) {
+            /* Both pipes reached EOF, so the child has closed its output. We
+             * have only the cancel fd left to wait on; poll in short slices so
+             * each iteration re-checks waitpid() and reaps the now-exiting
+             * child promptly, while a late cancellation stays responsive.
+             * Polling just the cancel fd with to=-1 would deadlock forever. */
+            to = 50;
         }
         int pr = poll(fds, (nfds_t)nfds, to);
         if (pr < 0) {

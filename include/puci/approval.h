@@ -53,6 +53,12 @@ typedef struct puci_approval_request {
     const char *diff;
     /** Nonzero if the target file already exists (the write would replace it). */
     int file_existed;
+    /** Cancellation token for the in-flight turn, so an interactive policy that
+     *  blocks waiting for input can select/poll on `cancel->fd` (and check
+     *  `cancel->flag`) to return promptly when the caller cancels. It is
+     *  non-NULL during a normal invocation and valid only for the duration of
+     *  the callback. See puci_session_cancel / puci_session_cancel_fd. */
+    const puci_cancel_token *cancel;
 } puci_approval_request;
 
 /** Approval policy callback.
