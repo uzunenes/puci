@@ -131,10 +131,16 @@ puci_status puci_session_next_timeout_ms(puci_session *sess, int *out_ms);
 puci_status puci_session_process(puci_session *sess,
                                  const struct pollfd *fds, size_t count);
 
-/** Dequeues one event produced by the last process() calls into *out, which is
- *  owned by the queue slot and freed before the next event is returned (the
- *  returned slot is only valid until the next call to next_event). Returns 1
- *  and fills *out, or 0 if the queue is empty. out must be non-NULL.
+/** Dequeues one event produced by the last process() calls into *out.
+ *
+ *  The `text` pointer is owned by the library and points into an internal
+ *  buffer belonging to the session. It remains valid until the next call to
+ *  `puci_session_next_event()` or `puci_session_process()` on the same
+ *  session, whichever happens first. Callers that need to retain the data
+ *  must copy it. The buffer is NUL-terminated for convenience, but `text_len`
+ *  is authoritative.
+ *
+ *  Returns 1 and fills *out, or 0 if the queue is empty. out must be non-NULL.
  *  The payload for each event type is interpreted the same way as in the
  *  event callback (see puci_event in types.h). */
 int puci_session_next_event(puci_session *sess, puci_event *out);

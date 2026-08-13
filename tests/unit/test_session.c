@@ -11,9 +11,9 @@ static void on_event(void *ud, puci_session *s, puci_event ev, const void *ctx) 
     (void)ud;
     (void)s;
     (void)ctx;
-    if (ev == PUCI_EVENT_TOKEN_DELTA) {
+    if (ev.kind == PUCI_EVENT_TOKEN_DELTA) {
         g_deltas++;
-    } else if (ev == PUCI_EVENT_TURN_COMPLETE) {
+    } else if (ev.kind == PUCI_EVENT_TURN_COMPLETE) {
         g_complete++;
     }
 }

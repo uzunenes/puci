@@ -58,7 +58,7 @@ static void on_event(void *ud, puci_session *sess, puci_event ev,
                      const void *ctx) {
     mevent *m = (mevent *)ud;
     (void)sess;
-    switch (ev) {
+    switch (ev.kind) {
     case PUCI_EVENT_TURN_CANCELLED:
         m->cancelled_events++;
         break;

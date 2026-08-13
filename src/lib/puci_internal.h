@@ -184,6 +184,17 @@ struct puci_session {
      * the teardown of `run`. Every string in a node is owned by the node. */
     struct puci_evnode *ev_head, *ev_tail;
 
+    /* Reusable buffer that backs the text pointers returned by
+     * puci_session_next_event(). One buffer per session (never per token).
+     * Reset (length zeroed, capacity retained) at the start of every
+     * next_event() and process() call before any new data is written, so a
+     * pointer handed out earlier is invalidated exactly as documented. The
+     * node's own payload storage is freed only after its text has been copied
+     * in here. Capacity retention makes steady-state delivery allocation-free. */
+    char *event_text_buf;
+    size_t event_text_len;
+    size_t event_text_cap;
+
     /* Terminal status of the most recently completed turn, retained until the
      * next turn begins. Read by puci_session_last_status. */
     puci_status last_status;
@@ -210,7 +221,7 @@ typedef enum puci_turn_state {
  * the consumer may keep it as long as it likes and free via
  * puci_agent_next_event (which frees the slot in-place). */
 typedef struct puci_evnode {
-    puci_event ev;
+    puci_event_kind ev;
     struct puci_evnode *next;
     /* TEXT payloads: single owned string (TOKEN_DELTA, REASONING_DELTA,
      * TURN_COMPLETE, ERROR). */
@@ -339,6 +350,9 @@ puci_status puci_agent_process(struct puci_session *sess,
                                const struct pollfd *fds, size_t count);
 int puci_agent_next_event(struct puci_session *sess, puci_event *out);
 int puci_agent_cancel_fd(struct puci_session *sess);
+/* Current capacity (bytes) of the session's reusable event text buffer. Test
+ * hook / internal accessor; not part of the public API. */
+size_t puci_session_event_text_cap(const struct puci_session *sess);
 /* Terminal status of the most recently completed turn. */
 puci_status puci_agent_last_status(const struct puci_session *sess);
 

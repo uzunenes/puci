@@ -37,11 +37,10 @@
 #include <string.h>
 #include <unistd.h>
 
-/* Print event summaries. Note: in the non-blocking API, event payloads
- * (like token text) are freed after next_event() returns and are not accessible
- * to the caller. For full text access use the blocking send() API. */
+/* Print event summaries. Event text payloads are owned by the session's
+ * reusable buffer and are valid until the next next_event()/process(). */
 static void handle_event(puci_event ev) {
-    switch (ev) {
+    switch (ev.kind) {
     case PUCI_EVENT_TOKEN_DELTA:
         fprintf(stderr, ".");
         fflush(stderr);
@@ -226,13 +225,13 @@ int main(void) {
 
             free(fds);
 
-            /* Drain queued events. In the non-blocking API, event payloads
-             * are not accessible; they are freed after next_event() returns. */
+            /* Drain queued events. Event text is valid until the next
+             * next_event()/process() call. */
             puci_event ev;
             while (puci_session_next_event(sess, &ev)) {
                 handle_event(ev);
 
-                if (ev == PUCI_EVENT_TURN_COMPLETE) {
+                if (ev.kind == PUCI_EVENT_TURN_COMPLETE) {
                     turn_done = 1;
                 }
             }

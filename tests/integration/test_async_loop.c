@@ -33,6 +33,11 @@
 
 #include "../test_util.h"
 
+/* Internal session headers for the buffer-capacity accessor used by the
+ * no-per-token-allocation test. The test meson target adds ../src/lib to the
+ * include path. libpuci is a static lib, so the headers come from source. */
+#include "puci_internal.h"
+
 /* Servers write the bound port as the first line on wfd, then exit. */
 static void write_all(int fd, const char *data, size_t len) {
     size_t off = 0;
@@ -140,7 +145,20 @@ static const char *k_chunk =
     "[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"t\"},"
     "\"finish_reason\":null}]}\n\n";
 
-static void stream_server(int wfd, int count, int delay_ms) {
+static const char *chunk_template =
+    "data: {\"id\":\"r\",\"object\":\"chat.completion.chunk\",\"choices\":"
+    "[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"%c\"},"
+    "\"finish_reason\":null}]}\n\n";
+
+/* Builds one SSE delta whose answer-content is a single char `c`. Same byte
+ * length as k_chunk for any single-char c, so the overall Content-Length is
+ * unchanged. */
+static size_t make_chunk(char c, char *dst, size_t cap) {
+    int n = snprintf(dst, cap, chunk_template, c);
+    return n > 0 ? (size_t)n : 0;
+}
+
+static void stream_server(int wfd, int count, int delay_ms, int distinct) {
     int port = 0;
     int srv = open_listener(&port);
     if (srv < 0) {
@@ -165,11 +183,20 @@ static void stream_server(int wfd, int count, int delay_ms) {
                       "Content-Length: %zu\r\nConnection: keep-alive\r\n\r\n",
                       total);
     write_all(c, head, (size_t)hn);
+    char chunk[256];
     for (int i = 0; i < count; i++) {
         if (delay_ms > 0) {
             msleep(delay_ms); /* force incremental streaming / poll wakes */
         }
-        write_all(c, k_chunk, cl);
+        if (distinct) {
+            size_t clen = make_chunk((char)('a' + (i % 26)), chunk,
+                                     sizeof(chunk));
+            /* chunk_template has the same byte length as k_chunk for any
+             * single-char content, so Content-Length stays exact. */
+            write_all(c, chunk, clen);
+        } else {
+            write_all(c, k_chunk, cl);
+        }
     }
     close(c);
     close(srv);
@@ -181,6 +208,8 @@ typedef struct counts {
     int completes;
     int errors;
     char *text;
+    size_t text_used;
+    size_t text_cap;
 } counts;
 
 static void test_bounded_process_calls(void) {
@@ -195,7 +224,7 @@ static void test_bounded_process_calls(void) {
     pid_t pid = fork();
     if (pid == 0) {
         close(pf[0]);
-        stream_server(pf[1], NCHUNKS, DELAY_MS);
+        stream_server(pf[1], NCHUNKS, DELAY_MS, 0);
     }
     close(pf[1]);
     char pbuf[32];
@@ -265,23 +294,36 @@ static void test_bounded_process_calls(void) {
         (void)st;
 
         /* Drain produced events. For the non-blocking API, events are
-         * delivered via next_event, not callbacks. Process them here. */
+         * delivered via next_event, not callbacks. Accumulate the streamed
+         * text from the text-delta events into a caller-owned buffer. */
         puci_event ev;
         while (puci_session_next_event(sess, &ev)) {
-            switch (ev) {
+            switch (ev.kind) {
             case PUCI_EVENT_TOKEN_DELTA: {
                 c.deltas++;
-                /* Note: in the non-blocking API, the event data is lost after
-                 * next_event() returns. For this test we just count deltas.
-                 * For text tracking, use the blocking API or implement a
-                 * separate callback delivery mechanism. */
+                /* ev.text is owned by the session and valid only until the
+                 * next next_event()/process() call; copy it out now. */
+                if (ev.text) {
+                    size_t add = ev.text_len;
+                    size_t nlen = c.text_used + add;
+                    if (nlen + 1 > c.text_cap) {
+                        size_t ncap = c.text_cap ? c.text_cap * 2 : 64;
+                        while (ncap < nlen + 1) {
+                            ncap *= 2;
+                        }
+                        char *nb = (char *)realloc(c.text, ncap);
+                        CHECK(nb != NULL);
+                        c.text = nb;
+                        c.text_cap = ncap;
+                    }
+                    memcpy(c.text + c.text_used, ev.text, add);
+                    c.text_used += add;
+                    c.text[c.text_used] = '\0';
+                }
                 break;
             }
             case PUCI_EVENT_TURN_COMPLETE:
                 completed = 1;
-                /* The final text should be available via
-                 * puci_session_get_history or similar; for now we verify
-                 * completion happened. */
                 break;
             case PUCI_EVENT_ERROR:
                 errored = 1;
@@ -302,20 +344,225 @@ static void test_bounded_process_calls(void) {
      * separates honest throttling from a spin. */
     CHECK(process_calls < 20000);
     CHECK(c.deltas == NCHUNKS);
-    /* Note: The non-blocking API does not provide access to event payloads
-     * (like the final text) via next_event(), as the data is freed after
-     * delivery. The blocking API (send) provides this via callbacks. For now
-     * we verify deltas were received and the turn completed. */
-    (void)c.text; /* unused in non-blocking mode */
+    /* Slice 1 test 1: text must arrive on the async path. All 300 chunks are
+     * single 't' deltas; assert the accumulated text is exactly 300 't's. */
+    CHECK(c.text != NULL);
+    CHECK(c.text_used == (size_t)NCHUNKS);
+    int all_ts = 1;
+    for (size_t i = 0; i < c.text_used; i++) {
+        if (c.text[i] != 't') {
+            all_ts = 0;
+            break;
+        }
+    }
+    CHECK(all_ts == 1);
+
+    puci_session_destroy(sess);
+    puci_context_destroy(ctx);
+    free(c.text);
+    kill(pid, SIGKILL);
+    waitpid(pid, NULL, 0);
+}
+
+/* ------------------------------------------------------------------ */
+/* Slice 1 tests: async-path text delivery, invalidation, no-alloc.    */
+/* ------------------------------------------------------------------ */
+
+/* Visit callback for drive_streaming_turn; return 1 to continue draining. */
+typedef int (*ev_visit)(void *ud, puci_session *sess, puci_event *ev);
+
+/* Drives one full streaming turn against a forked mock server streaming
+ * `nchunks` deltas (single char each), invoking `visit` for every drained
+ * event. Returns 0 on success, -1 on setup failure. */
+static int drive_streaming_turn(int nchunks, int delay_ms, int distinct,
+                                ev_visit visit, void *ud) {
+    int pf[2];
+    if (pipe(pf) != 0) {
+        return -1;
+    }
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(pf[0]);
+        stream_server(pf[1], nchunks, delay_ms, distinct);
+    }
+    close(pf[1]);
+    char pbuf[32];
+    ssize_t rd = read(pf[0], pbuf, sizeof(pbuf) - 1);
+    close(pf[0]);
+    if (rd <= 0) {
+        kill(pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+        return -1;
+    }
+    pbuf[rd] = '\0';
+    int port = atoi(pbuf);
+    char base_url[128];
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+
+    puci_context *ctx = NULL;
+    if (puci_context_create(NULL, &ctx) != PUCI_OK) {
+        kill(pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+        return -1;
+    }
+    puci_provider_config pcfg = {
+        .name = "openai",
+        .base_url = base_url,
+        .api_key = NULL,
+        .model = "mock-model",
+        .timeout_ms = 30000,
+    };
+    puci_context_set_provider(ctx, &pcfg);
+    puci_session_options sopts = {0};
+    sopts.provider = pcfg;
+    puci_session *sess = NULL;
+    if (puci_session_create(ctx, &sopts, &sess) != PUCI_OK) {
+        puci_context_destroy(ctx);
+        kill(pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+        return -1;
+    }
+
+    int bad = 0;
+    if (puci_session_begin_turn(sess, "say visit") != PUCI_OK) {
+        bad = 1;
+    }
+    int done = 0;
+    int guard = 0;
+    while (!bad && !done && guard++ < 1000000) {
+        int ms = -1;
+        puci_session_next_timeout_ms(sess, &ms);
+        struct pollfd fds[16];
+        size_t n = 0;
+        puci_session_get_fds(sess, fds, 16, &n);
+        int pt = ms < 0 ? 1000 : (ms > 1000 ? 1000 : ms);
+        if (n > 0) {
+            (void)poll(fds, (nfds_t)n, pt);
+        } else {
+            (void)poll(NULL, 0, pt);
+        }
+        (void)puci_session_process(sess, fds, n);
+        puci_event ev;
+        while (puci_session_next_event(sess, &ev)) {
+            if (visit && !visit(ud, sess, &ev)) {
+                bad = 1;
+            }
+            if (ev.kind == PUCI_EVENT_TURN_COMPLETE ||
+                ev.kind == PUCI_EVENT_ERROR ||
+                ev.kind == PUCI_EVENT_TURN_CANCELLED) {
+                done = 1;
+            }
+        }
+    }
 
     puci_session_destroy(sess);
     puci_context_destroy(ctx);
     kill(pid, SIGKILL);
     waitpid(pid, NULL, 0);
+    return bad ? -1 : 0;
+}
+
+/* ---- Slice 1 test 3: no per-token allocation growth ---- */
+
+typedef struct cap_hist {
+    size_t caps[400];
+    int n;
+} cap_hist;
+
+static int visit_cap(void *ud, puci_session *sess, puci_event *ev) {
+    cap_hist *h = (cap_hist *)ud;
+    /* Capacity is only meaningful for text-delivering events; record it for
+     * the token deltas so the terminal event cannot perturb the count. */
+    if (ev->kind == PUCI_EVENT_TOKEN_DELTA && h->n < 400) {
+        h->caps[h->n++] = puci_session_event_text_cap(sess);
+    }
+    return 1;
+}
+
+static void test_no_per_token_alloc(void) {
+    cap_hist h;
+    memset(&h, 0, sizeof(h));
+    CHECK(drive_streaming_turn(300, 2, 0, visit_cap, &h) == 0);
+    CHECK(h.n == 300); /* one capacity sample per token delta */
+    /* The reusable buffer is allocated once on the first delivery and must not
+     * grow across the remaining ~299 deltas: steady state is allocation-free. */
+    CHECK(h.n > 0);
+    CHECK(h.caps[0] > 0);
+    int settled = 1;
+    for (int i = 1; i < h.n; i++) {
+        if (h.caps[i] != h.caps[0]) {
+            settled = 0;
+            break;
+        }
+    }
+    CHECK(settled == 1);
+}
+
+/* ---- Slice 1 test 2: documented invalidation holds ---- */
+
+typedef struct inval_state {
+    const char *p_first;
+    char first_char;
+    char second_char;
+    size_t cap_first;
+    size_t cap_second;
+    int saw_first;
+    int saw_second;
+    int reused_same_storage;
+    int overwritten_to_new;
+} inval_state;
+
+static int visit_inval(void *ud, puci_session *sess, puci_event *ev) {
+    inval_state *s = (inval_state *)ud;
+    if (ev->kind == PUCI_EVENT_TOKEN_DELTA && !s->saw_second) {
+        if (!s->saw_first) {
+            s->saw_first = 1;
+            s->p_first = ev->text;
+            s->first_char = ev->text_len ? ev->text[0] : '\0';
+            s->cap_first = puci_session_event_text_cap(sess);
+        } else {
+            s->saw_second = 1;
+            s->second_char = ev->text_len ? ev->text[0] : '\0';
+            s->cap_second = puci_session_event_text_cap(sess);
+            /* No capacity growth between the two deltas means the second delta
+             * reused the first delta's storage: the reusable buffer is not
+             * per-token. */
+            s->reused_same_storage = (s->cap_first == s->cap_second);
+            /* With the storage reused in place, the pointer captured from the
+             * first delta must no longer hold the first delta's data: the
+             * library reset and rewrote the buffer, so a stale caller pointer
+             * now reads the second delta's payload. Dereference only when reuse
+             * held, so we never read memory that was reallocated away. */
+            if (s->reused_same_storage && s->p_first != NULL) {
+                s->overwritten_to_new =
+                    (*s->p_first == s->second_char &&
+                     s->first_char != s->second_char);
+            }
+        }
+    }
+    return 1;
+}
+
+static void test_invalidation(void) {
+    inval_state s;
+    memset(&s, 0, sizeof(s));
+    /* Distinct per-delta chars ('a','b',...) so consecutive deltas differ. */
+    CHECK(drive_streaming_turn(8, 1, 1, visit_inval, &s) == 0);
+    CHECK(s.saw_first == 1);
+    CHECK(s.saw_second == 1);
+    CHECK(s.first_char == 'a');
+    CHECK(s.second_char == 'b');
+    /* The documented contract: a text pointer is invalidated by the next
+     * next_event()/process() call, and the library must not keep a stale
+     * reference to caller state nor allocate per token. */
+    CHECK(s.reused_same_storage == 1);
+    CHECK(s.overwritten_to_new == 1);
 }
 
 int main(void) {
     test_bounded_process_calls();
+    test_invalidation();
+    test_no_per_token_alloc();
     
     /* Test get_fds sizing query: cap==0 should return required count. */
     {

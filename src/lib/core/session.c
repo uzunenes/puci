@@ -281,6 +281,9 @@ void puci_session_destroy(puci_session *sess) {
     if (sess->cfg.extra_body) {
         puci_alloc_free(&sess->alloc, (void *)sess->cfg.extra_body);
     }
+    if (sess->event_text_buf) {
+        puci_alloc_free(&sess->alloc, sess->event_text_buf);
+    }
     /* Close the cancel transport (eventfd or self-pipe). */
     if (sess->cancel_fd >= 0) {
         close(sess->cancel_fd);

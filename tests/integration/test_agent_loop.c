@@ -37,7 +37,7 @@ static void on_event(void *ud, puci_session *sess, puci_event ev,
                      const void *ctx) {
     counts *c = (counts *)ud;
     (void)sess;
-    switch (ev) {
+    switch (ev.kind) {
     case PUCI_EVENT_TOKEN_DELTA:
         c->deltas++;
         break;

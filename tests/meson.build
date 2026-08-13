@@ -130,6 +130,7 @@ test('test_http_async', test_http_async, timeout: 120)
 test_async_loop = executable(
     'test_async_loop',
     'integration/test_async_loop.c',
+    include_directories: [internal_inc],
     dependencies: puci_static_dep,
 )
 test('test_async_loop', test_async_loop, timeout: 120)

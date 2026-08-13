@@ -95,6 +95,69 @@ static void eventq_flush(puci_session *sess) {
     sess->ev_tail = NULL;
 }
 
+/* ------------------------------------------------------------------ */
+/* Reusable event text buffer.                                         */
+/*                                                                     *
+ * One buffer per session (never per token) backs every text pointer
+ * returned by puci_session_next_event(). Its length is reset to zero at the
+ * start of every next_event() and process() call while the capacity is
+ * retained, so delivery is allocation-free in steady state and an earlier-
+ * issued pointer is invalidated exactly as documented. */
+/* ------------------------------------------------------------------ */
+
+static void event_buf_reset(puci_session *sess) {
+    if (sess) {
+        sess->event_text_len = 0;
+    }
+}
+
+/* Ensure the buffer can hold `len` more bytes plus a NUL terminator. */
+static int event_buf_ensure(puci_session *sess, size_t len) {
+    size_t required = sess->event_text_len + len + 1; /* +1 for NUL */
+    if (required <= sess->event_text_cap) {
+        return 1;
+    }
+    size_t ncap = sess->event_text_cap ? sess->event_text_cap * 2 : 256;
+    while (ncap < required) {
+        ncap *= 2;
+    }
+    char *nbuf = (char *)puci_alloc_malloc(&sess->alloc, ncap);
+    if (!nbuf) {
+        return 0;
+    }
+    if (sess->event_text_buf && sess->event_text_len > 0) {
+        memcpy(nbuf, sess->event_text_buf, sess->event_text_len);
+    }
+    if (sess->event_text_buf) {
+        puci_alloc_free(&sess->alloc, sess->event_text_buf);
+    }
+    sess->event_text_buf = nbuf;
+    sess->event_text_cap = ncap;
+    return 1;
+}
+
+/* Append `len` bytes of `text` to the buffer and return a pointer to the copy.
+ * Returns NULL on allocation failure. The returned pointer is valid until the
+ * next event_buf_reset() on this session. */
+static const char *event_buf_add_text(puci_session *sess, const char *text,
+                                      size_t len) {
+    if (!text || len == 0) {
+        return NULL;
+    }
+    if (!event_buf_ensure(sess, len)) {
+        return NULL;
+    }
+    char *dst = sess->event_text_buf + sess->event_text_len;
+    memcpy(dst, text, len);
+    sess->event_text_len += len;
+    sess->event_text_buf[sess->event_text_len] = '\0';
+    return dst;
+}
+
+size_t puci_session_event_text_cap(const struct puci_session *sess) {
+    return sess ? sess->event_text_cap : 0;
+}
+
 void turn_run_eventq_push(puci_session *sess, struct puci_evnode *n) {
     if (!n) {
         return;
@@ -119,7 +182,7 @@ static int queue_push_alloc(puci_session *sess, struct puci_evnode **out) {
 }
 
 /* Queue a text-bearing event. Takes ownership of `text` (may be NULL). */
-static void qtext(puci_session *sess, puci_event ev, char *text) {
+static void qtext(puci_session *sess, puci_event_kind ev, char *text) {
     struct puci_evnode *n;
     if (!queue_push_alloc(sess, &n)) {
         free(text);
@@ -1054,6 +1117,10 @@ puci_status puci_agent_process(puci_session *sess, const struct pollfd *fds,
     sess->in_process = 1;
     sess->run->in_process = 1;
 
+    /* Invalidate any text pointer a previous next_event() handed out, per the
+     * documented ownership contract: the buffer is reset before new data. */
+    event_buf_reset(sess);
+
     for (int guard = 0; guard < 8; guard++) {
         if (!sess->run) {
             break; /* turn already ended (e.g. teardown after a terminal) */
@@ -1123,6 +1190,10 @@ int puci_agent_next_event(puci_session *sess, puci_event *out) {
     if (!sess || !out) {
         return 0;
     }
+    /* Reset the reusable buffer so a pointer from a previous next_event()
+     * call is invalidated, per the documented ownership contract. */
+    event_buf_reset(sess);
+
     struct puci_evnode *q = sess->ev_head;
     if (!q) {
         return 0;
@@ -1131,7 +1202,30 @@ int puci_agent_next_event(puci_session *sess, puci_event *out) {
     if (!sess->ev_head) {
         sess->ev_tail = NULL;
     }
-    *out = q->ev;
+
+    out->kind = q->ev;
+    out->text = NULL;
+    out->text_len = 0;
+
+    /* For the text-bearing event kinds, copy the node's owned payload into the
+     * reusable session buffer so the returned pointer outlives the node (which
+     * is freed below) until the next next_event()/process() call. Every other
+     * kind carries no text; leaving it NULL here is correct, not a stub. */
+    switch (q->ev) {
+    case PUCI_EVENT_TOKEN_DELTA:
+    case PUCI_EVENT_REASONING_DELTA:
+    case PUCI_EVENT_TURN_COMPLETE:
+    case PUCI_EVENT_ERROR:
+        if (q->text) {
+            size_t len = strlen(q->text);
+            out->text = event_buf_add_text(sess, q->text, len);
+            out->text_len = len;
+        }
+        break;
+    default:
+        break;
+    }
+
     evnode_free(sess, q);
     return 1;
 }
@@ -1161,24 +1255,34 @@ void turn_run_force_teardown(puci_session *sess) {
 /* Blocking convenience wrapper                                        */
 /* ------------------------------------------------------------------ */
 
-/* Forwards one queued event to the session event callback. */
+/* Forwards one queued event to the session event callback. For the text-bearing
+ * kinds ev.text points into the node's own payload, which is owned by the node
+ * and stays valid for the duration of the callback (the node is only freed
+ * after this returns, in drain_to_cb). The text is also passed via ctx for
+ * backward compatibility with consumers that read text from the callback's ctx
+ * pointer. Tool-call/result details are delivered via ctx. */
 static void replay_to_cb(puci_session *sess, const struct puci_evnode *n) {
     if (!n) {
         return;
     }
+    puci_event ev;
+    ev.kind = n->ev;
+    ev.text = NULL;
+    ev.text_len = 0;
     switch (n->ev) {
     case PUCI_EVENT_TOKEN_DELTA:
     case PUCI_EVENT_REASONING_DELTA:
     case PUCI_EVENT_TURN_COMPLETE:
     case PUCI_EVENT_ERROR:
+        ev.text = n->text;
+        ev.text_len = n->text ? strlen(n->text) : 0;
         if (sess->event_cb) {
-            sess->event_cb(sess->event_userdata, sess, n->ev, n->text);
+            sess->event_cb(sess->event_userdata, sess, ev, n->text);
         }
         break;
     case PUCI_EVENT_TURN_CANCELLED:
         if (sess->event_cb) {
-            sess->event_cb(sess->event_userdata, sess,
-                           PUCI_EVENT_TURN_CANCELLED, NULL);
+            sess->event_cb(sess->event_userdata, sess, ev, NULL);
         }
         break;
     case PUCI_EVENT_TOOL_CALL_START: {
@@ -1187,7 +1291,7 @@ static void replay_to_cb(puci_session *sess, const struct puci_evnode *n) {
         tc.id = n->tc_id;
         tc.args_json = n->tc_args;
         if (sess->event_cb) {
-            sess->event_cb(sess->event_userdata, sess, n->ev, &tc);
+            sess->event_cb(sess->event_userdata, sess, ev, &tc);
         }
         break;
     }
@@ -1197,7 +1301,7 @@ static void replay_to_cb(puci_session *sess, const struct puci_evnode *n) {
         tr.content = n->tr_content;
         tr.is_error = n->tr_is_error;
         if (sess->event_cb) {
-            sess->event_cb(sess->event_userdata, sess, n->ev, &tr);
+            sess->event_cb(sess->event_userdata, sess, ev, &tr);
         }
         break;
     }

@@ -21,7 +21,7 @@ int puci_abi_version(void) {
 }
 
 const char *puci_event_name(puci_event event) {
-    switch (event) {
+    switch (event.kind) {
     case PUCI_EVENT_TOKEN_DELTA:
         return "token_delta";
     case PUCI_EVENT_TOOL_CALL_START:

@@ -78,27 +78,44 @@ typedef enum puci_role {
     PUCI_ROLE_TOOL,
 } puci_role;
 
-/** Events emitted by the agent loop through the session callback. */
-typedef enum puci_event {
-    /** A text delta has been produced (streaming). ctx = const char*. */
+/** Event kinds emitted by the agent loop through the session callback. */
+typedef enum puci_event_kind {
+    /** A text delta has been produced (streaming). */
     PUCI_EVENT_TOKEN_DELTA = 0,
-    /** A tool call has started. ctx = const puci_tool_call*. */
+    /** A tool call has started. */
     PUCI_EVENT_TOOL_CALL_START,
-    /** A tool call has finished. ctx = const puci_tool_result*. */
+    /** A tool call has finished. */
     PUCI_EVENT_TOOL_CALL_END,
-    /** The current turn is complete. ctx = const char* (final text, may be NULL). */
+    /** The current turn is complete. */
     PUCI_EVENT_TURN_COMPLETE,
-    /** An error occurred. ctx = const char* (message). */
+    /** An error occurred. */
     PUCI_EVENT_ERROR,
     /** A reasoning/thinking delta from a reasoning model, surfaced separately
      *  from the final answer so consumers may display or discard it. Never
-     *  concatenated into the answer text. ctx = const char* (recent delta text);
-     *  consumers accumulate across deltas. */
+     *  concatenated into the answer text. */
     PUCI_EVENT_REASONING_DELTA,
     /** The current turn was cancelled by the caller (puci_session_cancel).
      *  Distinct from PUCI_EVENT_ERROR so consumers can tell user intent from a
-     *  failure. The session remains usable for a subsequent turn. ctx = NULL. */
+     *  failure. The session remains usable for a subsequent turn. */
     PUCI_EVENT_TURN_CANCELLED,
+} puci_event_kind;
+
+/** Event emitted by the agent loop through next_event() or the event callback.
+ *
+ *  The `text` pointer is owned by the library and points into an internal
+ *  buffer belonging to the session. It remains valid until the next call to
+ *  `puci_session_next_event()` or `puci_session_process()` on the same
+ *  session, whichever happens first. Callers that need to retain the data
+ *  must copy it. The buffer is NUL-terminated for convenience, but `text_len`
+ *  is authoritative. It is NULL (with text_len 0) for kinds that carry no
+ *  text payload.
+ *
+ *  For tool-call event kinds (TOOL_CALL_START / TOOL_CALL_END) the details are
+ *  delivered via the callback's ctx pointer; text is NULL for those kinds. */
+typedef struct puci_event {
+    puci_event_kind kind;
+    const char *text;   /**< NULL when kind carries no text payload */
+    size_t text_len;    /**< length of text; 0 if text is NULL */
 } puci_event;
 
 /** A tool call being executed by the agent loop. */

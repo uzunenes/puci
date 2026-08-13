@@ -54,7 +54,7 @@ static void on_event(void *ud, puci_session *sess, puci_event ev,
                      const void *ctx) {
     arun *a = (arun *)ud;
     (void)sess;
-    if (ev == PUCI_EVENT_TOOL_CALL_END) {
+    if (ev.kind == PUCI_EVENT_TOOL_CALL_END) {
         const puci_tool_result *res = (const puci_tool_result *)ctx;
         if (res && res->content && strstr(res->content, "blocked by approval policy")) {
             a->saw_blocked = 1;

@@ -17,11 +17,11 @@ static void stream_event(void *ud, puci_session *sess, puci_event ev,
                          const void *ctx) {
     (void)ud;
     (void)sess;
-    switch (ev) {
+    (void)ctx;
+    switch (ev.kind) {
     case PUCI_EVENT_TOKEN_DELTA: {
-        const char *t = (const char *)ctx;
-        if (t) {
-            fputs(t, stdout);
+        if (ev.text) {
+            fputs(ev.text, stdout);
             fflush(stdout);
         }
         break;
