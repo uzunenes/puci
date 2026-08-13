@@ -33,6 +33,10 @@ puci_provider *puci_provider_get(const puci_context *ctx, const char *name);
 /** Returns 1 if the named provider is registered, 0 otherwise. */
 int puci_provider_available(const puci_context *ctx, const char *name);
 
+/* Registration is confined to the context's creating thread. Provider handles
+ * and names returned by query functions are context-owned borrowed values and
+ * remain valid until context destruction or replacement. */
+
 #ifdef __cplusplus
 }
 #endif

@@ -9,10 +9,10 @@
  * process.
  *
  * Thread-safety: a session is owned by the thread that created it. Functions
- * taking a session must be called from that thread. The puci_session_call
- * (pollable) and puci_session_send (blocking) variants are mutually exclusive
- * ways to drive one session. The provided event callback may also be invoked
- * on the caller's thread.
+ * taking a session must be called from that thread and must not overlap,
+ * except puci_session_cancel(), which is async-signal-safe and may be called
+ * from another thread or a signal handler. The pollable and blocking variants
+ * are mutually exclusive ways to drive one session.
  */
 
 #include "puci/types.h"
@@ -37,7 +37,7 @@ typedef struct puci_session_options {
     puci_session_event_cb event_cb; /**< streaming/event callback (optional) */
     void *event_userdata;           /**< passed to event_cb */
     const char *system_prompt;      /**< optional system prompt */
-    size_t max_tool_iterations;     /**< cap on tool calls per turn, 0 = default(32) */
+    size_t max_tool_iterations;     /**< cap on tool calls per turn, 0 = default(32); exceeding it returns PUCI_ERR_TIMEOUT */
     puci_approval_cb approve_cb;    /**< tool approval policy hook, invoked before each tool runs (optional) */
     void *approve_userdata;         /**< passed to approve_cb */
 } puci_session_options;
@@ -205,6 +205,12 @@ puci_status puci_session_clear(puci_session *sess);
  *  with the count written to *count. Valid until the session is mutated or
  *  destroyed. Returns NULL and sets *count to 0 if there are none. */
 const char *const *puci_session_tools(const puci_session *sess, size_t *count);
+
+/* Ownership contract: the caller owns session handles and destroys them with
+ * puci_session_destroy. Session-returned strings, arrays, descriptors, and
+ * event payload pointers are borrowed until the documented next operation;
+ * callers must copy them if they need to retain them. Output pointers are
+ * caller-provided. All fallible session operations return puci_status. */
 
 #ifdef __cplusplus
 }

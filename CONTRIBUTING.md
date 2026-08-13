@@ -22,6 +22,13 @@ ninja -C build
 meson test -C build
 ```
 
+For the release gate, run the same checks with both supported compilers:
+
+```sh
+CC=gcc meson setup build-gcc && meson compile -C build-gcc && meson test -C build-gcc
+CC=clang meson setup build-clang && meson compile -C build-clang && meson test -C build-clang
+```
+
 ## Commit style
 
 Use conventional commits: `feat:`, `fix:`, `perf:`, `docs:`, `build:`,

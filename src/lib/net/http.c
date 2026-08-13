@@ -859,10 +859,9 @@ puci_status puci_http_process_fds(puci_http_req *r, const struct pollfd *fds,
     /* This function is a no-op in the fdset+poll model. The poll() call
      * informs the OS which sockets we care about; curl_multi_perform (called
      * in puci_http_step) will do non-blocking I/O on any that are ready. We
-     * don't need to explicitly feed back the poll results to curl when using
-     * curl_multi_fdset. The purpose of this stub is to document the contract
-     * and allow future implementations (e.g., socket callback mode) to use
-     * curl_multi_socket_action if needed. */
+    * don't need to explicitly feed back the poll results to curl when using
+    * curl_multi_fdset. This hook preserves the public state-machine contract
+    * and is ready for a future socket-callback implementation. */
     if (!r || !r->started || r->done) {
         return PUCI_OK;
     }

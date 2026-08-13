@@ -65,6 +65,10 @@ puci_status puci_session_tool_register(puci_session *sess,
  *  replaced or the context is destroyed. */
 const puci_tool_spec *puci_tool_get(const puci_context *ctx, const char *name);
 
+/* Registration is confined to the owning context/session thread. A returned
+ * tool descriptor is borrowed until replacement or context destruction. Tool
+ * callback arguments are borrowed for the callback duration. */
+
 #ifdef __cplusplus
 }
 #endif

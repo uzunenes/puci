@@ -24,6 +24,7 @@ meson-logs/
 meson-info/
 
 # Editor / OS
+.vscode/
 *.swp
 *.swo
 *~

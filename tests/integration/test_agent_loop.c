@@ -21,6 +21,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <poll.h>
 #include <unistd.h>
 
 #include "../test_util.h"
@@ -153,19 +154,19 @@ static void server_child(int pipe_w) {
     write_all(pipe_w, pbuf, (size_t)n);
     close(pipe_w);
 
-    /* Request 1: tool call. */
-    int c1 = accept(srv, NULL, NULL);
-    if (c1 >= 0) {
-        drain_request(c1);
-        serve_sse(c1, SSE0);
-        close(c1);
-    }
-    /* Request 2: final text. */
-    int c2 = accept(srv, NULL, NULL);
-    if (c2 >= 0) {
-        drain_request(c2);
-        serve_sse(c2, SSE1);
-        close(c2);
+    for (int turn = 0; turn < 3; turn++) {
+        int c1 = accept(srv, NULL, NULL);
+        if (c1 >= 0) {
+            drain_request(c1);
+            serve_sse(c1, SSE0);
+            close(c1);
+        }
+        int c2 = accept(srv, NULL, NULL);
+        if (c2 >= 0) {
+            drain_request(c2);
+            serve_sse(c2, SSE1);
+            close(c2);
+        }
     }
     close(srv);
     _exit(0);
@@ -236,11 +237,94 @@ static void test_full_agent_loop(void) {
     CHECK(c.deltas == 2); /* "Hello from " and "the agent." */
     if (c.final_text) {
         CHECK(strcmp(c.final_text, "Hello from the agent.") == 0);
-        free(c.final_text);
     }
 
+    counts async_counts;
+    memset(&async_counts, 0, sizeof(async_counts));
+    puci_session_options async_opts = sopts;
+    async_opts.event_cb = NULL;
+    async_opts.event_userdata = NULL;
+    puci_session *async_sess = NULL;
+    CHECK(puci_session_create(ctx, &async_opts, &async_sess) == PUCI_OK);
+    CHECK(puci_session_begin_turn(async_sess, "run the echo tool then reply") ==
+          PUCI_OK);
+
+    puci_status async_status = PUCI_ERR_UNKNOWN;
+    int done = 0;
+    for (int guard = 0; guard < 10000 && !done; guard++) {
+        int timeout_ms = -1;
+        struct pollfd fds[64];
+        size_t fd_count = 0;
+        CHECK(puci_session_next_timeout_ms(async_sess, &timeout_ms) == PUCI_OK);
+        CHECK(puci_session_get_fds(async_sess, fds, 64, &fd_count) == PUCI_OK);
+        int wait_ms = timeout_ms < 0 ? 1000 : timeout_ms;
+        if (wait_ms > 1000) {
+            wait_ms = 1000;
+        }
+        (void)poll(fd_count ? fds : NULL, (nfds_t)fd_count, wait_ms);
+        async_status = puci_session_process(async_sess, fds, fd_count);
+
+        puci_event ev;
+        while (puci_session_next_event(async_sess, &ev)) {
+            if (ev.kind == PUCI_EVENT_TOKEN_DELTA && ev.text) {
+                size_t old_len = async_counts.final_text
+                                     ? strlen(async_counts.final_text)
+                                     : 0;
+                char *next = (char *)realloc(async_counts.final_text,
+                                             old_len + ev.text_len + 1);
+                CHECK(next != NULL);
+                async_counts.final_text = next;
+                memcpy(next + old_len, ev.text, ev.text_len);
+                next[old_len + ev.text_len] = '\0';
+                async_counts.deltas++;
+            } else if (ev.kind == PUCI_EVENT_TOOL_CALL_START) {
+                CHECK(ev.payload.tool_call.id != NULL);
+                CHECK(ev.payload.tool_call.name != NULL);
+                CHECK(ev.payload.tool_call.args_json != NULL);
+                async_counts.tool_starts++;
+            } else if (ev.kind == PUCI_EVENT_TOOL_CALL_END) {
+                CHECK(ev.payload.tool_result.call_id != NULL);
+                CHECK(ev.payload.tool_result.content != NULL);
+                async_counts.tool_ends++;
+            } else if (ev.kind == PUCI_EVENT_TURN_COMPLETE) {
+                CHECK(ev.payload.turn_complete.finish_reason != NULL);
+                async_counts.completes++;
+                done = 1;
+            } else if (ev.kind == PUCI_EVENT_ERROR ||
+                       ev.kind == PUCI_EVENT_TURN_CANCELLED) {
+                done = 1;
+            }
+        }
+    }
+
+    CHECK(async_status == PUCI_OK);
+    CHECK(async_counts.tool_starts == c.tool_starts);
+    CHECK(async_counts.tool_ends == c.tool_ends);
+    CHECK(async_counts.deltas == c.deltas);
+    CHECK(async_counts.completes == c.completes);
+    CHECK(async_counts.final_text != NULL);
+    if (async_counts.final_text && c.final_text) {
+        CHECK(strcmp(async_counts.final_text, c.final_text) == 0);
+    }
+
+    puci_session_options limited_opts = sopts;
+    limited_opts.event_cb = NULL;
+    limited_opts.event_userdata = NULL;
+    limited_opts.max_tool_iterations = 1;
+    puci_session *limited_sess = NULL;
+    CHECK(puci_session_create(ctx, &limited_opts, &limited_sess) == PUCI_OK);
+    puci_status limited_status =
+        puci_session_send(limited_sess, "run the echo tool then reply");
+    CHECK(limited_status == PUCI_ERR_TIMEOUT);
+    kill(pid, SIGKILL);
+
     puci_session_destroy(sess);
+    puci_session_destroy(async_sess);
+    puci_session_destroy(limited_sess);
     puci_context_destroy(ctx);
+
+    free(c.final_text);
+    free(async_counts.final_text);
 
     int wstatus = 0;
     waitpid(pid, &wstatus, 0);

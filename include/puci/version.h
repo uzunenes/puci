@@ -20,9 +20,9 @@
 
 #define PUCI_VERSION_STRING "0.1.0"
 
-/* ABI version, drives the shared library soname (e.g. libpuci.so.2).
- * Bumped to 2 when the tool invoke signature gained a cancel token (ABI-visible
- * change to callback calling convention). */
+ /* ABI version, drives the shared library soname (e.g. libpuci.so.2).
+ * Version 2 is deliberate for v0.1.0: the public tool callback gained a cancel
+ * token and puci_event gained its permanent payload union. */
 #define PUCI_ABI_VERSION 2
 
 #define PUCI_VERSION_HEX \

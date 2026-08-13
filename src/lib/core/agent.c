@@ -80,6 +80,7 @@ static void evnode_free(puci_session *sess, struct puci_evnode *n) {
     free(n->tc_args);
     free(n->tr_call_id);
     free(n->tr_content);
+    free((char *)n->finish_reason);
     puci_alloc_free(&sess->alloc, n);
 }
 
@@ -151,6 +152,7 @@ static const char *event_buf_add_text(puci_session *sess, const char *text,
     memcpy(dst, text, len);
     sess->event_text_len += len;
     sess->event_text_buf[sess->event_text_len] = '\0';
+    sess->event_text_len++;
     return dst;
 }
 
@@ -190,6 +192,34 @@ static void qtext(puci_session *sess, puci_event_kind ev, char *text) {
     }
     n->ev = ev;
     n->text = text;
+    turn_run_eventq_push(sess, n);
+}
+
+static void qcomplete(puci_session *sess, const struct puci_turn_run *run,
+                      char *text) {
+    struct puci_evnode *n;
+    if (!queue_push_alloc(sess, &n)) {
+        free(text);
+        return;
+    }
+    n->ev = PUCI_EVENT_TURN_COMPLETE;
+    n->text = text;
+    n->prompt_tokens = run->turn.prompt_tokens;
+    n->completion_tokens = run->turn.completion_tokens;
+    n->total_tokens = run->turn.prompt_tokens + run->turn.completion_tokens;
+    n->finish_reason = dupstr(run->turn.finish_reason_stop ? "stop" : "unknown");
+    turn_run_eventq_push(sess, n);
+}
+
+static void qerror(puci_session *sess, puci_status status, char *text) {
+    struct puci_evnode *n;
+    if (!queue_push_alloc(sess, &n)) {
+        free(text);
+        return;
+    }
+    n->ev = PUCI_EVENT_ERROR;
+    n->text = text;
+    n->error_status = status;
     turn_run_eventq_push(sess, n);
 }
 
@@ -537,7 +567,7 @@ static void run_free(puci_session *sess, struct puci_turn_run *run) {
  * (points into sess->messages) or NULL; it is not freed here. */
 static void fin_complete(puci_session *sess, struct puci_turn_run *run,
                          const char *done_text) {
-    qtext(sess, PUCI_EVENT_TURN_COMPLETE, dupstr(done_text));
+    qcomplete(sess, run, dupstr(done_text));
     sess->last_status = PUCI_OK;
     run_free(sess, run);
 }
@@ -555,7 +585,7 @@ static void fin_cancelled(puci_session *sess, struct puci_turn_run *run) {
 static void fin_error(puci_session *sess, struct puci_turn_run *run,
                       puci_status st, const char *msg) {
     session_set_err(sess, msg ? msg : "unknown error");
-    qtext(sess, PUCI_EVENT_ERROR, dupstr(msg));
+    qerror(sess, st, dupstr(msg));
     sess->last_status = st;
     run_free(sess, run);
 }
@@ -802,8 +832,12 @@ static int run_stream_step(puci_session *sess, struct puci_turn_run *run) {
 
     const char *text = puci_strbuf_cstr(&run->turn.text);
     run->stream_text = dupstr(text);
-    run->want_tools = tool_call_ready(&run->turn) && run->turn.had_tool_calls &&
-                      run->iter + 1 < run->max_iter;
+    int has_tool_calls = tool_call_ready(&run->turn) && run->turn.had_tool_calls;
+    if (has_tool_calls && run->iter + 1 >= run->max_iter) {
+        fin_error(sess, run, PUCI_ERR_TIMEOUT, "tool iteration limit reached");
+        return 1;
+    }
+    run->want_tools = has_tool_calls;
     run->state = PUCI_TS_STREAM_COMPLETE;
     return 1;
 }
@@ -954,10 +988,8 @@ static int run_execute_tools(puci_session *sess, struct puci_turn_run *run) {
         return 1;
     }
     if (run->iter >= run->max_iter) {
-        const char *final_text =
-            sess->nmessages > 0 ? sess->messages[sess->nmessages - 1].content
-                                : NULL;
-        fin_complete(sess, run, final_text);
+        fin_error(sess, run, PUCI_ERR_TIMEOUT,
+                  "tool iteration limit reached");
         return 1;
     }
     run->state = PUCI_TS_BUILD_REQUEST;
@@ -1206,6 +1238,7 @@ int puci_agent_next_event(puci_session *sess, puci_event *out) {
     out->kind = q->ev;
     out->text = NULL;
     out->text_len = 0;
+    memset(&out->payload, 0, sizeof(out->payload));
 
     /* For the text-bearing event kinds, copy the node's owned payload into the
      * reusable session buffer so the returned pointer outlives the node (which
@@ -1221,7 +1254,43 @@ int puci_agent_next_event(puci_session *sess, puci_event *out) {
             out->text = event_buf_add_text(sess, q->text, len);
             out->text_len = len;
         }
+          if (q->ev == PUCI_EVENT_ERROR) {
+              out->payload.error.status = q->error_status;
+              out->payload.error.message = out->text;
+          }
+          if (q->ev == PUCI_EVENT_TURN_COMPLETE) {
+              out->payload.turn_complete.prompt_tokens = q->prompt_tokens;
+              out->payload.turn_complete.completion_tokens = q->completion_tokens;
+              out->payload.turn_complete.total_tokens = q->total_tokens;
+              out->payload.turn_complete.finish_reason =
+                  event_buf_add_text(sess, q->finish_reason,
+                                     q->finish_reason ? strlen(q->finish_reason) : 0);
+          }
         break;
+      case PUCI_EVENT_TOOL_CALL_START:
+          (void)event_buf_ensure(
+              sess,
+              (q->tc_id ? strlen(q->tc_id) : 0) +
+                  (q->tc_name ? strlen(q->tc_name) : 0) +
+                  (q->tc_args ? strlen(q->tc_args) : 0));
+          out->payload.tool_call.id = event_buf_add_text(sess, q->tc_id,
+                                                         q->tc_id ? strlen(q->tc_id) : 0);
+          out->payload.tool_call.name = event_buf_add_text(sess, q->tc_name,
+                                                           q->tc_name ? strlen(q->tc_name) : 0);
+          out->payload.tool_call.args_json = event_buf_add_text(sess, q->tc_args,
+                                                                q->tc_args ? strlen(q->tc_args) : 0);
+          break;
+      case PUCI_EVENT_TOOL_CALL_END:
+          (void)event_buf_ensure(
+              sess,
+              (q->tr_call_id ? strlen(q->tr_call_id) : 0) +
+                  (q->tr_content ? strlen(q->tr_content) : 0));
+          out->payload.tool_result.call_id = event_buf_add_text(sess, q->tr_call_id,
+                                                                q->tr_call_id ? strlen(q->tr_call_id) : 0);
+          out->payload.tool_result.content = event_buf_add_text(sess, q->tr_content,
+                                                                 q->tr_content ? strlen(q->tr_content) : 0);
+          out->payload.tool_result.is_error = q->tr_is_error;
+          break;
     default:
         break;
     }
@@ -1269,6 +1338,7 @@ static void replay_to_cb(puci_session *sess, const struct puci_evnode *n) {
     ev.kind = n->ev;
     ev.text = NULL;
     ev.text_len = 0;
+    memset(&ev.payload, 0, sizeof(ev.payload));
     switch (n->ev) {
     case PUCI_EVENT_TOKEN_DELTA:
     case PUCI_EVENT_REASONING_DELTA:
@@ -1276,6 +1346,16 @@ static void replay_to_cb(puci_session *sess, const struct puci_evnode *n) {
     case PUCI_EVENT_ERROR:
         ev.text = n->text;
         ev.text_len = n->text ? strlen(n->text) : 0;
+          if (n->ev == PUCI_EVENT_ERROR) {
+              ev.payload.error.status = n->error_status;
+              ev.payload.error.message = n->text;
+          }
+          if (n->ev == PUCI_EVENT_TURN_COMPLETE) {
+              ev.payload.turn_complete.prompt_tokens = n->prompt_tokens;
+              ev.payload.turn_complete.completion_tokens = n->completion_tokens;
+              ev.payload.turn_complete.total_tokens = n->total_tokens;
+              ev.payload.turn_complete.finish_reason = n->finish_reason;
+          }
         if (sess->event_cb) {
             sess->event_cb(sess->event_userdata, sess, ev, n->text);
         }
@@ -1290,6 +1370,9 @@ static void replay_to_cb(puci_session *sess, const struct puci_evnode *n) {
         tc.name = n->tc_name;
         tc.id = n->tc_id;
         tc.args_json = n->tc_args;
+          ev.payload.tool_call.id = n->tc_id;
+          ev.payload.tool_call.name = n->tc_name;
+          ev.payload.tool_call.args_json = n->tc_args;
         if (sess->event_cb) {
             sess->event_cb(sess->event_userdata, sess, ev, &tc);
         }
@@ -1300,6 +1383,9 @@ static void replay_to_cb(puci_session *sess, const struct puci_evnode *n) {
         tr.call_id = n->tr_call_id;
         tr.content = n->tr_content;
         tr.is_error = n->tr_is_error;
+          ev.payload.tool_result.call_id = n->tr_call_id;
+          ev.payload.tool_result.content = n->tr_content;
+          ev.payload.tool_result.is_error = n->tr_is_error;
         if (sess->event_cb) {
             sess->event_cb(sess->event_userdata, sess, ev, &tr);
         }

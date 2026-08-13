@@ -28,7 +28,8 @@ extern "C" {
 const char *puci_compute_diff(const char *old_text, size_t old_len,
                               const char *new_text, size_t new_len);
 
-/** Frees a string previously returned by puci_compute_diff. NULL is a no-op. */
+/** Frees a string previously returned by puci_compute_diff. NULL is a no-op.
+ *  The caller owns the returned string and must not retain it after this call. */
 void puci_diff_free(const char *diff);
 
 #ifdef __cplusplus

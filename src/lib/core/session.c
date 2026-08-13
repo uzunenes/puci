@@ -313,21 +313,74 @@ void session_set_err(puci_session *sess, const char *msg) {
     }
 }
 
-/* The blocking convenience API is a thin wrapper over the non-blocking state
- * machine (puci_agent_*): it pumps the loop and forwards every queued event to
- * the session's event callback synchronously. All turn logic lives in the
- * state machine, so the two entry points cannot diverge. */
+static void dispatch_public_event(puci_session *sess, const puci_event *event) {
+    if (!sess || !event || !sess->event_cb) {
+        return;
+    }
+    switch (event->kind) {
+    case PUCI_EVENT_TOOL_CALL_START: {
+        puci_tool_call call = {
+            .name = event->payload.tool_call.name,
+            .id = event->payload.tool_call.id,
+            .args_json = event->payload.tool_call.args_json,
+        };
+        sess->event_cb(sess->event_userdata, sess, *event, &call);
+        break;
+    }
+    case PUCI_EVENT_TOOL_CALL_END: {
+        puci_tool_result result = {
+            .call_id = event->payload.tool_result.call_id,
+            .content = event->payload.tool_result.content,
+            .is_error = event->payload.tool_result.is_error,
+        };
+        sess->event_cb(sess->event_userdata, sess, *event, &result);
+        break;
+    }
+    default:
+        sess->event_cb(sess->event_userdata, sess, *event, event->text);
+        break;
+    }
+}
+
+/* The blocking convenience API is a public-API driver over the same
+ * non-blocking state machine used by embedders. */
 puci_status puci_session_send(puci_session *sess, const char *message) {
-    if (!sess || !message) {
-        return PUCI_ERR_INVALID_ARG;
+    puci_status st = puci_session_begin_turn(sess, message);
+    if (st != PUCI_OK) {
+        return st;
     }
-    if (sess->run) {
-        return PUCI_ERR_OUT_OF_STATE;
+    for (;;) {
+        int timeout_ms = -1;
+        struct pollfd fds[64];
+        size_t fd_count = 0;
+        st = puci_session_next_timeout_ms(sess, &timeout_ms);
+        if (st != PUCI_OK) {
+            return st;
+        }
+        st = puci_session_get_fds(sess, fds, 64, &fd_count);
+        if (st != PUCI_OK) {
+            return st;
+        }
+        int wait_ms = timeout_ms < 0 ? 1000 : timeout_ms;
+        if (wait_ms > 1000) {
+            wait_ms = 1000;
+        }
+        (void)poll(fd_count ? fds : NULL, (nfds_t)fd_count, wait_ms);
+        st = puci_session_process(sess, fds, fd_count);
+
+        puci_event event;
+        while (puci_session_next_event(sess, &event)) {
+            dispatch_public_event(sess, &event);
+            if (event.kind == PUCI_EVENT_TURN_COMPLETE ||
+                event.kind == PUCI_EVENT_TURN_CANCELLED ||
+                event.kind == PUCI_EVENT_ERROR) {
+                return puci_session_last_status(sess);
+            }
+        }
+        if (st != PUCI_OK && st != PUCI_ERR_OUT_OF_STATE) {
+            return st;
+        }
     }
-    sess->running = 1;
-    puci_status st = puci_agent_run_turn(sess, message);
-    sess->running = 0;
-    return st;
 }
 
 /* --- Non-blocking, poll-loop friendly agent driving ---
@@ -335,6 +388,7 @@ puci_status puci_session_send(puci_session *sess, const char *message) {
  * threading contract documented in include/puci/session.h. */
 
 puci_status puci_session_begin_turn(puci_session *sess, const char *message) {
+    session_cancel_clear(sess);
     return puci_agent_begin_turn(sess, message);
 }
 
@@ -411,7 +465,8 @@ void session_cancel_clear(puci_session *sess) {
     sess->cancelled = 0;
     if (sess->cancel_fd >= 0) {
 #ifdef __linux__
-        (void)eventfd_read(sess->cancel_fd, NULL);
+    eventfd_t value = 0;
+    (void)eventfd_read(sess->cancel_fd, &value);
 #else
         char tmp[64];
         while (read(sess->cancel_fd, tmp, sizeof(tmp)) > 0) {

@@ -100,22 +100,55 @@ typedef enum puci_event_kind {
     PUCI_EVENT_TURN_CANCELLED,
 } puci_event_kind;
 
+typedef struct puci_event_tool_call {
+    const char *id;        /**< Borrowed; valid until the next event/process. */
+    const char *name;      /**< Borrowed; valid until the next event/process. */
+    const char *args_json; /**< Borrowed raw JSON; valid until the next event/process. */
+} puci_event_tool_call;
+
+typedef struct puci_event_tool_result {
+    const char *call_id; /**< Borrowed; valid until the next event/process. */
+    const char *content; /**< Borrowed; valid until the next event/process. */
+    int is_error;        /**< Nonzero when the tool failed. */
+} puci_event_tool_result;
+
+typedef struct puci_event_turn_complete {
+    long long prompt_tokens;     /**< Tokens reported for this turn. */
+    long long completion_tokens; /**< Tokens reported for this turn. */
+    long long total_tokens;      /**< Sum of prompt and completion tokens. */
+    const char *finish_reason;   /**< Borrowed; valid until the next event/process. */
+} puci_event_turn_complete;
+
+typedef struct puci_event_error {
+    puci_status status; /**< Status associated with the error event. */
+    const char *message; /**< Borrowed; valid until the next event/process. */
+} puci_event_error;
+
+typedef union puci_event_payload {
+    puci_event_tool_call tool_call;
+    puci_event_tool_result tool_result;
+    puci_event_turn_complete turn_complete;
+    puci_event_error error;
+} puci_event_payload;
+
 /** Event emitted by the agent loop through next_event() or the event callback.
  *
- *  The `text` pointer is owned by the library and points into an internal
- *  buffer belonging to the session. It remains valid until the next call to
- *  `puci_session_next_event()` or `puci_session_process()` on the same
- *  session, whichever happens first. Callers that need to retain the data
- *  must copy it. The buffer is NUL-terminated for convenience, but `text_len`
- *  is authoritative. It is NULL (with text_len 0) for kinds that carry no
- *  text payload.
- *
- *  For tool-call event kinds (TOOL_CALL_START / TOOL_CALL_END) the details are
- *  delivered via the callback's ctx pointer; text is NULL for those kinds. */
+ *  Every pointer in this struct is owned by the session and remains valid until
+ *  the next call to `puci_session_next_event()` or `puci_session_process()` on
+ *  the same session, whichever happens first. Callers that need to retain a
+ *  pointers must copy the data. The `text` pointer is NUL-terminated and
+ *  `text_len` is authoritative for TOKEN_DELTA, REASONING_DELTA,
+ *  TURN_COMPLETE, and ERROR; the union is unused for the two delta kinds.
+ *  Only the union member matching `kind` is active for tool_call on
+ *  TOOL_CALL_START, tool_result on TOOL_CALL_END, turn_complete on
+ *  TURN_COMPLETE, and error on ERROR. TURN_CANCELLED carries no payload;
+ *  its kind is the complete signal and the terminal status is available from
+ *  puci_session_last_status(). */
 typedef struct puci_event {
     puci_event_kind kind;
     const char *text;   /**< NULL when kind carries no text payload */
     size_t text_len;    /**< length of text; 0 if text is NULL */
+    puci_event_payload payload;
 } puci_event;
 
 /** A tool call being executed by the agent loop. */

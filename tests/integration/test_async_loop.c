@@ -324,6 +324,12 @@ static void test_bounded_process_calls(void) {
             }
             case PUCI_EVENT_TURN_COMPLETE:
                 completed = 1;
+                CHECK(ev.payload.turn_complete.prompt_tokens >= 0);
+                CHECK(ev.payload.turn_complete.completion_tokens >= 0);
+                CHECK(ev.payload.turn_complete.total_tokens ==
+                      ev.payload.turn_complete.prompt_tokens +
+                          ev.payload.turn_complete.completion_tokens);
+                CHECK(ev.payload.turn_complete.finish_reason != NULL);
                 break;
             case PUCI_EVENT_ERROR:
                 errored = 1;

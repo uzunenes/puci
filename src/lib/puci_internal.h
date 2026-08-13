@@ -231,6 +231,9 @@ typedef struct puci_evnode {
     /* TOOL_CALL_END: owned call_id/content, plus is_error. */
     char *tr_call_id, *tr_content;
     int tr_is_error;
+      long long prompt_tokens, completion_tokens, total_tokens;
+      const char *finish_reason;
+      puci_status error_status;
 } puci_evnode;
 
 /* The resumable per-turn engine state. Non-NULL (`sess->run`) while a turn is

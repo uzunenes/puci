@@ -96,6 +96,16 @@ int puci_cli_run(int argc, char **argv) {
             idle_ms = (int)(secs * 1000);
         }
     }
+    const char *max_iters_env = getenv("PUCI_MAX_TOOL_ITERATIONS");
+    size_t max_tool_iterations = 0;
+    if (max_iters_env && *max_iters_env) {
+        char *end = NULL;
+        unsigned long parsed = strtoul(max_iters_env, &end, 10);
+        if (end != max_iters_env && *end == '\0' && parsed > 0 &&
+            parsed <= 10000UL) {
+            max_tool_iterations = (size_t)parsed;
+        }
+    }
 
     puci_context *ctx = NULL;
     if (puci_context_create(NULL, &ctx) != PUCI_OK) {
@@ -128,6 +138,7 @@ int puci_cli_run(int argc, char **argv) {
     sopts.provider = pcfg;
     sopts.event_cb = stream_event;
     sopts.system_prompt = "You are puci, a fast coding agent. Be concise.";
+    sopts.max_tool_iterations = max_tool_iterations;
 
     puci_session *sess = NULL;
     st = puci_session_create(ctx, &sopts, &sess);
