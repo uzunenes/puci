@@ -13,11 +13,11 @@ embedders that want a small provider/tool core and a caller-owned poll loop.
 
 ## Current limitations
 
-The v0.1.0 async API does not yet provide non-blocking tool execution. Tool
-execution can block the host loop. The Stage A example does not yet demonstrate
-unrelated host fds, two concurrent agents, stdin-driven cancellation, or a
-non-blocking tool lifecycle. Python bindings, Phase 3b, and Issue #2 are not
-part of this source release.
+The v0.1.0 release includes the non-blocking async tool lifecycle and
+multi-agent poll-loop support in `libpuci`. However, the Stage A CLI examples
+and embedding guides do not yet demonstrate advanced features such as
+interactive stdin-driven cancellation or full terminal-based multiplexing.
+Python bindings and Phase 3b feature sets are not part of this source release.
 
 The public API is an early 0.x contract and may change before 1.0.
 

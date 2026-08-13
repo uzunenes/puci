@@ -175,8 +175,14 @@ static void stream_server(int wfd, int count, int delay_ms, int distinct) {
     if (!read_request(c)) {
         _exit(1);
     }
+    const char *k_final_chunk =
+        "data: {\"id\":\"r\",\"object\":\"chat.completion.chunk\",\"choices\":"
+        "[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":300}}\n\n"
+        "data: [DONE]\n\n";
+
     size_t cl = strlen(k_chunk);
-    size_t total = (size_t)count * cl;
+    size_t fcl = strlen(k_final_chunk);
+    size_t total = (size_t)count * cl + fcl;
     char head[192];
     int hn = snprintf(head, sizeof(head),
                       "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
@@ -198,6 +204,7 @@ static void stream_server(int wfd, int count, int delay_ms, int distinct) {
             write_all(c, k_chunk, cl);
         }
     }
+    write_all(c, k_final_chunk, fcl);
     close(c);
     close(srv);
     _exit(0);
@@ -324,12 +331,11 @@ static void test_bounded_process_calls(void) {
             }
             case PUCI_EVENT_TURN_COMPLETE:
                 completed = 1;
-                CHECK(ev.payload.turn_complete.prompt_tokens >= 0);
-                CHECK(ev.payload.turn_complete.completion_tokens >= 0);
-                CHECK(ev.payload.turn_complete.total_tokens ==
-                      ev.payload.turn_complete.prompt_tokens +
-                          ev.payload.turn_complete.completion_tokens);
+                CHECK(ev.payload.turn_complete.prompt_tokens == 10);
+                CHECK(ev.payload.turn_complete.completion_tokens == 300);
+                CHECK(ev.payload.turn_complete.total_tokens == 310);
                 CHECK(ev.payload.turn_complete.finish_reason != NULL);
+                CHECK(strcmp(ev.payload.turn_complete.finish_reason, "stop") == 0);
                 break;
             case PUCI_EVENT_ERROR:
                 errored = 1;
@@ -565,10 +571,150 @@ static void test_invalidation(void) {
     CHECK(s.overwritten_to_new == 1);
 }
 
+/* Server that serves reasoning content deltas followed by answer content. */
+static void reasoning_server(int wfd) {
+    int port = 0;
+    int srv = open_listener(&port);
+    if (srv < 0) {
+        _exit(1);
+    }
+    char pbuf[16];
+    int n = snprintf(pbuf, sizeof(pbuf), "%d\n", port);
+    write_all(wfd, pbuf, (size_t)n);
+
+    int c = accept(srv, NULL, NULL);
+    if (c < 0) {
+        _exit(1);
+    }
+    if (!read_request(c)) {
+        _exit(1);
+    }
+
+    const char *resp =
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+        "Connection: close\r\n\r\n"
+        "data: {\"id\":\"r1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n"
+        "data: {\"id\":\"r1\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"Thinking step 1. \"},\"finish_reason\":null}]}\n\n"
+        "data: {\"id\":\"r1\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"Step 2 concludes.\"},\"finish_reason\":null}]}\n\n"
+        "data: {\"id\":\"r1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Final answer.\"},\"finish_reason\":null}]}\n\n"
+        "data: {\"id\":\"r1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":15,\"completion_tokens\":8}}\n\n"
+        "data: [DONE]\n\n";
+
+    write_all(c, resp, strlen(resp));
+    close(c);
+    close(srv);
+    _exit(0);
+}
+
+static void test_async_reasoning_payload(void) {
+    int pf[2];
+    if (pipe(pf) != 0) {
+        CHECK(0);
+        return;
+    }
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(pf[0]);
+        reasoning_server(pf[1]);
+    }
+    close(pf[1]);
+    char pbuf[32];
+    ssize_t rd = read(pf[0], pbuf, sizeof(pbuf) - 1);
+    close(pf[0]);
+    if (rd <= 0) {
+        kill(pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+        CHECK(0);
+        return;
+    }
+    pbuf[rd] = '\0';
+    int port = atoi(pbuf);
+    char base_url[128];
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+
+    puci_context *ctx = NULL;
+    CHECK(puci_context_create(NULL, &ctx) == PUCI_OK);
+    puci_provider_config pcfg = {
+        .name = "openai",
+        .base_url = base_url,
+        .api_key = NULL,
+        .model = "mock-reasoning-model",
+        .timeout_ms = 15000,
+    };
+    CHECK(puci_context_set_provider(ctx, &pcfg) == PUCI_OK);
+
+    puci_session_options sopts = {0};
+    sopts.provider = pcfg;
+    puci_session *sess = NULL;
+    CHECK(puci_session_create(ctx, &sopts, &sess) == PUCI_OK);
+
+    CHECK(puci_session_begin_turn(sess, "test reasoning") == PUCI_OK);
+
+    char acc_reasoning[256] = {0};
+    char acc_text[256] = {0};
+    int reasoning_events = 0;
+    int text_events = 0;
+    int completed = 0;
+
+    for (int guard = 0; guard < 10000 && !completed; guard++) {
+        int timeout_ms = -1;
+        struct pollfd fds[16];
+        size_t fd_count = 0;
+        CHECK(puci_session_next_timeout_ms(sess, &timeout_ms) == PUCI_OK);
+        CHECK(puci_session_get_fds(sess, fds, 16, &fd_count) == PUCI_OK);
+        int wait_ms = timeout_ms < 0 ? 1000 : timeout_ms;
+        if (wait_ms > 1000) {
+            wait_ms = 1000;
+        }
+        (void)poll(fd_count ? fds : NULL, (nfds_t)fd_count, wait_ms);
+        puci_status st = puci_session_process(sess, fds, fd_count);
+        CHECK(st == PUCI_OK);
+
+        puci_event ev;
+        while (puci_session_next_event(sess, &ev)) {
+            if (ev.kind == PUCI_EVENT_REASONING_DELTA) {
+                reasoning_events++;
+                if (ev.text && ev.text_len > 0) {
+                    strncat(acc_reasoning, ev.text, sizeof(acc_reasoning) - strlen(acc_reasoning) - 1);
+                }
+            } else if (ev.kind == PUCI_EVENT_TOKEN_DELTA) {
+                text_events++;
+                if (ev.text && ev.text_len > 0) {
+                    strncat(acc_text, ev.text, sizeof(acc_text) - strlen(acc_text) - 1);
+                }
+            } else if (ev.kind == PUCI_EVENT_TURN_COMPLETE) {
+                completed = 1;
+                CHECK(ev.payload.turn_complete.prompt_tokens == 15);
+                CHECK(ev.payload.turn_complete.completion_tokens == 8);
+                CHECK(ev.payload.turn_complete.total_tokens == 23);
+                CHECK(ev.payload.turn_complete.finish_reason != NULL);
+                CHECK(strcmp(ev.payload.turn_complete.finish_reason, "stop") == 0);
+            }
+        }
+    }
+
+    CHECK(completed == 1);
+    CHECK(reasoning_events == 2);
+    CHECK(text_events == 1);
+    /* Exact transcript match for reasoning */
+    CHECK(strcmp(acc_reasoning, "Thinking step 1. Step 2 concludes.") == 0);
+    /* Exact transcript match for text */
+    CHECK(strcmp(acc_text, "Final answer.") == 0);
+    /* The two streams are not merged */
+    CHECK(strstr(acc_text, "Thinking") == NULL);
+    CHECK(strstr(acc_reasoning, "Final") == NULL);
+
+    puci_session_destroy(sess);
+    puci_context_destroy(ctx);
+    kill(pid, SIGKILL);
+    waitpid(pid, NULL, 0);
+}
+
 int main(void) {
     test_bounded_process_calls();
     test_invalidation();
     test_no_per_token_alloc();
+    test_async_reasoning_payload();
     
     /* Test get_fds sizing query: cap==0 should return required count. */
     {

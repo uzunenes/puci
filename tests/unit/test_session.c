@@ -68,6 +68,11 @@ static void test_session_creates_and_fails_gracefully(void) {
     CHECK(st == PUCI_ERR_NETWORK || st == PUCI_ERR_TIMEOUT ||
           st == PUCI_ERR_UNAUTHORIZED);
 
+    /* Assert subsequent turn on the same session works and does not return PUCI_ERR_BUSY/OUT_OF_STATE */
+    puci_status st2 = puci_session_send(sess, "hello again");
+    CHECK(st2 == PUCI_ERR_NETWORK || st2 == PUCI_ERR_TIMEOUT ||
+          st2 == PUCI_ERR_UNAUTHORIZED);
+
     puci_session_destroy(sess);
     puci_context_destroy(ctx);
 }

@@ -355,17 +355,26 @@ puci_status puci_session_send(puci_session *sess, const char *message) {
         size_t fd_count = 0;
         st = puci_session_next_timeout_ms(sess, &timeout_ms);
         if (st != PUCI_OK) {
+            turn_run_force_teardown(sess);
             return st;
         }
         st = puci_session_get_fds(sess, fds, 64, &fd_count);
         if (st != PUCI_OK) {
+            turn_run_force_teardown(sess);
             return st;
         }
         int wait_ms = timeout_ms < 0 ? 1000 : timeout_ms;
         if (wait_ms > 1000) {
             wait_ms = 1000;
         }
-        (void)poll(fd_count ? fds : NULL, (nfds_t)fd_count, wait_ms);
+        int prc = poll(fd_count ? fds : NULL, (nfds_t)fd_count, wait_ms);
+        if (prc < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            turn_run_force_teardown(sess);
+            return PUCI_ERR_IO;
+        }
         st = puci_session_process(sess, fds, fd_count);
 
         puci_event event;
@@ -378,6 +387,7 @@ puci_status puci_session_send(puci_session *sess, const char *message) {
             }
         }
         if (st != PUCI_OK && st != PUCI_ERR_OUT_OF_STATE) {
+            turn_run_force_teardown(sess);
             return st;
         }
     }

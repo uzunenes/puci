@@ -8,6 +8,7 @@ project(
         'c_std=c17',
         'buildtype=release',
         'warning_level=3',
+        'werror=true',
     ],
 )
 
@@ -20,7 +21,6 @@ c_args = [
     '-Wpedantic',
     '-Werror',
     '-Wconversion',
-    '-Wno-unused-parameter',
     # libpuci targets POSIX (fork+exec, pipes, clock_gettime, strdup). Expose
     # the POSIX API surface under the strict -std=c17 flag.
     '-D_POSIX_C_SOURCE=200809L',

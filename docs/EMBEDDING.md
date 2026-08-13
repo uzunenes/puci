@@ -30,6 +30,14 @@ The returned descriptor set is level-triggered. The set may change after every
 each wait. A capacity query uses `puci_session_get_fds(session, NULL, 0,
 &count)`. The cancellation fd is included while a turn is active.
 
+Array sizing: `puci_session_get_fds(session, fds, cap, &count)` writes up to
+`cap` entries and sets `count` to the actual count written (or the required
+count if `cap == 0`). A caller array of `64` descriptors is more than sufficient
+for libpuci's internal socket and process pipes (typically 2-4 fds per session).
+If the caller provides insufficient capacity (`cap < required`), descriptors are
+capped at `cap`. Embedders should allocate an array sized to their expected host
+and session fds (e.g. 64 or 128) or query capacity dynamically with `cap == 0`.
+
 `puci_session_next_timeout_ms()` is an upper bound for the host wait. When
 `curl_multi_timeout()` reports zero with pollable fds, PUCI returns an
 approximately 1000 ms floor to avoid a busy-spin. A zero timeout with no fds
@@ -58,8 +66,6 @@ audit or batch agents.
 
 ## Current limitations
 
-- Unrelated host fds, two concurrent agents, stdin cancellation, and a
-	non-blocking tool lifecycle are not demonstrated by the current Stage A
-	example.
-- Tool execution can block the host loop; Issue #2 is not implemented.
+- Interactive stdin cancellation and terminal multiplexing examples are
+  deferred to future releases.
 - Phase 3b, Python bindings, and PyPI publication are out of scope for v0.1.0.

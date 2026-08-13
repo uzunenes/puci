@@ -340,6 +340,7 @@ static void *caretaker_thread(void *arg) {
 /* Counts "CONN n" lines in a pipe buffer to determine how many connections the
  * streaming server accepted. */
 static int count_conns(char *buf, size_t len) {
+    (void)len;
     int k = 0;
     char *save = NULL;
     for (char *tok = strtok_r(buf, "\n", &save); tok; tok = strtok_r(NULL, "\n", &save)) {

@@ -120,7 +120,7 @@ static void serve_sse(int fd, const char *body) {
     "\"assistant\",\"content\":\"Hello from \"},\"finish_reason\":null}]}\n\n" \
     "data: {\"id\":\"2\",\"choices\":[{\"index\":0,\"delta\":{\"content\":" \
     "\"the agent.\"},\"finish_reason\":null}]}\n\n"                 \
-    "data: {\"id\":\"2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" \
+    "data: {\"id\":\"2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":42,\"completion_tokens\":18}}\n\n" \
     "data: [DONE]\n\n"
 
 static void server_child(int pipe_w) {
@@ -279,15 +279,24 @@ static void test_full_agent_loop(void) {
                 async_counts.deltas++;
             } else if (ev.kind == PUCI_EVENT_TOOL_CALL_START) {
                 CHECK(ev.payload.tool_call.id != NULL);
+                CHECK(strcmp(ev.payload.tool_call.id, "call_1") == 0);
                 CHECK(ev.payload.tool_call.name != NULL);
+                CHECK(strcmp(ev.payload.tool_call.name, "run_shell") == 0);
                 CHECK(ev.payload.tool_call.args_json != NULL);
+                CHECK(strstr(ev.payload.tool_call.args_json, "/bin/echo") != NULL);
                 async_counts.tool_starts++;
             } else if (ev.kind == PUCI_EVENT_TOOL_CALL_END) {
                 CHECK(ev.payload.tool_result.call_id != NULL);
+                CHECK(strcmp(ev.payload.tool_result.call_id, "call_1") == 0);
                 CHECK(ev.payload.tool_result.content != NULL);
+                CHECK(ev.payload.tool_result.is_error == 0);
                 async_counts.tool_ends++;
             } else if (ev.kind == PUCI_EVENT_TURN_COMPLETE) {
                 CHECK(ev.payload.turn_complete.finish_reason != NULL);
+                CHECK(strcmp(ev.payload.turn_complete.finish_reason, "stop") == 0);
+                CHECK(ev.payload.turn_complete.prompt_tokens == 42);
+                CHECK(ev.payload.turn_complete.completion_tokens == 18);
+                CHECK(ev.payload.turn_complete.total_tokens == 60);
                 async_counts.completes++;
                 done = 1;
             } else if (ev.kind == PUCI_EVENT_ERROR ||
