@@ -432,11 +432,11 @@ int puci_tools_lookup(puci_context *ctx, const char *name, puci_tool **out) {
     return t != NULL;
 }
 
-puci_status puci_tool_register(puci_context *ctx, const puci_tool_spec *spec,
-                               puci_tool_invoke_cb invoke_cb, void *userdata) {
-    if (!ctx || !spec || !spec->name) {
-        return PUCI_ERR_INVALID_ARG;
-    }
+/* Finds or creates the named tool slot, resetting owned strings on replace.
+ * Shared by puci_tool_register and puci_tool_register_async. */
+static puci_status tool_slot_acquire(puci_context *ctx,
+                                     const puci_tool_spec *spec,
+                                     puci_tool **out) {
     puci_tool *t = find_tool(ctx, spec->name);
     if (!t) {
         if (ctx->ntools == ctx->tools_cap) {
@@ -459,7 +459,6 @@ puci_status puci_tool_register(puci_context *ctx, const puci_tool_spec *spec,
         }
         ctx->tools[ctx->ntools++] = t;
     } else {
-        /* Free old owned strings before replacing. */
         if (t->spec.name) {
             puci_alloc_free(&ctx->alloc, (void *)t->spec.name);
         }
@@ -480,12 +479,46 @@ puci_status puci_tool_register(puci_context *ctx, const puci_tool_spec *spec,
     if (spec->input_schema) {
         t->spec.input_schema = puci_alloc_strdup(&ctx->alloc, spec->input_schema);
     }
-    t->invoke = invoke_cb;
-    t->userdata = userdata;
+    *out = t;
     if (!t->spec.name || (spec->description && !t->spec.description) ||
         (spec->input_schema && !t->spec.input_schema)) {
         return PUCI_ERR_NOMEM;
     }
+    return PUCI_OK;
+}
+
+puci_status puci_tool_register(puci_context *ctx, const puci_tool_spec *spec,
+                               puci_tool_invoke_cb invoke_cb, void *userdata) {
+    if (!ctx || !spec || !spec->name) {
+        return PUCI_ERR_INVALID_ARG;
+    }
+    puci_tool *t = NULL;
+    puci_status st = tool_slot_acquire(ctx, spec, &t);
+    if (st != PUCI_OK) {
+        return st;
+    }
+    t->invoke = invoke_cb;
+    memset(&t->async_vt, 0, sizeof(t->async_vt));
+    t->userdata = userdata;
+    return PUCI_OK;
+}
+
+puci_status puci_tool_register_async(puci_context *ctx,
+                                     const puci_tool_spec *spec,
+                                     const puci_tool_async_vtable *vt,
+                                     void *userdata) {
+    if (!ctx || !spec || !spec->name || !vt || !vt->begin || !vt->get_fds ||
+        !vt->next_timeout_ms || !vt->step || !vt->abort) {
+        return PUCI_ERR_INVALID_ARG;
+    }
+    puci_tool *t = NULL;
+    puci_status st = tool_slot_acquire(ctx, spec, &t);
+    if (st != PUCI_OK) {
+        return st;
+    }
+    t->invoke = NULL;
+    t->async_vt = *vt;
+    t->userdata = userdata;
     return PUCI_OK;
 }
 

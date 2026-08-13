@@ -630,21 +630,13 @@ const char *const *puci_session_tools(const puci_session *sess, size_t *count) {
     return (const char *const *)sess->tool_names;
 }
 
-puci_status puci_session_tool_register(puci_session *sess,
-                                       const puci_tool_spec *spec,
-                                       puci_tool_invoke_cb invoke_cb,
-                                       void *userdata) {
-    if (!sess || !spec || !spec->name) {
-        return PUCI_ERR_INVALID_ARG;
-    }
-    /* Register on the shared context so lookup succeeds, then ensure the name
-     * is enabled for this session. */
-    puci_status st = puci_tool_register(sess->ctx, spec, invoke_cb, userdata);
-    if (st != PUCI_OK) {
-        return st;
-    }
+/* Ensures `name` is present in the session's enabled tool-name list (the
+ * underlying tool is already registered on the shared context by the caller).
+ * Idempotent. */
+static puci_status session_enable_tool_name(puci_session *sess,
+                                            const char *name) {
     for (size_t i = 0; i < sess->ntools; i++) {
-        if (sess->tool_names[i] && strcmp(sess->tool_names[i], spec->name) == 0) {
+        if (sess->tool_names[i] && strcmp(sess->tool_names[i], name) == 0) {
             return PUCI_OK;
         }
     }
@@ -662,12 +654,42 @@ puci_status puci_session_tool_register(puci_session *sess,
         sess->tool_names = nt;
         sess->tools_cap = ncap;
     }
-    char *n = puci_alloc_strdup(&sess->alloc, spec->name);
+    char *n = puci_alloc_strdup(&sess->alloc, name);
     if (!n) {
         return PUCI_ERR_NOMEM;
     }
     sess->tool_names[sess->ntools++] = n;
     return PUCI_OK;
+}
+
+puci_status puci_session_tool_register(puci_session *sess,
+                                       const puci_tool_spec *spec,
+                                       puci_tool_invoke_cb invoke_cb,
+                                       void *userdata) {
+    if (!sess || !spec || !spec->name) {
+        return PUCI_ERR_INVALID_ARG;
+    }
+    /* Register on the shared context so lookup succeeds, then ensure the name
+     * is enabled for this session. */
+    puci_status st = puci_tool_register(sess->ctx, spec, invoke_cb, userdata);
+    if (st != PUCI_OK) {
+        return st;
+    }
+    return session_enable_tool_name(sess, spec->name);
+}
+
+puci_status puci_session_tool_register_async(puci_session *sess,
+                                             const puci_tool_spec *spec,
+                                             const puci_tool_async_vtable *vt,
+                                             void *userdata) {
+    if (!sess || !spec || !spec->name) {
+        return PUCI_ERR_INVALID_ARG;
+    }
+    puci_status st = puci_tool_register_async(sess->ctx, spec, vt, userdata);
+    if (st != PUCI_OK) {
+        return st;
+    }
+    return session_enable_tool_name(sess, spec->name);
 }
 
 /* --- Internal helpers used by the agent loop --- */

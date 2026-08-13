@@ -48,10 +48,13 @@ typedef struct puci_msg {
 /* ------------------------------------------------------------------ */
 
 /* A registered tool. The public spec is embedded at offset 0 so it can be
- * returned directly (a pointer to the spec is a valid puci_tool_spec*). */
+ * returned directly (a pointer to the spec is a valid puci_tool_spec*).
+ * Exactly one of `invoke` or `async_vt.begin` is non-NULL: a tool is either
+ * the blocking puci_tool_invoke_cb or the non-blocking async lifecycle. */
 struct puci_tool {
     puci_tool_spec spec; /* owned name/description/input_schema strings */
-    puci_tool_invoke_cb invoke; /* NULL for tools resolved by name at run time */
+    puci_tool_invoke_cb invoke; /* NULL for async tools */
+    puci_tool_async_vtable async_vt; /* async_vt.begin NULL for sync tools */
     void *userdata;
     int is_builtin;
 };
@@ -211,7 +214,8 @@ typedef enum puci_turn_state {
     PUCI_TS_AWAITING_CONNECT,/* HTTP connecting / TLS handshake (curl in flight) */
     PUCI_TS_STREAMING,       /* SSE bytes flowing; curl still in flight */
     PUCI_TS_STREAM_COMPLETE, /* transfer done; finalise the assistant message */
-    PUCI_TS_DISPATCHING_TOOLS,  /* run tool calls the model requested */
+    PUCI_TS_DISPATCHING_TOOLS,  /* pick the next tool call to run (non-blocking) */
+    PUCI_TS_RUNNING_TOOL,    /* an async tool invocation is in flight */
     PUCI_TS_RETRY_BACKOFF,   /* waiting out a retry deadline before retrying */
     PUCI_TS_TURN_DONE,       /* normal completion, waiting for teardown */
     PUCI_TS_FATAL            /* unrecoverable error, waiting for teardown */
@@ -264,6 +268,23 @@ struct puci_turn_run {
     char *req_body;
     char *url;
     char *auth;
+
+    /* Resumable tool-dispatch state (DISPATCHING_TOOLS / RUNNING_TOOL). One
+     * tool call is started at a time; contents accumulates results across
+     * possibly many process() calls so a slow (async) tool never blocks the
+     * others queued behind it. Allocated on first entry to DISPATCHING_TOOLS
+     * for the current assistant message, freed once all calls are dispatched. */
+    char **tool_contents;   /* per-call owned result strings, NULL until produced */
+    size_t tool_contents_n; /* == the assistant message's ntool_calls */
+    size_t tool_idx;        /* index of the next tool_calls entry to dispatch */
+    int tool_cancelled;     /* cancellation observed while dispatching tools */
+
+    /* Non-NULL only while state == PUCI_TS_RUNNING_TOOL: the tool and its
+     * async handle currently in flight, plus the call id for the eventual
+     * TOOL_CALL_END event and tool-result message. */
+    struct puci_tool *running_tool;
+    puci_tool_async_handle tool_handle;
+    char *running_call_id;
 
     /* Retry backoff deadline (monotonic ms), or -1 if none pending. */
     long long backoff_deadline_ms;

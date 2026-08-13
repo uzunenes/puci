@@ -402,7 +402,7 @@ puci_status puci_http_post_stream(const puci_allocator *alloc,
 
     /* Bound each wait so idle-timeout and cancel-flag checks stay timely and we
      * never block indefinitely on a silent (reasoning) stream. */
-    const long CAP_MS = 250;
+    const int CAP_MS = 250;
     int running = 1;
     CURLcode rc = CURLE_OK;
     while (running) {

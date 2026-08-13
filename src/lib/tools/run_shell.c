@@ -64,52 +64,109 @@ static int cancel_requested(const volatile sig_atomic_t *flag) {
     return flag && *flag;
 }
 
-/* Terminates the child's process group after cancellation: SIGTERM, wait up to
- * grace_ms for it to exit, then SIGKILL, reaping so no zombie remains. All
- * reaps handle EINTR. */
-static void terminate_group(pid_t pid, long grace_ms) {
-    (void)killpg(pid, SIGTERM);
-    long long deadline = now_ms() + grace_ms;
-    int ws;
+/* Non-blocking, bounded drain of whatever is currently readable on *fd into
+ * target. Closes and clears *fd on EOF or an unrecoverable read error so
+ * subsequent calls (and get_fds) know it is done. Never blocks. */
+static void drain_fd(int *fd, puci_strbuf *target) {
+    if (*fd < 0) {
+        return;
+    }
+    char buf[8192];
     for (;;) {
-        if (now_ms() >= deadline) {
+        ssize_t nr = read(*fd, buf, sizeof(buf));
+        if (nr > 0) {
+            bounded_append(target, buf, (size_t)nr);
+        } else if (nr == 0) {
+            close(*fd);
+            *fd = -1;
             break;
-        }
-        pid_t r = waitpid(pid, &ws, WNOHANG);
-        if (r == pid) {
-            return; /* reaped during the grace period */
-        }
-        if (r < 0) {
+        } else {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                break;
+            }
             if (errno == EINTR) {
                 continue;
             }
-            if (errno == ECHILD) {
-                return; /* already gone */
-            }
-            break;
-        }
-        /* Still running; give it a few ms and recheck the deadline. */
-        struct timespec ts = {0, 10 * 1000 * 1000}; /* 10 ms */
-        (void)nanosleep(&ts, NULL);
-    }
-    (void)killpg(pid, SIGKILL);
-    for (;;) {
-        pid_t r = waitpid(pid, &ws, 0);
-        if (r == pid || (r < 0 && errno == ECHILD)) {
-            break;
-        }
-        if (r < 0 && errno == EINTR) {
-            continue;
-        }
-        if (r < 0) {
+            close(*fd);
+            *fd = -1;
             break;
         }
     }
 }
 
-static int invoke_shell(void *userdata, const puci_cancel_token *cancel,
-                        const char *args_json, char **out_result) {
+/* run_shell's async tool state: one child process, its two output pipes, and
+ * the phase of a possible in-progress termination. Driven entirely by the
+ * host's poll loop via the puci_tool_async_vtable below; nothing here blocks. */
+typedef enum shell_phase {
+    SHELL_RUNNING,   /* child alive; draining pipes, watching for exit/timeout/cancel */
+    SHELL_TERM_WAIT, /* cancelled: SIGTERM sent, waiting up to grace before SIGKILL */
+    SHELL_KILL_WAIT, /* SIGKILL sent (grace expired or hard timeout); waiting for reap */
+} shell_phase;
+
+typedef struct shell_async_state {
+    pid_t pid;
+    int out_fd, err_fd; /* -1 once EOF/closed */
+    puci_strbuf out, err;
+    shell_phase phase;
+    int status;
+    int timed_out;
+    int was_cancelled;
+    long long deadline;      /* command timeout_ms deadline (monotonic ms), -1 = none */
+    long long term_deadline; /* SIGTERM->SIGKILL grace deadline while cancelling */
+    long cancel_grace_ms;
+    const volatile sig_atomic_t *cancel_flag;
+} shell_async_state;
+
+/* Builds the JSON result, releases the child's fds/buffers, and frees state.
+ * Shared terminal path for every way the invocation can end. */
+static int shell_finish(shell_async_state *st, char **out_result,
+                        int *out_is_error) {
+    /* One last non-blocking drain: data may have arrived between the reap and
+     * this call. */
+    drain_fd(&st->out_fd, &st->out);
+    drain_fd(&st->err_fd, &st->err);
+    if (st->out_fd >= 0) {
+        close(st->out_fd);
+    }
+    if (st->err_fd >= 0) {
+        close(st->err_fd);
+    }
+
+    puci_strbuf res;
+    puci_strbuf_init(&res, NULL);
+    puci_strbuf_append_fmt(&res,
+                           "{\"ok\":%s,\"exit_code\":%d,\"timed_out\":%s,"
+                           "\"cancelled\":%s,\"stdout\":",
+                           st->was_cancelled ? "false" : "true", st->status,
+                           st->timed_out ? "true" : "false",
+                           st->was_cancelled ? "true" : "false");
+    puci_strbuf_append_json_string(&res, puci_strbuf_cstr(&st->out));
+    puci_strbuf_appendz(&res, ",\"stderr\":");
+    puci_strbuf_append_json_string(&res, puci_strbuf_cstr(&st->err));
+    puci_strbuf_appendz(&res, "}");
+
+    *out_result = strdup(puci_strbuf_cstr(&res));
+    /* Mirrors the previous synchronous tool: failures (nonzero exit, timeout,
+     * cancellation) are encoded in the JSON body's "ok" field, not is_error;
+     * is_error is reserved for the invocation never having produced a result
+     * at all (handled in begin()). */
+    *out_is_error = 0;
+
+    puci_strbuf_destroy(&res);
+    puci_strbuf_destroy(&st->out);
+    puci_strbuf_destroy(&st->err);
+    free(st);
+    return 1;
+}
+
+/* Starts the command: parses arguments, forks with non-blocking output pipes,
+ * and returns immediately. Never blocks past the fork() call itself. */
+static int shell_async_begin(void *userdata, const puci_cancel_token *cancel,
+                             const char *args_json,
+                             puci_tool_async_handle *out_handle,
+                             char **out_result) {
     (void)userdata;
+    *out_handle = NULL;
     *out_result = NULL;
 
     puci_arena arena;
@@ -165,11 +222,6 @@ static int invoke_shell(void *userdata, const puci_cancel_token *cancel,
     if (cancel_grace_ms < 0) {
         cancel_grace_ms = 0;
     }
-    /* Cancel signalling: the token may be NULL if the engine did not provide
-     * one; on ISIGless/raw hosts cancel only surfaces via the fd. */
-    const volatile sig_atomic_t *cancel_flag =
-        cancel ? cancel->flag : NULL;
-    int cancel_fd = (cancel && cancel->fd >= 0) ? cancel->fd : -1;
 
     int out_fds[2] = {-1, -1};
     int err_fds[2] = {-1, -1};
@@ -217,6 +269,7 @@ static int invoke_shell(void *userdata, const puci_cancel_token *cancel,
     close(out_fds[1]);
     close(err_fds[1]);
     free(argv);
+    puci_arena_destroy(&arena);
 
     /* Give the child its own process group from the parent side too, closing
      * the window before the child's own setpgid() runs. */
@@ -225,172 +278,179 @@ static int invoke_shell(void *userdata, const puci_cancel_token *cancel,
     set_nonblocking(out_fds[0]);
     set_nonblocking(err_fds[0]);
 
-    puci_strbuf out;
-    puci_strbuf err;
-    puci_strbuf_init(&out, NULL);
-    puci_strbuf_init(&err, NULL);
-
-    struct pollfd fds[3];
-    int status = -1;
-    int timed_out = 0;
-    int was_cancelled = 0;
-    int out_eof = 0;
-    int err_eof = 0;
-    long long deadline = timeout_ms > 0 ? now_ms() + (long long)timeout_ms : -1;
-
-    while (1) {
-        /* Cancellation may be requested from another thread / signal path at
-         * any moment, including mid-run. */
-        if (cancel_requested(cancel_flag)) {
-            was_cancelled = 1;
-            break;
-        }
-        /* Reap the child non-blocking (EINTR-safe). */
+    shell_async_state *st = (shell_async_state *)calloc(1, sizeof(*st));
+    if (!st) {
+        (void)killpg(pid, SIGKILL);
         int ws;
-        pid_t r = waitpid(pid, &ws, WNOHANG);
-        if (r == pid) {
-            status = WIFEXITED(ws) ? WEXITSTATUS(ws) : (WIFSIGNALED(ws) ? 128 + WTERMSIG(ws) : 1);
-            break;
+        while (waitpid(pid, &ws, 0) < 0 && errno == EINTR) {
         }
-        if (r < 0 && errno != EINTR) {
-            break;
-        }
-
-        int npipe = 0;
-        if (!out_eof) {
-            fds[npipe].fd = out_fds[0];
-            fds[npipe].events = POLLIN;
-            fds[npipe].revents = 0;
-            npipe++;
-        }
-        if (!err_eof) {
-            fds[npipe].fd = err_fds[0];
-            fds[npipe].events = POLLIN;
-            fds[npipe].revents = 0;
-            npipe++;
-        }
-        fds[npipe].fd = cancel_fd;
-        fds[npipe].events = POLLIN;
-        fds[npipe].revents = 0;
-        int nfds = npipe + 1;
-
-        int to = -1;
-        if (timeout_ms > 0) {
-            long long rem = deadline - now_ms();
-            if (rem <= 0) {
-                to = 0;
-            } else {
-                to = rem > 0x7FFFFFFFLL ? 0x7FFFFFFF : (int)rem;
-            }
-        } else if (npipe == 0) {
-            /* Both pipes reached EOF, so the child has closed its output. We
-             * have only the cancel fd left to wait on; poll in short slices so
-             * each iteration re-checks waitpid() and reaps the now-exiting
-             * child promptly, while a late cancellation stays responsive.
-             * Polling just the cancel fd with to=-1 would deadlock forever. */
-            to = 50;
-        }
-        int pr = poll(fds, (nfds_t)nfds, to);
-        if (pr < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            break;
-        }
-        if (pr == 0) {
-            /* Timeout. */
-            kill(pid, SIGKILL);
-            waitpid(pid, &ws, 0);
-            status = WIFEXITED(ws) ? WEXITSTATUS(ws) : 137;
-            timed_out = 1;
-            break;
-        }
-
-        for (int i = 0; i < nfds; i++) {
-            int fd = fds[i].fd;
-            if (fds[i].revents & (POLLIN | POLLHUP | POLLERR)) {
-                if (fd == cancel_fd && cancel_fd >= 0) {
-                    was_cancelled = 1;
-                    break;
-                }
-                int is_out = (fd == out_fds[0]);
-                puci_strbuf *target = is_out ? &out : &err;
-                char buf[8192];
-                for (;;) {
-                    ssize_t nr = read(fd, buf, sizeof(buf));
-                    if (nr > 0) {
-                        bounded_append(target, buf, (size_t)nr);
-                    } else if (nr == 0) {
-                        close(fd);
-                        if (is_out) {
-                            out_eof = 1;
-                        } else {
-                            err_eof = 1;
-                        }
-                        break;
-                    } else {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                            break;
-                        }
-                        if (errno == EINTR) {
-                            continue;
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-        if (was_cancelled) {
-            break;
-        }
+        close(out_fds[0]);
+        close(err_fds[0]);
+        *out_result = strdup("{\"ok\":false,\"error\":\"out of memory\"}");
+        return 1;
     }
+    st->pid = pid;
+    st->out_fd = out_fds[0];
+    st->err_fd = err_fds[0];
+    puci_strbuf_init(&st->out, NULL);
+    puci_strbuf_init(&st->err, NULL);
+    st->phase = SHELL_RUNNING;
+    st->status = -1;
+    st->deadline = timeout_ms > 0 ? now_ms() + (long long)timeout_ms : -1;
+    st->term_deadline = -1;
+    st->cancel_grace_ms = cancel_grace_ms;
+    /* Cancel signalling: the token may be NULL if the engine did not provide
+     * one; on flagless hosts cancel only surfaces via the fd, which the
+     * engine already folds into its own poll set (see puci_agent_get_fds). */
+    st->cancel_flag = cancel ? cancel->flag : NULL;
 
-    /* On cancellation, terminate the child's process group and reap it so no
-     * zombie (or surviving grandchild) is left behind. */
-    if (was_cancelled) {
-        terminate_group(pid, cancel_grace_ms);
-        status = 130; /* 128 + SIGINT, by convention */
-    }
-
-    /* Drain any leftover output after child exit. */
-    {
-        char buf[8192];
-        ssize_t nr;
-        if (!out_eof) {
-            while ((nr = read(out_fds[0], buf, sizeof(buf))) > 0) {
-                bounded_append(&out, buf, (size_t)nr);
-            }
-            close(out_fds[0]);
-        }
-        if (!err_eof) {
-            while ((nr = read(err_fds[0], buf, sizeof(buf))) > 0) {
-                bounded_append(&err, buf, (size_t)nr);
-            }
-            close(err_fds[0]);
-        }
-    }
-
-    puci_strbuf res;
-    puci_strbuf_init(&res, NULL);
-    puci_strbuf_append_fmt(&res,
-                           "{\"ok\":%s,\"exit_code\":%d,\"timed_out\":%s,"
-                           "\"cancelled\":%s,\"stdout\":",
-                           was_cancelled ? "false" : "true",
-                           status, timed_out ? "true" : "false",
-                           was_cancelled ? "true" : "false");
-    puci_strbuf_append_json_string(&res, puci_strbuf_cstr(&out));
-    puci_strbuf_appendz(&res, ",\"stderr\":");
-    puci_strbuf_append_json_string(&res, puci_strbuf_cstr(&err));
-    puci_strbuf_appendz(&res, "}");
-
-    *out_result = strdup(puci_strbuf_cstr(&res));
-
-    puci_strbuf_destroy(&res);
-    puci_strbuf_destroy(&out);
-    puci_strbuf_destroy(&err);
-    puci_arena_destroy(&arena);
+    *out_handle = st;
     return 0;
 }
+
+static void shell_async_get_fds(void *userdata, puci_tool_async_handle handle,
+                                struct pollfd *fds, size_t cap,
+                                size_t *out_count) {
+    (void)userdata;
+    shell_async_state *st = (shell_async_state *)handle;
+    size_t n = 0;
+    if (st->out_fd >= 0) {
+        if (n < cap) {
+            fds[n].fd = st->out_fd;
+            fds[n].events = POLLIN;
+            fds[n].revents = 0;
+        }
+        n++;
+    }
+    if (st->err_fd >= 0) {
+        if (n < cap) {
+            fds[n].fd = st->err_fd;
+            fds[n].events = POLLIN;
+            fds[n].revents = 0;
+        }
+        n++;
+    }
+    *out_count = n;
+}
+
+static int shell_async_next_timeout_ms(void *userdata,
+                                       puci_tool_async_handle handle) {
+    (void)userdata;
+    shell_async_state *st = (shell_async_state *)handle;
+    long long now = now_ms();
+    if (st->phase == SHELL_TERM_WAIT) {
+        long long rem = st->term_deadline - now;
+        return rem <= 0 ? 0 : (rem > 0x7FFFFFFFLL ? 0x7FFFFFFF : (int)rem);
+    }
+    if (st->phase == SHELL_KILL_WAIT) {
+        return 50; /* short poll until the reap succeeds */
+    }
+    if (st->out_fd < 0 && st->err_fd < 0) {
+        /* Both pipes are at EOF (the child has exited or closed them); only
+         * waitpid reaping remains. Poll in short slices to reap promptly. */
+        return 50;
+    }
+    if (st->deadline > 0) {
+        long long rem = st->deadline - now;
+        return rem <= 0 ? 0 : (rem > 0x7FFFFFFFLL ? 0x7FFFFFFF : (int)rem);
+    }
+    /* Nothing to do until a pipe fd is ready or cancellation is observed (the
+     * session's cancel fd, polled alongside these, wakes the host either way). */
+    return -1;
+}
+
+static int shell_async_step(void *userdata, puci_tool_async_handle handle,
+                            char **out_result, int *out_is_error) {
+    (void)userdata;
+    shell_async_state *st = (shell_async_state *)handle;
+    *out_is_error = 0;
+
+    if (st->phase == SHELL_RUNNING && !st->was_cancelled &&
+        cancel_requested(st->cancel_flag)) {
+        st->was_cancelled = 1;
+        (void)killpg(st->pid, SIGTERM);
+        st->term_deadline = now_ms() + st->cancel_grace_ms;
+        st->phase = SHELL_TERM_WAIT;
+    }
+
+    drain_fd(&st->out_fd, &st->out);
+    drain_fd(&st->err_fd, &st->err);
+
+    int ws;
+    pid_t r = waitpid(st->pid, &ws, WNOHANG);
+    if (r == st->pid) {
+        if (st->timed_out) {
+            st->status = WIFEXITED(ws) ? WEXITSTATUS(ws) : 137;
+        } else if (st->was_cancelled) {
+            st->status = 130; /* 128 + SIGINT, by convention */
+        } else {
+            st->status = WIFEXITED(ws) ? WEXITSTATUS(ws)
+                                       : (WIFSIGNALED(ws) ? 128 + WTERMSIG(ws) : 1);
+        }
+        return shell_finish(st, out_result, out_is_error);
+    }
+    if (r < 0 && errno != EINTR && errno != ECHILD) {
+        /* Unexpected reap failure; treat as a tool error rather than spin. */
+        st->status = 1;
+        return shell_finish(st, out_result, out_is_error);
+    }
+
+    long long now = now_ms();
+    if (st->phase == SHELL_RUNNING && st->deadline > 0 && now >= st->deadline) {
+        /* Hard timeout: kill just the direct child, matching the documented
+         * timeout_ms contract (cancellation is what signals the whole group). */
+        (void)kill(st->pid, SIGKILL);
+        st->timed_out = 1;
+        st->phase = SHELL_KILL_WAIT;
+    } else if (st->phase == SHELL_TERM_WAIT && now >= st->term_deadline) {
+        (void)killpg(st->pid, SIGKILL);
+        st->phase = SHELL_KILL_WAIT;
+    }
+
+    return 0; /* not done yet */
+}
+
+/* Forced teardown (session/context destroyed mid-flight): kill the whole
+ * process group and reap. This is the one place a bounded blocking wait is
+ * acceptable, per puci_tool_async_abort_cb's contract. */
+static void shell_async_abort(void *userdata, puci_tool_async_handle handle) {
+    (void)userdata;
+    shell_async_state *st = (shell_async_state *)handle;
+    if (!st) {
+        return;
+    }
+    (void)killpg(st->pid, SIGKILL);
+    int ws;
+    for (;;) {
+        pid_t r = waitpid(st->pid, &ws, 0);
+        if (r == st->pid || (r < 0 && errno == ECHILD)) {
+            break;
+        }
+        if (r < 0 && errno == EINTR) {
+            continue;
+        }
+        if (r < 0) {
+            break;
+        }
+    }
+    if (st->out_fd >= 0) {
+        close(st->out_fd);
+    }
+    if (st->err_fd >= 0) {
+        close(st->err_fd);
+    }
+    puci_strbuf_destroy(&st->out);
+    puci_strbuf_destroy(&st->err);
+    free(st);
+}
+
+static const puci_tool_async_vtable puci_run_shell_async_vtable = {
+    .begin = shell_async_begin,
+    .get_fds = shell_async_get_fds,
+    .next_timeout_ms = shell_async_next_timeout_ms,
+    .step = shell_async_step,
+    .abort = shell_async_abort,
+};
 
 puci_status puci_register_tool_run_shell(puci_context *ctx) {
     puci_tool_spec spec;
@@ -407,5 +467,6 @@ puci_status puci_register_tool_run_shell(puci_context *ctx) {
         "\"description\":\"Executable path\"},\"args\":{\"type\":\"array\","
         "\"items\":{\"type\":\"string\"}},\"cwd\":{\"type\":\"string\"},"
         "\"timeout_ms\":{\"type\":\"integer\"}},\"required\":[\"command\"]}";
-    return puci_tool_register(ctx, &spec, invoke_shell, NULL);
+    return puci_tool_register_async(ctx, &spec, &puci_run_shell_async_vtable,
+                                    NULL);
 }

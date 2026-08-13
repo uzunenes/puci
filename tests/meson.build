@@ -134,3 +134,33 @@ test_async_loop = executable(
     dependencies: puci_static_dep,
 )
 test('test_async_loop', test_async_loop, timeout: 120)
+
+# Async tool lifecycle regression test (Issue #2 / Stage A): drives a
+# run_shell("/bin/sleep 1") tool call from a host-owned poll() loop that also
+# owns an unrelated timerfd, and asserts the host's own fd keeps firing (and
+# no single loop iteration blocks anywhere near the command's runtime) while
+# the tool runs, proving process() never blocks the host loop for the tool's
+# duration. Public API only; Linux-specific (timerfd, /proc).
+test_async_tool = executable(
+    'test_async_tool',
+    'integration/test_async_tool.c',
+    include_directories: [internal_inc],
+    dependencies: puci_static_dep,
+)
+test('test_async_tool', test_async_tool, timeout: 60)
+
+# Two-concurrent-agents test (Stage A requirement 5, the primary gate): two
+# sessions, each dispatching an async run_shell tool call against its own mock
+# server, driven from ONE poll() loop with no threads and no global state.
+# Proves genuine concurrency (wall time close to max, not sum, of the two
+# tool durations) and asymmetric cancellation (cancelling one session's
+# in-flight tool leaves the other's turn to complete normally).
+test_two_agents = executable(
+    'test_two_agents',
+    'integration/test_two_agents.c',
+    include_directories: [internal_inc],
+    dependencies: puci_static_dep,
+)
+test('test_two_agents', test_two_agents, timeout: 60)
+
+

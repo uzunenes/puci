@@ -12,14 +12,20 @@
  *
  * States (puci_turn_state): BUILD_REQUEST -> STREAMING -> STREAM_COMPLETE ->
  * DISPATCHING_TOOLS -> (BUILD_REQUEST next iteration) or done.
+ * DISPATCHING_TOOLS picks one pending tool call at a time; a tool registered
+ * via puci_tool_register_async transitions to RUNNING_TOOL and is driven
+ * forward by further process() calls against the fds it reports (see
+ * puci_agent_get_fds/next_timeout_ms), never blocking the host loop for the
+ * duration of the call. A tool registered via the simpler puci_tool_invoke_cb
+ * still runs to completion inline in DISPATCHING_TOOLS; that callback's
+ * documented contract is fast, bounded work (the built-in run_shell tool,
+ * which can run arbitrarily long, uses the async lifecycle).
  * RETRY_BACKOFF is expressed purely as a deadline surfaced through
  * puci_agent_next_timeout_ms(); the library never sleeps. Every state checks
  * cancellation and has a defined cleanup into TURN_DONE.
  *
- * No blocking syscall exists on the streaming path: the only waits are the fds
- * and timeout the host polls. Tool execution (Stage A) still runs
- * synchronously inside DISPATCHING_TOOLS (see DOGFOOD / issue #2 for the async
- * tool lifecycle that removes that last blocking step).
+ * No blocking syscall exists on the streaming or tool-dispatch path: the only
+ * waits are the fds and timeout the host polls.
  */
 
 #include "puci_internal.h"
@@ -546,6 +552,29 @@ static void run_free(puci_session *sess, struct puci_turn_run *run) {
         free(run->stream_text);
         run->stream_text = NULL;
     }
+    /* An async tool may still be mid-flight if the run is being torn down
+     * outside the normal per-call completion path (e.g. session destroyed
+     * while a subprocess is running); abort() forcibly reclaims it. The
+     * normal completion path (tool_dispatch_finish) already cleared these. */
+    if (run->running_tool) {
+        run->running_tool->async_vt.abort(run->running_tool->userdata,
+                                          run->tool_handle);
+        run->running_tool = NULL;
+        run->tool_handle = NULL;
+    }
+    if (run->running_call_id) {
+        free(run->running_call_id);
+        run->running_call_id = NULL;
+    }
+    if (run->tool_contents) {
+        for (size_t i = 0; i < run->tool_contents_n; i++) {
+            free(run->tool_contents[i]);
+        }
+        free(run->tool_contents);
+        run->tool_contents = NULL;
+    }
+    run->tool_contents_n = 0;
+    run->tool_idx = 0;
     puci_strbuf_destroy(&run->turn.text);
     puci_strbuf_destroy(&run->turn.reasoning);
     for (size_t i = 0; i < run->turn.ntool_calls; i++) {
@@ -810,7 +839,8 @@ static int run_stream_step(puci_session *sess, struct puci_turn_run *run) {
         return 1;
     }
     if (hs >= 400) {
-        char msg[256];
+        /* Sized to comfortably fit the prefix plus the full err[256] buffer. */
+        char msg[320];
         if (err[0]) {
             snprintf(msg, sizeof(msg), "upstream returned HTTP %d: %s", hs,
                      err);
@@ -883,11 +913,60 @@ static int run_finalize_stream(puci_session *sess, struct puci_turn_run *run) {
     return 1;
 }
 
-/* Runs the tool calls carried by the last committed assistant message and
- * appends their results. Stage A: tools run synchronously here; see DOGFOOD /
- * issue #2 for the async tool lifecycle that removes this blocking step.
- * Returns 1 if the turn finished, 0 to continue to the next iteration. */
-static int run_execute_tools(puci_session *sess, struct puci_turn_run *run) {
+/* Whether cancellation has been requested (beyond the async-signal-safe flag;
+ * also drains the transport so a latched cancel is not re-triggered). */
+static int cancel_requested(puci_session *sess) {
+    return sess->cancelled ? 1 : 0;
+}
+
+/* Appends tool-result messages for every dispatched call, frees the resumable
+ * dispatch state, and either resumes the loop (BUILD_REQUEST) or ends the
+ * turn (cancelled / iteration limit). No-op (returns 0) while calls remain
+ * undispatched. Shared by run_dispatch_tools and run_tool_step. */
+static int tool_dispatch_finish(puci_session *sess, struct puci_turn_run *run,
+                                puci_msg *am) {
+    if (run->tool_idx < run->tool_contents_n && !run->tool_cancelled) {
+        return 0; /* more calls to dispatch */
+    }
+    for (size_t i = 0; i < run->tool_contents_n && !run->tool_cancelled; i++) {
+        if (am->tool_calls[i].name.len == 0) {
+            continue;
+        }
+        if (run->tool_contents[i]) {
+            session_msg_begin(sess, PUCI_ROLE_TOOL, run->tool_contents[i]);
+            session_msg_set_tool_call_id(sess, am->tool_calls[i].id);
+        }
+    }
+    for (size_t i = 0; i < run->tool_contents_n; i++) {
+        free(run->tool_contents[i]);
+    }
+    free(run->tool_contents);
+    run->tool_contents = NULL;
+    run->tool_contents_n = 0;
+    run->tool_idx = 0;
+
+    if (run->tool_cancelled) {
+        run->tool_cancelled = 0;
+        fin_cancelled(sess, run);
+        return 1;
+    }
+    if (run->iter >= run->max_iter) {
+        fin_error(sess, run, PUCI_ERR_TIMEOUT, "tool iteration limit reached");
+        return 1;
+    }
+    run->state = PUCI_TS_BUILD_REQUEST;
+    return 0;
+}
+
+/* Picks up the next pending tool call from the last committed assistant
+ * message and dispatches it. A puci_tool_invoke_cb tool runs to completion
+ * here (fast, bounded work is the documented contract for that callback); a
+ * tool registered via puci_tool_register_async is only started here (begin())
+ * and the state machine transitions to RUNNING_TOOL so the host's poll loop
+ * drives it forward without blocking, see run_tool_step. Returns 1 if the
+ * turn finished (cancelled/errored), 0 to continue: either straight to the
+ * next call in the same process() pass, or after yielding into RUNNING_TOOL. */
+static int run_dispatch_tools(puci_session *sess, struct puci_turn_run *run) {
     puci_msg *am =
         sess->nmessages > 0 ? &sess->messages[sess->nmessages - 1] : NULL;
     if (!am) {
@@ -895,19 +974,27 @@ static int run_execute_tools(puci_session *sess, struct puci_turn_run *run) {
                   "no assistant message to dispatch tools");
         return 1;
     }
-    size_t ntcs = am->ntool_calls;
-    char **contents = (ntcs > 0) ? (char **)calloc(ntcs, sizeof(char *)) : NULL;
-    if (ntcs > 0 && !contents) {
-        fin_error(sess, run, PUCI_ERR_NOMEM, "out of memory");
-        return 1;
+    if (!run->tool_contents && run->tool_contents_n == 0 && run->tool_idx == 0) {
+        size_t ntcs = am->ntool_calls;
+        char **contents = (ntcs > 0) ? (char **)calloc(ntcs, sizeof(char *)) : NULL;
+        if (ntcs > 0 && !contents) {
+            fin_error(sess, run, PUCI_ERR_NOMEM, "out of memory");
+            return 1;
+        }
+        run->tool_contents = contents;
+        run->tool_contents_n = ntcs;
+        session_build_cancel_token(sess, &run->cancel_token);
     }
-    int cancelled = 0;
-    puci_cancel_token ctok;
-    session_build_cancel_token(sess, &ctok);
 
-    for (size_t k = 0; k < ntcs && !cancelled; k++) {
+    if (cancel_requested(sess)) {
+        run->tool_cancelled = 1;
+    }
+
+    while (run->tool_idx < run->tool_contents_n && !run->tool_cancelled) {
+        size_t k = run->tool_idx;
         puci_internal_tool_call *slot = &am->tool_calls[k];
         if (slot->name.len == 0) {
+            run->tool_idx++;
             continue;
         }
         puci_tool_call pub;
@@ -916,90 +1003,113 @@ static int run_execute_tools(puci_session *sess, struct puci_turn_run *run) {
         pub.args_json = puci_strbuf_cstr(&slot->args);
         qtool_start(sess, pub.name, pub.id, pub.args_json);
 
+        puci_tool *tool = NULL;
+        puci_tools_lookup(sess->ctx, pub.name, &tool);
+
+        if (sess->approve_cb) {
+            puci_arena ar;
+            puci_approval_request apreq;
+            puci_arena_init(&ar, &sess->alloc, 0);
+            build_approval_request(sess, &pub, &ar, &apreq, &run->cancel_token);
+            int ap_cancelled = sess->cancelled ? 1 : 0;
+            puci_approval ap = ap_cancelled
+                                   ? PUCI_APPROVAL_DENY
+                                   : sess->approve_cb(&apreq,
+                                                      sess->approve_userdata);
+            if (sess->cancelled) {
+                ap_cancelled = 1;
+            }
+            destroy_approval_request(&apreq);
+            puci_arena_destroy(&ar);
+            if (ap_cancelled) {
+                run->tool_cancelled = 1;
+                break;
+            }
+            if (ap == PUCI_APPROVAL_DENY) {
+                char *content = strdup(
+                    "{\"ok\":false,\"error\":\"blocked by approval policy\"}");
+                qtool_end(sess, pub.id, content, 1);
+                run->tool_contents[k] = content;
+                run->tool_idx++;
+                continue;
+            }
+        }
+
+        if (tool && tool->async_vt.begin) {
+            puci_tool_async_handle handle = NULL;
+            char *fail_result = NULL;
+            int rc = tool->async_vt.begin(tool->userdata, &run->cancel_token,
+                                          pub.args_json, &handle, &fail_result);
+            if (rc != 0) {
+                char *content =
+                    fail_result ? fail_result
+                               : strdup("{\"ok\":false,\"error\":\"tool error\"}");
+                qtool_end(sess, pub.id, content, 1);
+                run->tool_contents[k] = content;
+                run->tool_idx++;
+                continue;
+            }
+            run->running_tool = tool;
+            run->tool_handle = handle;
+            run->running_call_id = dupstr(pub.id);
+            run->state = PUCI_TS_RUNNING_TOOL;
+            return 0; /* yield: host must poll the tool's fds to progress it */
+        }
+
         char *content = NULL;
         int is_err = 0;
-        puci_tool *tool = NULL;
-        if (puci_tools_lookup(sess->ctx, pub.name, &tool) && tool &&
-            tool->invoke) {
+        if (tool && tool->invoke) {
             char *inv_res = NULL;
-            int rcerr = 0;
-            int runit = 1;
-            if (sess->approve_cb) {
-                puci_arena ar;
-                puci_approval_request apreq;
-                puci_arena_init(&ar, &sess->alloc, 0);
-                build_approval_request(sess, &pub, &ar, &apreq, &ctok);
-                int ap_cancelled = sess->cancelled ? 1 : 0;
-                puci_approval ap = ap_cancelled
-                                       ? PUCI_APPROVAL_DENY
-                                       : sess->approve_cb(&apreq,
-                                                          sess->approve_userdata);
-                if (sess->cancelled) {
-                    ap_cancelled = 1;
-                }
-                destroy_approval_request(&apreq);
-                puci_arena_destroy(&ar);
-                if (ap_cancelled) {
-                    cancelled = 1;
-                    break;
-                }
-                if (ap == PUCI_APPROVAL_DENY) {
-                    inv_res = strdup(
-                        "{\"ok\":false,\"error\":\"blocked by approval policy\"}");
-                    rcerr = 1;
-                    runit = 0;
-                }
-            }
-            if (runit) {
-                rcerr = tool->invoke(tool->userdata, &ctok, pub.args_json,
-                                     &inv_res);
-            }
-            content = inv_res;
-            if (!content) {
-                content = strdup("{\"ok\":false,\"error\":\"tool error\"}");
-            }
+            int rcerr = tool->invoke(tool->userdata, &run->cancel_token,
+                                     pub.args_json, &inv_res);
+            content = inv_res ? inv_res
+                              : strdup("{\"ok\":false,\"error\":\"tool error\"}");
             is_err = rcerr || !inv_res;
         } else {
             content = strdup("{\"ok\":false,\"error\":\"unknown tool\"}");
             is_err = 1;
         }
         qtool_end(sess, pub.id, content, is_err);
-        contents[k] = content;
+        run->tool_contents[k] = content;
+        run->tool_idx++;
     }
 
-    /* Append the tool-result messages after the assistant (which carries the
-     * calls). The assistant was committed by run_finalize_stream. */
-    for (size_t i = 0; i < ntcs && !cancelled; i++) {
-        if (am->tool_calls[i].name.len == 0) {
-            continue;
-        }
-        if (contents[i]) {
-            session_msg_begin(sess, PUCI_ROLE_TOOL, contents[i]);
-            session_msg_set_tool_call_id(sess, am->tool_calls[i].id);
-        }
-    }
-    for (size_t i = 0; i < ntcs; i++) {
-        free(contents[i]);
-    }
-    free(contents);
-
-    if (cancelled) {
-        fin_cancelled(sess, run);
-        return 1;
-    }
-    if (run->iter >= run->max_iter) {
-        fin_error(sess, run, PUCI_ERR_TIMEOUT,
-                  "tool iteration limit reached");
-        return 1;
-    }
-    run->state = PUCI_TS_BUILD_REQUEST;
-    return 0;
+    return tool_dispatch_finish(sess, run, am);
 }
 
-/* Whether cancellation has been requested (beyond the async-signal-safe flag;
- * also drains the transport so a latched cancel is not re-triggered). */
-static int cancel_requested(puci_session *sess) {
-    return sess->cancelled ? 1 : 0;
+/* Advances the in-flight async tool (state RUNNING_TOOL) by one bounded,
+ * non-blocking step(). Returns 1 if the turn finished (cancelled/errored), 0
+ * to continue: the caller yields if the tool is still running, or the loop
+ * proceeds to the next tool call / finalises the batch if it just finished. */
+static int run_tool_step(puci_session *sess, struct puci_turn_run *run) {
+    puci_msg *am =
+        sess->nmessages > 0 ? &sess->messages[sess->nmessages - 1] : NULL;
+    if (!am || !run->running_tool) {
+        fin_error(sess, run, PUCI_ERR_OUT_OF_STATE, "no tool in flight");
+        return 1;
+    }
+    puci_tool *tool = run->running_tool;
+    char *result = NULL;
+    int is_err = 0;
+    int done = tool->async_vt.step(tool->userdata, run->tool_handle, &result,
+                                   &is_err);
+    if (!done) {
+        return 0; /* still running; caller yields on the tool's fds */
+    }
+    char *content =
+        result ? result : strdup("{\"ok\":false,\"error\":\"tool error\"}");
+    qtool_end(sess, run->running_call_id, content, is_err);
+    run->tool_contents[run->tool_idx] = content;
+    run->tool_idx++;
+    free(run->running_call_id);
+    run->running_call_id = NULL;
+    run->running_tool = NULL;
+    run->tool_handle = NULL;
+    if (cancel_requested(sess)) {
+        run->tool_cancelled = 1;
+    }
+    run->state = PUCI_TS_DISPATCHING_TOOLS;
+    return tool_dispatch_finish(sess, run, am);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1054,14 +1164,28 @@ puci_status puci_agent_get_fds(puci_session *sess, struct pollfd *fds,
     }
     size_t n = 0;
     struct puci_turn_run *run = sess->run;
-    if (run && run->req) {
+    if (run && run->state == PUCI_TS_RUNNING_TOOL && run->running_tool) {
+        /* Checked before run->req: req remains non-NULL (but idle, its
+         * transfer already finished) throughout tool dispatch until the next
+         * run_build_request frees it, so req-non-NULL alone cannot gate this. */
+        size_t tn = 0;
+        run->running_tool->async_vt.get_fds(run->running_tool->userdata,
+                                            run->tool_handle, fds, cap, &tn);
+        n = tn;
+    } else if (run && run->req) {
         n = puci_http_get_fds(run->req, fds, cap);
     }
     if (cap == 0) {
-        /* Sizing query: report the required count (http fds + cancel fd).
-         * puci_http_get_fds wrote nothing here (cap==0), so query the count. */
+        /* Sizing query: report the required count (http or tool fds, plus the
+         * cancel fd). The branches above wrote nothing here (cap==0), so
+         * query the counts directly. */
         size_t required = 0;
-        if (run && run->req) {
+        if (run && run->state == PUCI_TS_RUNNING_TOOL && run->running_tool) {
+            size_t tn = 0;
+            run->running_tool->async_vt.get_fds(run->running_tool->userdata,
+                                                run->tool_handle, NULL, 0, &tn);
+            required += tn;
+        } else if (run && run->req) {
             required += puci_http_fd_count(run->req);
         }
         if (sess->cancel_fd >= 0) {
@@ -1088,6 +1212,11 @@ puci_status puci_agent_next_timeout_ms(puci_session *sess, int *out_ms) {
     struct puci_turn_run *run = sess->run;
     if (!run) {
         *out_ms = -1;
+        return PUCI_OK;
+    }
+    if (run->state == PUCI_TS_RUNNING_TOOL && run->running_tool) {
+        *out_ms = run->running_tool->async_vt.next_timeout_ms(
+            run->running_tool->userdata, run->tool_handle);
         return PUCI_OK;
     }
     if (run->state == PUCI_TS_RETRY_BACKOFF && run->backoff_pending) {
@@ -1189,7 +1318,25 @@ puci_status puci_agent_process(puci_session *sess, const struct pollfd *fds,
             break;
         }
         case PUCI_TS_DISPATCHING_TOOLS: {
-            (void)run_execute_tools(sess, run);
+            if (run_dispatch_tools(sess, run)) {
+                break; /* turn ended (cancelled/errored) */
+            }
+            /* Either the next call was dispatched inline (sync tool) and the
+             * loop should keep going, or we just transitioned to
+             * RUNNING_TOOL, in which case yield so the host polls the tool's
+             * fds instead of spinning. */
+            if (sess->run && sess->run->state == PUCI_TS_RUNNING_TOOL) {
+                goto yield;
+            }
+            break;
+        }
+        case PUCI_TS_RUNNING_TOOL: {
+            if (run_tool_step(sess, run)) {
+                break; /* turn ended (cancelled/errored) */
+            }
+            if (sess->run && sess->run->state == PUCI_TS_RUNNING_TOOL) {
+                goto yield; /* tool still in flight; wait on its fds */
+            }
             break;
         }
         case PUCI_TS_RETRY_BACKOFF: {
