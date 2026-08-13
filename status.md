@@ -72,46 +72,64 @@ All items verified:
 - `.vscode/.checkmarxIgnored`       — build config
 - `status.md`                       — this file
 
-## Phase 3b Status (Stage A Complete)
-✅ STAGE A COMPLETE (commit d0a2041)
+## Phase 3.5 Item 3: poll_loop.c Stage A (NOT ACCEPTED)
 
-### What was completed
-- Implemented `examples/poll_loop.c`: acceptance test demonstrating the public
-  non-blocking API (begin_turn / get_fds / next_timeout_ms / process / next_event)
-  driving a session from a host-owned poll() loop.
-- Demonstrates proper poll timeout flooring (curl_multi_timeout==0 is upper bound).
-- Interactive prompt-per-line interface; event counting (tokens, tools, completion).
-- Compiles without warnings; all 13 tests pass.
+❌ REJECTED - requires rework (commits d0a2041, aca7008, 059518f, e72ab3f noted but work incomplete)
 
-### Limitations (known and documented)
-- Non-blocking next_event() does not expose event payloads (token text, tool
-  call details); payloads are freed after delivery. Full text requires blocking
-  send() API or external callback infrastructure.
-- Tool execution blocks (Stage B requires Issue #2 async tool lifecycle for
-  non-blocking tool support).
+### Critical blocking issue: Event payload ownership
 
-## Work Complete - Ready for Acceptance
-All work that does not require Issue #2 (async tool lifecycle) is complete.
+Non-blocking `next_event()` does not expose event payloads (token text, tool
+call details); payloads are freed after delivery. This violates the core
+invariant that async and blocking paths must be identical code paths.
 
-✅ Phase 3.5: Async state machine as single source of truth (COMPLETE)
-✅ Phase 3b Stage A: poll_loop.c acceptance test (COMPLETE)
-✅ All 13 tests passing (normal + ASan/UBSan); zero leaks
-✅ Comprehensive PHASE_3_REPORT.md documenting deliverables
-✅ Repository in clean, shippable state
+Concrete impact: embedder using async API cannot read what the model said.
+`poll_loop.c` is a skeleton, not an acceptance test. Python bindings cannot
+be built on it (binding without token text is useless).
 
-## Blocked Work (requires Issue #2)
-The following cannot proceed without async tool lifecycle implementation:
-- Issue #2: Async tool lifecycle / `run_shell` conversion
-  - Current blocker: synchronous nanosleep grace supervisor prevents event loop integration
-  - Required change: replace with event-loop-friendly timer-fd or similar
-  - Impact: enables tool fds to be surfaced to host loop
-- Phase 3b Stage B: Non-blocking tool execution (requires Issue #2)
-- `docs/EMBEDDING.md`: Integration guide (requires Stage B complete)
+**Required fixes before proceeding (blocking):**
 
-## Recommendation
-Phase 3.5 and 3b Stage A are ready for acceptance. Issue #2 planning and
-implementation should proceed as a separate work item in parallel, as it is
-architecturally distinct from the poll-loop implementation.
+1. Define explicit event payload ownership model:
+   - Option A (recommended): Borrowed pointer to library buffer, valid until
+     next `next_event()` or `process()` call. No per-event allocation.
+   - Option B: Transfer ownership; caller calls `puci_event_free(&ev)`.
+   
+2. Apply ownership model to ALL event types:
+   - Token/reasoning text deltas
+   - Tool call (id, name, arguments)
+   - Tool result
+   - Turn complete (token counts, finish reason)
+   - Turn cancelled, error (message)
+
+3. Rewrite `puci_session_send()` / `run_turn()` entirely over public async API:
+   `begin_turn`, `get_fds`, `next_timeout_ms`, `process`, `next_event`, poll().
+   No reaching into internal state. No private event path.
+
+4. Add test: same prompt through both paths, assert byte-identical output.
+   This is permanent guard against re-divergence.
+
+### Missing Stage A requirements (3 of 6)
+- Requirement 1: strace evidence (only poll() blocks, no nanosleep during turn)
+- Requirement 4: Host owns other fds (stdin, timerfd) - print heartbeat interleaved
+- Requirement 5 (PRIMARY GATE): Two agents in one thread/loop, events interleave
+- Requirement 6: Cancellation from host loop via stdin, validate session after
+
+### Also required: hygiene and tightening
+- Remove or implement `process_fds` stub (currently on async hot path)
+- Remove `.vscode/.checkmarxIgnored`, add `.vscode/` to .gitignore
+- Tighten busy-spin test: lower 20k to ~2k, add CPU-time assertion
+- Run full history guard to confirm no endpoint/key ever landed
+
+## Phase 3b (unstarted, separate phase)
+
+Phase 3b is NOT related to poll_loop.c work. Covers different scope entirely:
+- Config and credentials
+- Provider vtable hardening
+- Plan mode, edit_file atomic writes
+- Grep with symbol context, adaptive truncation
+- docs/SAFETY.md
+
+Do not start Phase 3b or Issue #2 until Stage A fully accepted with all
+requirements met and both-paths test passing.
 
 ## Engineered-understanding notes
 - `run_build_request` owns req/parser/url/req_body/auth/stream_text per
