@@ -45,7 +45,7 @@ CC=clang meson setup build-clang && meson compile -C build-clang && meson test -
 
 For bounded one-shot agent runs, set `PUCI_MAX_TOOL_ITERATIONS` to a positive
 value up to 10000. When the limit is reached, PUCI ends the turn instead of
-continuing tool dispatch indefinitely and returns `PUCI_ERR_TIMEOUT`.
+continuing tool dispatch indefinitely and returns `PUCI_ERR_LIMIT_EXCEEDED`.
 
 Install the library and compile an embedder with `pkg-config`:
 

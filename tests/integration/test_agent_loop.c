@@ -144,7 +144,7 @@ static void server_child(int pipe_w) {
 
     /* Listen before signalling the port so the parent's first connect is never
      * refused by a not-yet-listening socket. */
-    if (listen(srv, 8) != 0) {
+    if (listen(srv, 16) != 0) {
         _exit(1);
     }
 
@@ -154,7 +154,8 @@ static void server_child(int pipe_w) {
     write_all(pipe_w, pbuf, (size_t)n);
     close(pipe_w);
 
-    for (int turn = 0; turn < 3; turn++) {
+    /* Turns 0 & 1: Happy path (2 requests each: tool call then final reply) */
+    for (int turn = 0; turn < 2; turn++) {
         int c1 = accept(srv, NULL, NULL);
         if (c1 >= 0) {
             drain_request(c1);
@@ -168,6 +169,37 @@ static void server_child(int pipe_w) {
             close(c2);
         }
     }
+
+    /* Turns 2 & 3: Error equivalence (max_tool_iterations=1, 1 request each: SSE0) */
+    for (int turn = 0; turn < 2; turn++) {
+        int c1 = accept(srv, NULL, NULL);
+        if (c1 >= 0) {
+            drain_request(c1);
+            serve_sse(c1, SSE0);
+            close(c1);
+        }
+    }
+
+    /* Turn 4: Upstream HTTP 500 server error mid-turn */
+    {
+        int c1 = accept(srv, NULL, NULL);
+        if (c1 >= 0) {
+            drain_request(c1);
+            write_all(c1, "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", 75);
+            close(c1);
+        }
+    }
+
+    /* Turn 5: Healthy subsequent turn after error on same session */
+    {
+        int c2 = accept(srv, NULL, NULL);
+        if (c2 >= 0) {
+            drain_request(c2);
+            serve_sse(c2, SSE1);
+            close(c2);
+        }
+    }
+
     close(srv);
     _exit(0);
 }
@@ -316,6 +348,8 @@ static void test_full_agent_loop(void) {
         CHECK(strcmp(async_counts.final_text, c.final_text) == 0);
     }
 
+    /* ---- Error Path Equivalence: max_tool_iterations = 1 ---- */
+    /* 1. Blocking path on limit exhaustion */
     puci_session_options limited_opts = sopts;
     limited_opts.event_cb = NULL;
     limited_opts.event_userdata = NULL;
@@ -324,12 +358,77 @@ static void test_full_agent_loop(void) {
     CHECK(puci_session_create(ctx, &limited_opts, &limited_sess) == PUCI_OK);
     puci_status limited_status =
         puci_session_send(limited_sess, "run the echo tool then reply");
-    CHECK(limited_status == PUCI_ERR_TIMEOUT);
+    CHECK(limited_status == PUCI_ERR_LIMIT_EXCEEDED);
+    CHECK(puci_session_last_status(limited_sess) == PUCI_ERR_LIMIT_EXCEEDED);
+
+    /* 2. Async path on limit exhaustion */
+    puci_session *limited_async_sess = NULL;
+    CHECK(puci_session_create(ctx, &limited_opts, &limited_async_sess) == PUCI_OK);
+    CHECK(puci_session_begin_turn(limited_async_sess, "run the echo tool then reply") == PUCI_OK);
+
+    puci_status limited_async_status = PUCI_ERR_UNKNOWN;
+    int limited_done = 0;
+    int limited_tool_starts = 0, limited_tool_ends = 0, limited_completes = 0, limited_errors = 0;
+    for (int guard = 0; guard < 10000 && !limited_done; guard++) {
+        int timeout_ms = -1;
+        struct pollfd fds[64];
+        size_t fd_count = 0;
+        CHECK(puci_session_next_timeout_ms(limited_async_sess, &timeout_ms) == PUCI_OK);
+        CHECK(puci_session_get_fds(limited_async_sess, fds, 64, &fd_count) == PUCI_OK);
+        int wait_ms = timeout_ms < 0 ? 1000 : timeout_ms;
+        if (wait_ms > 1000) {
+            wait_ms = 1000;
+        }
+        (void)poll(fd_count ? fds : NULL, (nfds_t)fd_count, wait_ms);
+        limited_async_status = puci_session_process(limited_async_sess, fds, fd_count);
+
+        puci_event ev;
+        while (puci_session_next_event(limited_async_sess, &ev)) {
+            if (ev.kind == PUCI_EVENT_TOOL_CALL_START) {
+                limited_tool_starts++;
+            } else if (ev.kind == PUCI_EVENT_TOOL_CALL_END) {
+                limited_tool_ends++;
+            } else if (ev.kind == PUCI_EVENT_TURN_COMPLETE) {
+                limited_completes++;
+                limited_done = 1;
+            } else if (ev.kind == PUCI_EVENT_ERROR) {
+                limited_errors++;
+                CHECK(ev.payload.error.status == PUCI_ERR_LIMIT_EXCEEDED);
+                CHECK(ev.text != NULL && strstr(ev.text, "tool iteration limit") != NULL);
+                limited_done = 1;
+            } else if (ev.kind == PUCI_EVENT_TURN_CANCELLED) {
+                limited_done = 1;
+            }
+        }
+    }
+
+    CHECK(limited_async_status == PUCI_ERR_LIMIT_EXCEEDED);
+    CHECK(puci_session_last_status(limited_async_sess) == PUCI_ERR_LIMIT_EXCEEDED);
+    CHECK(limited_tool_starts == 0);
+    CHECK(limited_tool_ends == 0);
+    CHECK(limited_completes == 0);
+    CHECK(limited_errors == 1);
+
+    /* ---- Mid-Stream Teardown & Subsequent Turn on Same Session (5a) ---- */
+    /* Turn fails with deterministic upstream HTTP 500 protocol error */
+    puci_session *recovery_sess = NULL;
+    CHECK(puci_session_create(ctx, &sopts, &recovery_sess) == PUCI_OK);
+    puci_status mid_stream_st = puci_session_send(recovery_sess, "trigger upstream 500 error");
+    CHECK(mid_stream_st == PUCI_ERR_PROTOCOL);
+    CHECK(puci_session_last_status(recovery_sess) == PUCI_ERR_PROTOCOL);
+
+    /* Subsequent turn on the SAME session succeeds and is not left in OUT_OF_STATE / BUSY */
+    puci_status recovery_st = puci_session_send(recovery_sess, "healthy turn");
+    CHECK(recovery_st == PUCI_OK);
+    CHECK(recovery_st != PUCI_ERR_OUT_OF_STATE);
+
     kill(pid, SIGKILL);
 
     puci_session_destroy(sess);
     puci_session_destroy(async_sess);
     puci_session_destroy(limited_sess);
+    puci_session_destroy(limited_async_sess);
+    puci_session_destroy(recovery_sess);
     puci_context_destroy(ctx);
 
     free(c.final_text);

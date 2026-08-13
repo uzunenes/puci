@@ -82,8 +82,29 @@ static void test_custom_tool_via_registry_path(void) {
     puci_context_destroy(ctx);
 }
 
+static void test_async_tool_registration_validation(void) {
+    puci_context *ctx = NULL;
+    CHECK(puci_context_create(NULL, &ctx) == PUCI_OK);
+
+    puci_tool_spec spec;
+    memset(&spec, 0, sizeof(spec));
+    spec.name = "async_mock";
+    spec.description = "mock async tool";
+    spec.input_schema = "{\"type\":\"object\"}";
+
+    /* Incomplete vtable (e.g. NULL step) must be rejected */
+    puci_tool_async_vtable vt;
+    memset(&vt, 0, sizeof(vt));
+    CHECK(puci_tool_register_async(ctx, &spec, &vt, NULL) == PUCI_ERR_INVALID_ARG);
+    CHECK(puci_tool_register_async(ctx, NULL, &vt, NULL) == PUCI_ERR_INVALID_ARG);
+    CHECK(puci_tool_register_async(ctx, &spec, NULL, NULL) == PUCI_ERR_INVALID_ARG);
+
+    puci_context_destroy(ctx);
+}
+
 int main(void) {
     test_builtins_registered();
     test_custom_tool_via_registry_path();
+    test_async_tool_registration_validation();
     TEST_END();
 }

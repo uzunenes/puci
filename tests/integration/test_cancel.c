@@ -703,10 +703,100 @@ static void test_approval_cancel(void) {
     CHECK(count_children() == 0);
 }
 
+static void test_cancellation_equivalence(void) {
+    plan pl;
+    memset(&pl, 0, sizeof(pl));
+    pl.mode = MODE_LOOP;
+    pl.count = 4;
+    pl.chunks = 200;
+    pl.delay_ms = 5; /* ~1000ms stream */
+
+    pid_t spid = 0;
+    int port = spawn_server(&pl, &spid);
+    CHECK(port > 0);
+
+    puci_context *ctx = NULL;
+    CHECK(puci_context_create(NULL, &ctx) == PUCI_OK);
+
+    /* 1. Cancellation on Blocking Path */
+    mevent m_block;
+    memset(&m_block, 0, sizeof(m_block));
+    puci_session *sess_block = make_session(ctx, port, &m_block, NULL, NULL);
+    CHECK(sess_block != NULL);
+
+    caretaker ct_block;
+    ct_block.sess = sess_block;
+    ct_block.delay_ms = 100;
+    pthread_t th_block;
+    CHECK(pthread_create(&th_block, NULL, caretaker_thread, &ct_block) == 0);
+    puci_status st_block = puci_session_send(sess_block, "stream to cancel");
+    pthread_join(th_block, NULL);
+
+    CHECK(st_block == PUCI_ERR_CANCELLED);
+    CHECK(m_block.cancelled_events == 1);
+    CHECK(puci_session_last_status(sess_block) == PUCI_ERR_CANCELLED);
+
+    /* 2. Cancellation on Async Path */
+    puci_session *sess_async = make_session(ctx, port, NULL, NULL, NULL);
+    CHECK(sess_async != NULL);
+    CHECK(puci_session_begin_turn(sess_async, "stream to cancel") == PUCI_OK);
+
+    puci_status st_async = PUCI_ERR_UNKNOWN;
+    int async_cancelled_event = 0;
+    int async_done = 0;
+    int cancel_triggered = 0;
+
+    for (int guard = 0; guard < 20000 && !async_done; guard++) {
+        int timeout_ms = -1;
+        struct pollfd fds[16];
+        size_t fd_count = 0;
+        CHECK(puci_session_next_timeout_ms(sess_async, &timeout_ms) == PUCI_OK);
+        CHECK(puci_session_get_fds(sess_async, fds, 16, &fd_count) == PUCI_OK);
+        int wait_ms = timeout_ms < 0 ? 1000 : timeout_ms;
+        if (wait_ms > 1000) {
+            wait_ms = 1000;
+        }
+        (void)poll(fd_count ? fds : NULL, (nfds_t)fd_count, wait_ms);
+
+        if (!cancel_triggered && guard > 2) {
+            puci_session_cancel(sess_async);
+            cancel_triggered = 1;
+        }
+
+        st_async = puci_session_process(sess_async, fds, fd_count);
+
+        puci_event ev;
+        while (puci_session_next_event(sess_async, &ev)) {
+            if (ev.kind == PUCI_EVENT_TURN_CANCELLED) {
+                async_cancelled_event++;
+                async_done = 1;
+            } else if (ev.kind == PUCI_EVENT_TURN_COMPLETE || ev.kind == PUCI_EVENT_ERROR) {
+                async_done = 1;
+            }
+        }
+    }
+
+    CHECK(st_async == PUCI_ERR_CANCELLED);
+    CHECK(puci_session_last_status(sess_async) == PUCI_ERR_CANCELLED);
+    CHECK(async_cancelled_event == 1);
+
+    /* Both blocking and async path produced identical terminal status and cancellation event */
+    CHECK(st_block == st_async);
+    CHECK(m_block.cancelled_events == async_cancelled_event);
+
+    puci_session_destroy(sess_block);
+    puci_session_destroy(sess_async);
+    puci_context_destroy(ctx);
+    kill(spid, SIGKILL);
+    waitpid(spid, NULL, 0);
+    CHECK(count_children() == 0);
+}
+
 int main(void) {
     test_mid_stream_100();
     test_silent_gap();
     test_tool_execution_cancel();
     test_approval_cancel();
+    test_cancellation_equivalence();
     TEST_END();
 }

@@ -231,7 +231,9 @@ static void test_run_shell_does_not_block_host_loop(void) {
     CHECK(timerfd_settime(tfd, 0, &its, NULL) == 0);
 
     int heartbeats = 0;
+    int heartbeats_during_tool = 0;
     int tool_fds_seen_while_running = 0;
+    int in_tool_state = 0;
     long long max_process_gap_ms = 0;
     long long last_process_at = now_ms();
     int done = 0;
@@ -270,6 +272,9 @@ static void test_run_shell_does_not_block_host_loop(void) {
             ssize_t rr = read(tfd, &ticks, sizeof(ticks));
             (void)rr;
             heartbeats++;
+            if (in_tool_state) {
+                heartbeats_during_tool++;
+            }
         }
 
         /* Session fds (only) for process(); the host fd is not the session's
@@ -278,8 +283,12 @@ static void test_run_shell_does_not_block_host_loop(void) {
 
         size_t probe_count = 0;
         CHECK(puci_session_get_fds(sess, NULL, 0, &probe_count) == PUCI_OK);
-        if (probe_count > 0) {
+        if (probe_count > 1) {
+            /* Cancel fd + tool stdout/stderr pipes => tool is running in loop */
             tool_fds_seen_while_running = 1;
+            in_tool_state = 1;
+        } else {
+            in_tool_state = 0;
         }
 
         puci_event ev;
@@ -296,10 +305,11 @@ static void test_run_shell_does_not_block_host_loop(void) {
 
     CHECK(status == PUCI_OK);
     CHECK(done);
-    /* The ~1s tool run allowed the 100ms host timerfd heartbeat to fire multiple
-     * times while running, proving the tool did not block the host poll loop. */
+    /* Structural assertions: host timerfd heartbeats were received while the tool
+     * was actively running, and tool pipe descriptors were surfaced in the poll set. */
+    CHECK(tool_fds_seen_while_running == 1);
+    CHECK(heartbeats_during_tool >= 1);
     CHECK(heartbeats >= 3);
-    CHECK(tool_fds_seen_while_running);
 
     puci_session_destroy(sess);
     puci_context_destroy(ctx);

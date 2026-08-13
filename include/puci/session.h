@@ -37,7 +37,7 @@ typedef struct puci_session_options {
     puci_session_event_cb event_cb; /**< streaming/event callback (optional) */
     void *event_userdata;           /**< passed to event_cb */
     const char *system_prompt;      /**< optional system prompt */
-    size_t max_tool_iterations;     /**< cap on tool calls per turn, 0 = default(32); exceeding it returns PUCI_ERR_TIMEOUT */
+    size_t max_tool_iterations;     /**< cap on tool calls per turn, 0 = default(32); exceeding it returns PUCI_ERR_LIMIT_EXCEEDED */
     puci_approval_cb approve_cb;    /**< tool approval policy hook, invoked before each tool runs (optional) */
     void *approve_userdata;         /**< passed to approve_cb */
 } puci_session_options;
@@ -107,9 +107,12 @@ puci_status puci_session_begin_turn(puci_session *sess, const char *message);
 
 /** Writes up to cap fds libpuci wants polled into fds, and the count into
  *  *out_count. With cap == 0 (and fds possibly NULL) returns the required
- *  count in *out_count so callers can size their array; this is not an error.
- *  Returns PUCI_OK. When idle (no turn in flight) *out_count is 0. The cancel
- *  fd is surfaced separately via puci_session_cancel_fd. */
+ *  count in *out_count so callers can size their array; this is not an error
+ *  and returns PUCI_OK. When cap > 0 and the required count exceeds cap, the
+ *  cancel fd is prioritized in fds[0], *out_count is set to cap, and
+ *  PUCI_ERR_BUFFER_TOO_SMALL is returned. When idle (no turn in flight)
+ *  *out_count is 0. The cancel fd is surfaced separately via
+ *  puci_session_cancel_fd. */
 puci_status puci_session_get_fds(puci_session *sess, struct pollfd *fds,
                                  size_t cap, size_t *out_count);
 

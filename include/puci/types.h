@@ -45,6 +45,8 @@ typedef enum puci_status {
     PUCI_ERR_TOOL_FAILED,   /**< a tool invocation returned an error */
     PUCI_ERR_OUT_OF_STATE,  /**< an operation was performed in the wrong state */
     PUCI_ERR_CANCELLED,     /**< the operation was cancelled by the caller */
+    PUCI_ERR_BUFFER_TOO_SMALL, /**< caller-provided buffer capacity is too small */
+    PUCI_ERR_LIMIT_EXCEEDED,   /**< a configured iteration, budget, or size limit was reached */
 } puci_status;
 
 /** Allocator vtable. All three callbacks may be NULL to use the standard

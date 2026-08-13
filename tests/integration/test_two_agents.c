@@ -185,12 +185,6 @@ static puci_session *make_session(puci_context *ctx, int port) {
     return sess;
 }
 
-static long long now_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-}
-
 /* Aggregates fds/timeout for one session into the shared arrays, returning
  * the number of fds appended. *min_ms is folded down (never up). */
 static size_t fold_session(puci_session *sess, int done,
@@ -226,8 +220,10 @@ static void test_two_concurrent_agents(void) {
     CHECK(puci_session_begin_turn(sessA, "run a slow tool") == PUCI_OK);
     CHECK(puci_session_begin_turn(sessB, "run a fast tool") == PUCI_OK);
 
-    long long t0 = now_ms();
     int done_a = 0, done_b = 0;
+    int events_a = 0, events_b = 0;
+    int a_saw_events_before_b_done = 0;
+    int b_saw_events_before_a_done = 0;
     puci_status status_a = PUCI_ERR_UNKNOWN, status_b = PUCI_ERR_UNKNOWN;
 
     /* One loop, one poll() call per iteration, no threads: this is the whole
@@ -248,6 +244,10 @@ static void test_two_concurrent_agents(void) {
             status_a = puci_session_process(sessA, fds, na);
             puci_event ev;
             while (puci_session_next_event(sessA, &ev)) {
+                events_a++;
+                if (!done_b) {
+                    a_saw_events_before_b_done = 1;
+                }
                 if (ev.kind == PUCI_EVENT_TURN_COMPLETE ||
                     ev.kind == PUCI_EVENT_ERROR ||
                     ev.kind == PUCI_EVENT_TURN_CANCELLED) {
@@ -259,6 +259,10 @@ static void test_two_concurrent_agents(void) {
             status_b = puci_session_process(sessB, fds + na, nb);
             puci_event ev;
             while (puci_session_next_event(sessB, &ev)) {
+                events_b++;
+                if (!done_a) {
+                    b_saw_events_before_a_done = 1;
+                }
                 if (ev.kind == PUCI_EVENT_TURN_COMPLETE ||
                     ev.kind == PUCI_EVENT_ERROR ||
                     ev.kind == PUCI_EVENT_TURN_CANCELLED) {
@@ -267,15 +271,16 @@ static void test_two_concurrent_agents(void) {
             }
         }
     }
-    long long elapsed = now_ms() - t0;
 
     CHECK(done_a && done_b);
     CHECK(status_a == PUCI_OK);
     CHECK(status_b == PUCI_OK);
-    /* Concurrency check: both sessions finished successfully within the same
-     * poll loop without blocking or interfering with one another. We give generous
-     * timing bounds (2000ms) to ensure stability on heavily loaded CI hosts. */
-    CHECK(elapsed < 2000);
+    /* Structural interleaving: both sessions actively produced and processed events
+     * before either session completed. */
+    CHECK(events_a > 0);
+    CHECK(events_b > 0);
+    CHECK(a_saw_events_before_b_done == 1);
+    CHECK(b_saw_events_before_a_done == 1);
 
     puci_session_destroy(sessA);
     puci_session_destroy(sessB);

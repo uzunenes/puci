@@ -864,7 +864,7 @@ static int run_stream_step(puci_session *sess, struct puci_turn_run *run) {
     run->stream_text = dupstr(text);
     int has_tool_calls = tool_call_ready(&run->turn) && run->turn.had_tool_calls;
     if (has_tool_calls && run->iter + 1 >= run->max_iter) {
-        fin_error(sess, run, PUCI_ERR_TIMEOUT, "tool iteration limit reached");
+        fin_error(sess, run, PUCI_ERR_LIMIT_EXCEEDED, "tool iteration limit reached");
         return 1;
     }
     run->want_tools = has_tool_calls;
@@ -951,7 +951,7 @@ static int tool_dispatch_finish(puci_session *sess, struct puci_turn_run *run,
         return 1;
     }
     if (run->iter >= run->max_iter) {
-        fin_error(sess, run, PUCI_ERR_TIMEOUT, "tool iteration limit reached");
+        fin_error(sess, run, PUCI_ERR_LIMIT_EXCEEDED, "tool iteration limit reached");
         return 1;
     }
     run->state = PUCI_TS_BUILD_REQUEST;
@@ -1162,46 +1162,53 @@ puci_status puci_agent_get_fds(puci_session *sess, struct pollfd *fds,
     if (!sess || !out_count) {
         return PUCI_ERR_INVALID_ARG;
     }
-    size_t n = 0;
     struct puci_turn_run *run = sess->run;
+    size_t sub_fds = 0;
     if (run && run->state == PUCI_TS_RUNNING_TOOL && run->running_tool) {
-        /* Checked before run->req: req remains non-NULL (but idle, its
-         * transfer already finished) throughout tool dispatch until the next
-         * run_build_request frees it, so req-non-NULL alone cannot gate this. */
-        size_t tn = 0;
         run->running_tool->async_vt.get_fds(run->running_tool->userdata,
-                                            run->tool_handle, fds, cap, &tn);
-        n = tn;
+                                            run->tool_handle, NULL, 0, &sub_fds);
     } else if (run && run->req) {
-        n = puci_http_get_fds(run->req, fds, cap);
+        sub_fds = puci_http_fd_count(run->req);
     }
+    int cfd = sess->cancel_fd;
+    size_t has_cfd = (cfd >= 0) ? 1 : 0;
+    size_t required = sub_fds + has_cfd;
+
     if (cap == 0) {
-        /* Sizing query: report the required count (http or tool fds, plus the
-         * cancel fd). The branches above wrote nothing here (cap==0), so
-         * query the counts directly. */
-        size_t required = 0;
-        if (run && run->state == PUCI_TS_RUNNING_TOOL && run->running_tool) {
-            size_t tn = 0;
-            run->running_tool->async_vt.get_fds(run->running_tool->userdata,
-                                                run->tool_handle, NULL, 0, &tn);
-            required += tn;
-        } else if (run && run->req) {
-            required += puci_http_fd_count(run->req);
-        }
-        if (sess->cancel_fd >= 0) {
-            required++;
-        }
         *out_count = required;
         return PUCI_OK;
     }
-    int cfd = sess->cancel_fd;
-    if (n < cap && cfd >= 0) {
+    if (!fds) {
+        return PUCI_ERR_INVALID_ARG;
+    }
+
+    size_t n = 0;
+    /* Priority 1: Cancellation fd is always placed in fds[0] if present and cap >= 1 */
+    if (has_cfd && n < cap) {
         fds[n].fd = cfd;
         fds[n].events = POLLIN;
         fds[n].revents = 0;
         n++;
     }
+
+    /* Priority 2: Fill remaining slots with sub-operation fds */
+    if (n < cap && sub_fds > 0) {
+        size_t rem_cap = cap - n;
+        if (run && run->state == PUCI_TS_RUNNING_TOOL && run->running_tool) {
+            size_t tn = 0;
+            run->running_tool->async_vt.get_fds(run->running_tool->userdata,
+                                                run->tool_handle, fds + n, rem_cap, &tn);
+            n += (tn > rem_cap ? rem_cap : tn);
+        } else if (run && run->req) {
+            size_t hn = puci_http_get_fds(run->req, fds + n, rem_cap);
+            n += hn;
+        }
+    }
     *out_count = n;
+
+    if (required > cap) {
+        return PUCI_ERR_BUFFER_TOO_SMALL;
+    }
     return PUCI_OK;
 }
 

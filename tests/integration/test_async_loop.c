@@ -447,6 +447,17 @@ static int drive_streaming_turn(int nchunks, int delay_ms, int distinct,
         struct pollfd fds[16];
         size_t n = 0;
         puci_session_get_fds(sess, fds, 16, &n);
+        if (n > 1) {
+            /* While multiple fds (HTTP socket + cancel fd) are active, verify
+             * that querying with cap == 1 returns PUCI_ERR_BUFFER_TOO_SMALL,
+             * writes 1 fd, and that 1 fd is the cancel fd. */
+            struct pollfd f1[1];
+            size_t w1 = 0;
+            puci_status st1 = puci_session_get_fds(sess, f1, 1, &w1);
+            CHECK(st1 == PUCI_ERR_BUFFER_TOO_SMALL);
+            CHECK(w1 == 1);
+            CHECK(f1[0].fd == puci_session_cancel_fd(sess));
+        }
         int pt = ms < 0 ? 1000 : (ms > 1000 ? 1000 : ms);
         if (n > 0) {
             (void)poll(fds, (nfds_t)n, pt);
@@ -742,20 +753,21 @@ int main(void) {
         /* Start a turn. */
         CHECK(puci_session_begin_turn(sess, "test") == PUCI_OK);
         
-        /* Now query sizing: cap==0 with NULL buffer should return required count. */
+        /* Sizing query: cap==0 with NULL buffer returns required count. */
         count = 0;
         CHECK(puci_session_get_fds(sess, NULL, 0, &count) == PUCI_OK);
-        /* Exact count varies (depends on connection state), but should be > 0
-         * since we have a pending HTTP request. */
         CHECK(count > 0);
-        
-        /* Query with adequate capacity should return same count and fill buffer. */
+
+        /* Query with adequate capacity should return PUCI_OK, count matching required, and fill buffer. */
         struct pollfd fds[16];
         size_t actual = 0;
         CHECK(puci_session_get_fds(sess, fds, 16, &actual) == PUCI_OK);
         CHECK(actual == count);
         CHECK(actual > 0);
-        
+        int expected_cfd = puci_session_cancel_fd(sess);
+        CHECK(expected_cfd >= 0);
+        CHECK(fds[0].fd == expected_cfd);
+
         puci_session_destroy(sess);
         puci_context_destroy(ctx);
     }

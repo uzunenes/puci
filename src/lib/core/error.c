@@ -18,6 +18,8 @@ static const char *k_tokens[] = {
     [PUCI_ERR_TOOL_FAILED] = "tool_failed",
     [PUCI_ERR_OUT_OF_STATE] = "out_of_state",
     [PUCI_ERR_CANCELLED] = "cancelled",
+    [PUCI_ERR_BUFFER_TOO_SMALL] = "buffer_too_small",
+    [PUCI_ERR_LIMIT_EXCEEDED] = "limit_exceeded",
 };
 
 const char *puci_status_string(puci_status status) {
@@ -48,6 +50,10 @@ const char *puci_status_string(puci_status status) {
         return "invalid operation state";
     case PUCI_ERR_CANCELLED:
         return "cancelled";
+    case PUCI_ERR_BUFFER_TOO_SMALL:
+        return "buffer capacity too small";
+    case PUCI_ERR_LIMIT_EXCEEDED:
+        return "limit exceeded";
     }
     return "unknown error";
 }
