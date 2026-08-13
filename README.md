@@ -7,6 +7,7 @@ embedders that want a small provider/tool core and a caller-owned poll loop.
 
 - OpenAI-compatible streaming and provider transcript fixtures
 - Blocking `puci_session_send()` and non-blocking, pollable session driving
+- Non-blocking (async) tool execution lifecycle (new in 0.1.0, lightly tested)
 - Text, reasoning, tool-call, tool-result, completion, cancellation, and error
 	event payloads
 - Custom tools, approval callbacks, cancellation, ASan/UBSan, and Clang builds
@@ -14,10 +15,11 @@ embedders that want a small provider/tool core and a caller-owned poll loop.
 ## Current limitations
 
 The v0.1.0 release includes the non-blocking async tool lifecycle and
-multi-agent poll-loop support in `libpuci`. However, the Stage A CLI examples
-and embedding guides do not yet demonstrate advanced features such as
-interactive stdin-driven cancellation or full terminal-based multiplexing.
-Python bindings and Phase 3b feature sets are not part of this source release.
+multi-agent poll-loop support in `libpuci`. However, async tool execution is
+newly introduced and lightly tested; Stage A CLI examples and embedding guides
+do not yet demonstrate advanced features such as interactive stdin-driven
+cancellation or full terminal-based multiplexing. Python bindings and Phase 3b
+feature sets are not part of this source release.
 
 The public API is an early 0.x contract and may change before 1.0.
 

@@ -44,6 +44,9 @@ external commercial tools.
 
 ### Current State
 - **Available tool**: Only `write_file` (`src/lib/tools/write_file.c:23-81`).
+  Note: An experimental non-blocking async tool execution engine (`puci_tool_async_vtable`
+  and `src/lib/tools/run_shell.c`) landed in 0.1.0 and has not yet been independently
+  audited; the next development cycle should audit and extend it.
 - **Mechanism**: `fopen(path, "wb")` followed by `fwrite(content, 1, len, f)`.
 - **Failure modes**:
   - Direct truncation before write completes: if `fwrite` is interrupted,
