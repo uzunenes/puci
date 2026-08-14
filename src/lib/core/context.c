@@ -198,6 +198,15 @@ puci_status puci_context_create(const puci_context_options *opts,
         st = puci_register_tool_write_file(ctx);
     }
     if (st == PUCI_OK) {
+        st = puci_register_tool_edit_file(ctx);
+    }
+    if (st == PUCI_OK) {
+        st = puci_register_tool_grep(ctx);
+    }
+    if (st == PUCI_OK) {
+        st = puci_register_tool_glob(ctx);
+    }
+    if (st == PUCI_OK) {
         st = puci_register_tool_run_shell(ctx);
     }
     if (st != PUCI_OK) {

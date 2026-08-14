@@ -49,7 +49,7 @@ static void test_messages_and_tools_are_json_arrays(void) {
         puci_arena_destroy(&a);
     }
 
-    /* Tools must serialize to a JSON array of the 3 built-in tools. */
+    /* Tools must serialize to a JSON array of the 6 built-in tools. */
     puci_strbuf tools;
     puci_strbuf_init(&tools, &sess->alloc);
     CHECK(session_serialize_tools(sess, &tools) == PUCI_OK);
@@ -60,7 +60,7 @@ static void test_messages_and_tools_are_json_arrays(void) {
         int rc = pj_parse(&a, puci_strbuf_cstr(&tools), tools.len, &root);
         CHECK(rc == 0);
         CHECK(root && root->type == PJ_ARR);
-        CHECK(pj_arr_len(root) == 3);
+        CHECK(pj_arr_len(root) == 6);
         puci_arena_destroy(&a);
     }
 
