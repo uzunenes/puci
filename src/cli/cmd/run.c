@@ -8,6 +8,7 @@
  */
 
 #include <puci/puci.h>
+#include "config.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -67,35 +68,19 @@ int puci_cli_run(int argc, char **argv) {
     }
     prompt[off] = '\0';
 
-    const char *base = getenv("PUCI_BASE_URL");
-    const char *key = getenv("PUCI_API_KEY");
-    const char *model = getenv("PUCI_MODEL");
-    if (!base) {
-        base = "https://api.openai.com/v1";
-    }
-    if (!model) {
-        model = "gpt-4o-mini";
+    puci_provider_config *pcfg = puci_cli_provider("openai");
+    if (!pcfg) {
+        fprintf(stderr, "puci: failed to resolve provider config\n");
+        free(prompt);
+        return 1;
     }
 
-    /* Live-robustness overrides. TLS always verifies by default; relaxation is
-     * only possible when the user explicitly opts in via PUCI_TLS_VERIFY=0 AND
-     * the host is allowlisted through PUCI_INSECURE_TLS_HOSTS. */
-    const char *cafile = getenv("PUCI_CA_BUNDLE");
-    const char *extra = getenv("PUCI_EXTRA_BODY");
-    const char *tls = getenv("PUCI_TLS_VERIFY");
-    int tls_verify = 1;
-    if (tls && *tls && (strcmp(tls, "0") == 0 || strcmp(tls, "false") == 0 ||
-                        strcmp(tls, "off") == 0)) {
-        tls_verify = 0;
+    if (!pcfg->api_key || !pcfg->api_key[0]) {
+        fprintf(stderr, "puci: missing API key. Set PUCI_API_KEY environment variable or configure 'api_key' in ~/.config/puci/config.toml\n");
+        free(prompt);
+        return 1;
     }
-    const char *idle = getenv("PUCI_STREAM_IDLE_TIMEOUT_SECS");
-    int idle_ms = 0;
-    if (idle && *idle) {
-        long secs = strtol(idle, NULL, 10);
-        if (secs > 0 && secs <= 2147483) {
-            idle_ms = (int)(secs * 1000);
-        }
-    }
+
     const char *max_iters_env = getenv("PUCI_MAX_TOOL_ITERATIONS");
     size_t max_tool_iterations = 0;
     if (max_iters_env && *max_iters_env) {
@@ -114,18 +99,7 @@ int puci_cli_run(int argc, char **argv) {
         return 1;
     }
 
-    puci_provider_config pcfg = {
-        .name = "openai",
-        .base_url = base,
-        .api_key = key,
-        .model = model,
-        .timeout_ms = 120000,
-        .tls_verify = tls_verify,
-        .stream_idle_timeout_ms = idle_ms,
-        .ca_bundle = cafile,
-        .extra_body = extra,
-    };
-    puci_status st = puci_context_set_provider(ctx, &pcfg);
+    puci_status st = puci_context_set_provider(ctx, pcfg);
     if (st != PUCI_OK) {
         fprintf(stderr, "puci: failed to set provider: %s\n",
                 puci_status_string(st));
@@ -135,7 +109,7 @@ int puci_cli_run(int argc, char **argv) {
     }
 
     puci_session_options sopts = {0};
-    sopts.provider = pcfg;
+    sopts.provider = *pcfg;
     sopts.event_cb = stream_event;
     sopts.system_prompt = "You are puci, a fast coding agent. Be concise.";
     sopts.max_tool_iterations = max_tool_iterations;

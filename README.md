@@ -56,6 +56,22 @@ meson install -C build
 cc examples/embedded_headless.c $(pkg-config --cflags --libs puci) -o embedded_headless
 ```
 
+## Configuration and Credentials
+
+Configuration resolution follows strict precedence (highest first):
+
+1. Command-line flags (e.g. `--model`)
+2. Environment variables (`PUCI_API_KEY`, `PUCI_BASE_URL`, `PUCI_MODEL`, etc.)
+3. Project-local config (`.puci.toml` or `.puci/config.toml`) — **credentials forbidden**
+4. User global config (`~/.config/puci/config.toml`)
+5. Built-in defaults
+
+**Credentials Rule**: API keys (`api_key`) and base URLs (`base_url`) are only accepted from environment variables or the user's global config file (`~/.config/puci/config.toml`). If credential fields appear in project-local configuration files, they are rejected with a fatal error to prevent accidental secret leakage into repositories.
+
+## Self-Hosting and Recovery
+
+When using PUCI to develop PUCI, preserve a verified known-good binary with `make install-good` to `~/.local/bin/puci-good`. See [docs/RECOVERY.md](docs/RECOVERY.md) for the one-line recovery guide and path protection details.
+
 ## License
 
 PUCI is released under the MIT License. See [LICENSE](LICENSE).

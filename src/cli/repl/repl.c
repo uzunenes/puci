@@ -491,6 +491,13 @@ int puci_cli_repl(void) {
 
         ledit_history_add(r.ed, line);
 
+        puci_provider_config *cur_pc = puci_cli_provider("openai");
+        if (!cur_pc || !cur_pc->api_key || !cur_pc->api_key[0]) {
+            fprintf(stderr, "puci: missing API key. Set PUCI_API_KEY environment variable or configure 'api_key' in ~/.config/puci/config.toml\n");
+            free(line);
+            continue;
+        }
+
         g_cur_sess = r.sess;
         puci_status st = puci_session_send(r.sess, line);
         g_cur_sess = NULL;

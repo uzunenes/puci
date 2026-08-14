@@ -15,6 +15,15 @@
 #include "util/strbuf.h"
 #include "util/alloc.h"
 
+int puci_config_parse_file(const char *filepath, int is_project_local,
+                           char *base_url, size_t base_cap,
+                           char *model, size_t model_cap,
+                           char *api_key, size_t key_cap,
+                           char *ca_bundle, size_t ca_cap,
+                           char *extra_body, size_t extra_cap,
+                           int *tls_verify, int *stream_idle_ms,
+                           char *err_buf, size_t err_cap);
+
 /* ------------------------------------------------------------------ */
 /* Forward declarations.                                               */
 /* ------------------------------------------------------------------ */
