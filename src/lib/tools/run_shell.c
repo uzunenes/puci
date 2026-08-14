@@ -136,10 +136,17 @@ static int shell_finish(shell_async_state *st, char **out_result,
     puci_strbuf_init(&res, NULL);
     puci_strbuf_append_fmt(&res,
                            "{\"ok\":%s,\"exit_code\":%d,\"timed_out\":%s,"
-                           "\"cancelled\":%s,\"stdout\":",
-                           st->was_cancelled ? "false" : "true", st->status,
+                           "\"cancelled\":%s",
+                           (st->was_cancelled || st->timed_out) ? "false" : "true",
+                           st->status,
                            st->timed_out ? "true" : "false",
                            st->was_cancelled ? "true" : "false");
+    if (st->timed_out) {
+        puci_strbuf_appendz(&res, ",\"error\":\"PUCI_ERR_TOOL_TIMEOUT: tool execution timed out\"");
+    } else if (st->was_cancelled) {
+        puci_strbuf_appendz(&res, ",\"error\":\"cancelled by user\"");
+    }
+    puci_strbuf_appendz(&res, ",\"stdout\":");
     puci_strbuf_append_json_string(&res, puci_strbuf_cstr(&st->out));
     puci_strbuf_appendz(&res, ",\"stderr\":");
     puci_strbuf_append_json_string(&res, puci_strbuf_cstr(&st->err));
@@ -397,11 +404,10 @@ static int shell_async_step(void *userdata, puci_tool_async_handle handle,
 
     long long now = now_ms();
     if (st->phase == SHELL_RUNNING && st->deadline > 0 && now >= st->deadline) {
-        /* Hard timeout: kill just the direct child, matching the documented
-         * timeout_ms contract (cancellation is what signals the whole group). */
-        (void)kill(st->pid, SIGKILL);
         st->timed_out = 1;
-        st->phase = SHELL_KILL_WAIT;
+        (void)killpg(st->pid, SIGTERM);
+        st->term_deadline = now + 500;
+        st->phase = SHELL_TERM_WAIT;
     } else if (st->phase == SHELL_TERM_WAIT && now >= st->term_deadline) {
         (void)killpg(st->pid, SIGKILL);
         st->phase = SHELL_KILL_WAIT;
