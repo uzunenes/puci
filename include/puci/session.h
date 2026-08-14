@@ -40,6 +40,8 @@ typedef struct puci_session_options {
     size_t max_tool_iterations;     /**< cap on tool iterations per turn, 0 = default (32). A value of N permits up to N tool dispatch rounds; requesting tools on round N+1 aborts the turn with PUCI_ERR_LIMIT_EXCEEDED */
     puci_approval_cb approve_cb;    /**< tool approval policy hook, invoked before each tool runs (optional) */
     void *approve_userdata;         /**< passed to approve_cb */
+    int plan_mode;                  /**< 1 = plan/dry-run mode: mutating file tools simulate success without writing to disk */
+    long tool_timeout_ms;           /**< timeout for individual tool calls in ms (0 = default 60000) */
 } puci_session_options;
 
 /** Creates a new session bound to a context. On success returns PUCI_OK and
@@ -208,6 +210,35 @@ puci_status puci_session_clear(puci_session *sess);
  *  with the count written to *count. Valid until the session is mutated or
  *  destroyed. Returns NULL and sets *count to 0 if there are none. */
 const char *const *puci_session_tools(const puci_session *sess, size_t *count);
+
+/** Exports session transcript and metadata to a structured JSON string.
+ *  Allocated in *out_json with malloc(); caller must free with free(). */
+puci_status puci_session_export_json(const puci_session *sess, char **out_json);
+
+/** Imports session transcript from a JSON string into the session, restoring
+ *  conversation history, model, and token metrics. Validates history. */
+puci_status puci_session_import_json(puci_session *sess, const char *json_str);
+
+/** Calculates estimated character and token count of current session history. */
+void puci_session_estimate_context(const puci_session *sess, size_t *out_chars,
+                                   size_t *out_est_tokens);
+
+/** Saves session transcript to a JSON file atomically (respecting path guards). */
+puci_status puci_session_save_file(const puci_session *sess, const char *filepath);
+
+/** Loads session transcript from a JSON file. */
+puci_status puci_session_load_file(puci_session *sess, const char *filepath);
+
+/** Sets an explanation/feedback string for a denied tool call.
+ *  When the approval callback returns PUCI_APPROVAL_DENY, this feedback is
+ *  forwarded to the model in the tool-result payload. Cleared after use. */
+puci_status puci_session_set_approval_feedback(puci_session *sess, const char *feedback);
+
+/** Sets whether the session is in plan / dry-run mode (1 = enabled, 0 = disabled). */
+puci_status puci_session_set_plan_mode(puci_session *sess, int plan_mode);
+
+/** Returns 1 if session is in plan / dry-run mode, 0 otherwise. */
+int puci_session_get_plan_mode(const puci_session *sess);
 
 /* Ownership contract: the caller owns session handles and destroys them with
  * puci_session_destroy. Session-returned strings, arrays, descriptors, and

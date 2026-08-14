@@ -144,6 +144,9 @@ struct puci_session {
     size_t messages_cap;
 
     size_t max_tool_iterations;
+    int plan_mode;
+    char *approval_feedback;
+    long tool_timeout_ms;
 
     long long total_prompt_tokens;
     long long total_completion_tokens;

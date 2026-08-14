@@ -3,11 +3,15 @@
  */
 
 #include "puci_internal.h"
+#include "tools/path_guard.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "json/json.h"
@@ -107,6 +111,10 @@ puci_status session_msg_finish_assistant(puci_session *sess, const char *text,
         return PUCI_ERR_OUT_OF_STATE;
     }
     if (text) {
+        if (m->content) {
+            puci_alloc_free(&sess->alloc, m->content);
+            m->content = NULL;
+        }
         m->content = puci_alloc_strdup(&sess->alloc, text);
         if (!m->content) {
             return PUCI_ERR_NOMEM;
@@ -200,6 +208,9 @@ puci_status puci_session_create(const puci_context *ctx,
     sess->approve_userdata = opts->approve_userdata;
     sess->max_tool_iterations =
         opts->max_tool_iterations ? opts->max_tool_iterations : 32;
+    sess->plan_mode = opts->plan_mode ? 1 : 0;
+    sess->tool_timeout_ms = opts->tool_timeout_ms > 0 ? opts->tool_timeout_ms : 60000;
+    sess->approval_feedback = NULL;
 
     /* Default the session's enabled tools to all context tools. */
     for (size_t i = 0; i < ctx->ntools; i++) {
@@ -283,6 +294,9 @@ void puci_session_destroy(puci_session *sess) {
     }
     if (sess->event_text_buf) {
         puci_alloc_free(&sess->alloc, sess->event_text_buf);
+    }
+    if (sess->approval_feedback) {
+        puci_alloc_free(&sess->alloc, sess->approval_feedback);
     }
     /* Close the cancel transport (eventfd or self-pipe). */
     if (sess->cancel_fd >= 0) {
@@ -627,6 +641,35 @@ puci_status puci_session_clear(puci_session *sess) {
     return PUCI_OK;
 }
 
+puci_status puci_session_set_approval_feedback(puci_session *sess, const char *feedback) {
+    if (!sess) {
+        return PUCI_ERR_INVALID_ARG;
+    }
+    if (sess->approval_feedback) {
+        puci_alloc_free(&sess->alloc, sess->approval_feedback);
+        sess->approval_feedback = NULL;
+    }
+    if (feedback && feedback[0]) {
+        sess->approval_feedback = puci_alloc_strdup(&sess->alloc, feedback);
+        if (!sess->approval_feedback) {
+            return PUCI_ERR_NOMEM;
+        }
+    }
+    return PUCI_OK;
+}
+
+puci_status puci_session_set_plan_mode(puci_session *sess, int plan_mode) {
+    if (!sess) {
+        return PUCI_ERR_INVALID_ARG;
+    }
+    sess->plan_mode = plan_mode ? 1 : 0;
+    return PUCI_OK;
+}
+
+int puci_session_get_plan_mode(const puci_session *sess) {
+    return sess ? sess->plan_mode : 0;
+}
+
 const char *const *puci_session_tools(const puci_session *sess, size_t *count) {
     if (count) {
         *count = 0;
@@ -800,4 +843,254 @@ puci_status session_serialize_tools(puci_session *sess, puci_strbuf *out) {
     }
     puci_strbuf_append_char(out, ']');
     return out->oom != PUCI_OK ? out->oom : PUCI_OK;
+}
+
+puci_status puci_session_export_json(const puci_session *sess, char **out_json) {
+    if (!sess || !out_json) {
+        return PUCI_ERR_INVALID_ARG;
+    }
+    *out_json = NULL;
+
+    puci_strbuf sb;
+    puci_strbuf_init(&sb, NULL);
+
+    puci_strbuf_appendz(&sb, "{\"version\":1");
+    if (sess->cfg.model) {
+        puci_strbuf_appendz(&sb, ",\"model\":");
+        puci_strbuf_append_json_string(&sb, sess->cfg.model);
+    }
+    if (sess->system_prompt) {
+        puci_strbuf_appendz(&sb, ",\"system_prompt\":");
+        puci_strbuf_append_json_string(&sb, sess->system_prompt);
+    }
+    puci_strbuf_append_fmt(&sb, ",\"prompt_tokens\":%lld,\"completion_tokens\":%lld,\"cached_tokens\":%lld",
+                           sess->total_prompt_tokens, sess->total_completion_tokens, sess->total_cached_tokens);
+    puci_strbuf_append_fmt(&sb, ",\"updated_at\":%lld", (long long)time(NULL));
+
+    puci_strbuf_appendz(&sb, ",\"messages\":[");
+    for (size_t i = 0; i < sess->nmessages; i++) {
+        const puci_msg *m = &sess->messages[i];
+        if (i > 0) {
+            puci_strbuf_append_char(&sb, ',');
+        }
+        puci_strbuf_append_char(&sb, '{');
+        const char *role_str = "user";
+        if (m->role == PUCI_ROLE_ASSISTANT) role_str = "assistant";
+        else if (m->role == PUCI_ROLE_SYSTEM) role_str = "system";
+        else if (m->role == PUCI_ROLE_TOOL) role_str = "tool";
+
+        puci_strbuf_appendz(&sb, "\"role\":");
+        puci_strbuf_append_json_string(&sb, role_str);
+
+        if (m->content) {
+            puci_strbuf_appendz(&sb, ",\"content\":");
+            puci_strbuf_append_json_string(&sb, m->content);
+        }
+        if (m->tool_call_id) {
+            puci_strbuf_appendz(&sb, ",\"tool_call_id\":");
+            puci_strbuf_append_json_string(&sb, m->tool_call_id);
+        }
+        if (m->ntool_calls > 0) {
+            puci_strbuf_appendz(&sb, ",\"tool_calls\":[");
+            for (size_t k = 0; k < m->ntool_calls; k++) {
+                if (k > 0) {
+                    puci_strbuf_append_char(&sb, ',');
+                }
+                puci_strbuf_appendz(&sb, "{\"id\":");
+                puci_strbuf_append_json_string(&sb, m->tool_calls[k].id ? m->tool_calls[k].id : "");
+                puci_strbuf_appendz(&sb, ",\"name\":");
+                puci_strbuf_append_json_string(&sb, puci_strbuf_cstr(&m->tool_calls[k].name));
+                puci_strbuf_appendz(&sb, ",\"args\":");
+                puci_strbuf_append_json_string(&sb, puci_strbuf_cstr(&m->tool_calls[k].args));
+                puci_strbuf_append_char(&sb, '}');
+            }
+            puci_strbuf_append_char(&sb, ']');
+        }
+        puci_strbuf_append_char(&sb, '}');
+    }
+    puci_strbuf_appendz(&sb, "]}");
+
+    *out_json = strdup(puci_strbuf_cstr(&sb));
+    puci_strbuf_destroy(&sb);
+    if (!*out_json) {
+        return PUCI_ERR_NOMEM;
+    }
+    return PUCI_OK;
+}
+
+puci_status puci_session_import_json(puci_session *sess, const char *json_str) {
+    if (!sess || !json_str || !*json_str) {
+        return PUCI_ERR_INVALID_ARG;
+    }
+
+    puci_arena arena;
+    puci_arena_init(&arena, NULL, 0);
+    pj_val *root = NULL;
+    if (pj_parse(&arena, json_str, strlen(json_str), &root) != 0 || !root || root->type != PJ_OBJ) {
+        puci_arena_destroy(&arena);
+        return PUCI_ERR_INVALID_ARG;
+    }
+
+    /* Model override if present in session JSON */
+    pj_val *mv = pj_get(root, "model");
+    if (mv && mv->type == PJ_STR && mv->u.str.s && mv->u.str.s[0]) {
+        (void)puci_session_set_model(sess, mv->u.str.s);
+    }
+
+    /* System prompt if present */
+    pj_val *spv = pj_get(root, "system_prompt");
+    if (spv && spv->type == PJ_STR && spv->u.str.s && !sess->system_prompt) {
+        sess->system_prompt = puci_alloc_strdup(&sess->alloc, spv->u.str.s);
+    }
+
+    /* Token counters */
+    pj_val *ptv = pj_get(root, "prompt_tokens");
+    if (ptv && ptv->type == PJ_NUM) sess->total_prompt_tokens = (long long)ptv->u.num;
+    pj_val *ctv = pj_get(root, "completion_tokens");
+    if (ctv && ctv->type == PJ_NUM) sess->total_completion_tokens = (long long)ctv->u.num;
+    pj_val *kptv = pj_get(root, "cached_tokens");
+    if (kptv && kptv->type == PJ_NUM) sess->total_cached_tokens = (long long)kptv->u.num;
+
+    /* Messages array */
+    pj_val *msgs = pj_get(root, "messages");
+    if (msgs && msgs->type == PJ_ARR) {
+        for (size_t i = 0; i < msgs->u.arr.len; i++) {
+            pj_val *item = msgs->u.arr.items[i];
+            if (!item || item->type != PJ_OBJ) {
+                continue;
+            }
+            pj_val *rv = pj_get(item, "role");
+            const char *role_str = rv ? pj_str(rv) : "user";
+            puci_role role = PUCI_ROLE_USER;
+            if (strcmp(role_str, "assistant") == 0) role = PUCI_ROLE_ASSISTANT;
+            else if (strcmp(role_str, "system") == 0) role = PUCI_ROLE_SYSTEM;
+            else if (strcmp(role_str, "tool") == 0) role = PUCI_ROLE_TOOL;
+
+            pj_val *cv = pj_get(item, "content");
+            const char *content = cv ? pj_str(cv) : NULL;
+
+            puci_status st = session_msg_begin(sess, role, content);
+            if (st != PUCI_OK) {
+                puci_arena_destroy(&arena);
+                return st;
+            }
+
+            if (role == PUCI_ROLE_TOOL) {
+                pj_val *tcidv = pj_get(item, "tool_call_id");
+                if (tcidv && pj_str(tcidv)) {
+                    session_msg_set_tool_call_id(sess, pj_str(tcidv));
+                }
+            } else if (role == PUCI_ROLE_ASSISTANT) {
+                pj_val *tcs = pj_get(item, "tool_calls");
+                if (tcs && tcs->type == PJ_ARR && tcs->u.arr.len > 0) {
+                    size_t ntc = tcs->u.arr.len;
+                    puci_internal_tool_call *tcalls =
+                        (puci_internal_tool_call *)puci_alloc_calloc(
+                            &sess->alloc, ntc, sizeof(puci_internal_tool_call));
+                    if (tcalls) {
+                        for (size_t k = 0; k < ntc; k++) {
+                            pj_val *tc_val = tcs->u.arr.items[k];
+                            pj_val *idv = tc_val ? pj_get(tc_val, "id") : NULL;
+                            pj_val *namev = tc_val ? pj_get(tc_val, "name") : NULL;
+                            pj_val *argsv = tc_val ? pj_get(tc_val, "args") : NULL;
+                            if (idv && pj_str(idv)) {
+                                tcalls[k].id = puci_alloc_strdup(&sess->alloc, pj_str(idv));
+                            }
+                            puci_strbuf_init(&tcalls[k].name, &sess->alloc);
+                            if (namev && pj_str(namev)) {
+                                puci_strbuf_appendz(&tcalls[k].name, pj_str(namev));
+                            }
+                            puci_strbuf_init(&tcalls[k].args, &sess->alloc);
+                            if (argsv && pj_str(argsv)) {
+                                puci_strbuf_appendz(&tcalls[k].args, pj_str(argsv));
+                            }
+                        }
+                        session_msg_finish_assistant(sess, content, tcalls, ntc);
+                    }
+                }
+            }
+        }
+    }
+
+    puci_arena_destroy(&arena);
+    return puci_session_validate(sess);
+}
+
+void puci_session_estimate_context(const puci_session *sess, size_t *out_chars,
+                                   size_t *out_est_tokens) {
+    size_t total_chars = 0;
+    if (!sess) {
+        if (out_chars) *out_chars = 0;
+        if (out_est_tokens) *out_est_tokens = 0;
+        return;
+    }
+    if (sess->system_prompt) {
+        total_chars += strlen(sess->system_prompt);
+    }
+    for (size_t i = 0; i < sess->nmessages; i++) {
+        const puci_msg *m = &sess->messages[i];
+        if (m->content) {
+            total_chars += strlen(m->content);
+        }
+        if (m->tool_call_id) {
+            total_chars += strlen(m->tool_call_id);
+        }
+        for (size_t k = 0; k < m->ntool_calls; k++) {
+            if (m->tool_calls[k].id) {
+                total_chars += strlen(m->tool_calls[k].id);
+            }
+            total_chars += m->tool_calls[k].name.len;
+            total_chars += m->tool_calls[k].args.len;
+        }
+    }
+    if (out_chars) *out_chars = total_chars;
+    if (out_est_tokens) *out_est_tokens = (total_chars + 3) / 4;
+}
+
+puci_status puci_session_save_file(const puci_session *sess, const char *filepath) {
+    if (!sess || !filepath || !*filepath) {
+        return PUCI_ERR_INVALID_ARG;
+    }
+    if (puci_path_is_protected(filepath)) {
+        return PUCI_ERR_INVALID_ARG;
+    }
+    char *json_str = NULL;
+    puci_status st = puci_session_export_json(sess, &json_str);
+    if (st != PUCI_OK || !json_str) {
+        return st;
+    }
+    size_t written = 0;
+    char err_buf[256];
+    int rc = puci_atomic_write_file(filepath, json_str, strlen(json_str), &written, err_buf, sizeof(err_buf));
+    free(json_str);
+    return (rc == 0) ? PUCI_OK : PUCI_ERR_IO;
+}
+
+puci_status puci_session_load_file(puci_session *sess, const char *filepath) {
+    if (!sess || !filepath || !*filepath) {
+        return PUCI_ERR_INVALID_ARG;
+    }
+    FILE *f = fopen(filepath, "rb");
+    if (!f) {
+        return (errno == ENOENT) ? PUCI_ERR_NOT_FOUND : PUCI_ERR_IO;
+    }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz < 0 || (size_t)sz > 32 * 1024 * 1024) {
+        fclose(f);
+        return PUCI_ERR_LIMIT_EXCEEDED;
+    }
+    char *buf = (char *)malloc((size_t)sz + 1);
+    if (!buf) {
+        fclose(f);
+        return PUCI_ERR_NOMEM;
+    }
+    size_t rd = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[rd] = '\0';
+
+    puci_status st = puci_session_import_json(sess, buf);
+    free(buf);
+    return st;
 }
