@@ -899,7 +899,7 @@ static int run_stream_step(puci_session *sess, struct puci_turn_run *run) {
     const char *text = puci_strbuf_cstr(&run->turn.text);
     run->stream_text = dupstr(text);
     int has_tool_calls = tool_call_ready(&run->turn) && run->turn.had_tool_calls;
-    if (has_tool_calls && run->iter + 1 >= run->max_iter) {
+    if (has_tool_calls && run->iter >= run->max_iter) {
         fin_error(sess, run, PUCI_ERR_LIMIT_EXCEEDED, "tool iteration limit reached");
         return 1;
     }

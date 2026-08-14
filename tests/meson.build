@@ -95,7 +95,16 @@ test_cancel = executable(
     include_directories: [internal_inc],
     dependencies: [puci_static_dep, threads_dep],
 )
-test('test_cancel', test_cancel, timeout: 300)
+test('test_cancel', test_cancel, timeout: 30)
+
+test_cancel_stress = executable(
+    'test_cancel_stress',
+    'integration/test_cancel.c',
+    include_directories: [internal_inc],
+    dependencies: [puci_static_dep, threads_dep],
+    c_args: ['-DITERS=100'],
+)
+test('test_cancel_stress', test_cancel_stress, timeout: 300, suite: 'stress')
 
 # Connection / keep-alive regression test: verifies the Task-0 scope-down of
 # CURLOPT_FRESH_CONNECT (normal turns reuse one connection; the turn after a

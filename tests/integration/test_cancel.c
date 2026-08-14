@@ -448,7 +448,9 @@ static int count_children(void) {
 
 /* ---- mid-stream interrupt, 100 iterations, seeded ---- */
 
-#define ITERS 100
+#ifndef ITERS
+#define ITERS 5
+#endif
 
 static void test_mid_stream_100(void) {
     int iters = ITERS;
@@ -467,8 +469,8 @@ static void test_mid_stream_100(void) {
     memset(&pl, 0, sizeof(pl));
     pl.mode = MODE_LOOP;
     pl.count = iters * 2;
-    pl.chunks = 150;
-    pl.delay_ms = 3; /* a 150-delta stream takes ~450ms */
+    pl.chunks = (iters > 10) ? 150 : 60;
+    pl.delay_ms = (iters > 10) ? 3 : 2;
 
     pid_t spid = 0;
     int port = spawn_server(&pl, &spid);
@@ -484,7 +486,7 @@ static void test_mid_stream_100(void) {
 
     int got_cancelled = 0;
     for (int i = 0; i < iters; i++) {
-        long delay_ms = 20 + (long)(rand() % 400); /* 20-420 ms */
+        long delay_ms = (iters > 10) ? (20 + (long)(rand() % 400)) : (10 + (long)(rand() % 80));
 
         caretaker ct;
         ct.sess = sess;
@@ -540,7 +542,7 @@ static void test_silent_gap(void) {
     pl.mode = MODE_SILENT;
     pl.chunks = 20;
     pl.delay_ms = 5;
-    pl.silent_ms = 4000; /* 4s of silence before the bulk of the stream */
+    pl.silent_ms = 1000;
 
     pid_t spid = 0;
     int port = spawn_server(&pl, &spid);
@@ -553,7 +555,7 @@ static void test_silent_gap(void) {
     puci_session *sess = make_session(ctx, port, &m, NULL, NULL);
     CHECK(sess != NULL);
 
-    long delay_ms = 1500; /* cancel 1.5s in, deep inside the 4s silence */
+    long delay_ms = 150;
     caretaker ct;
     ct.sess = sess;
     ct.delay_ms = delay_ms;
@@ -590,7 +592,7 @@ static void test_tool_execution_cancel(void) {
     plan pl;
     memset(&pl, 0, sizeof(pl));
     pl.mode = MODE_TOOL;
-    pl.cmd_json = "{\\\"command\\\":\\\"/bin/sleep\\\",\\\"args\\\":[\\\"30\\\"]}";
+    pl.cmd_json = "{\\\"command\\\":\\\"/bin/sleep\\\",\\\"args\\\":[\\\"10\\\"]}";
 
     pid_t spid = 0;
     int port = spawn_server(&pl, &spid);
@@ -603,7 +605,7 @@ static void test_tool_execution_cancel(void) {
     puci_session *sess = make_session(ctx, port, &m, allow_all, NULL);
     CHECK(sess != NULL);
 
-    long delay_ms = 500; /* cancel 0.5s into the 30s sleep */
+    long delay_ms = 100; /* cancel 0.1s into the 10s sleep */
     caretaker ct;
     ct.sess = sess;
     ct.delay_ms = delay_ms;
@@ -628,7 +630,7 @@ static void test_tool_execution_cancel(void) {
     puci_session_destroy(sess);
     puci_context_destroy(ctx);
     waitpid(spid, NULL, 0);
-    /* No orphan `sleep 30` process group must survive. */
+    /* No orphan `sleep 10` process group must survive. */
     CHECK(count_children() == 0);
 }
 
@@ -663,7 +665,7 @@ static void test_approval_cancel(void) {
     plan pl;
     memset(&pl, 0, sizeof(pl));
     pl.mode = MODE_TOOL;
-    pl.cmd_json = "{\\\"command\\\":\\\"/bin/sleep\\\",\\\"args\\\":[\\\"30\\\"]}";
+    pl.cmd_json = "{\\\"command\\\":\\\"/bin/sleep\\\",\\\"args\\\":[\\\"10\\\"]}";
 
     pid_t spid = 0;
     int port = spawn_server(&pl, &spid);
@@ -678,7 +680,7 @@ static void test_approval_cancel(void) {
     puci_session *sess = make_session(ctx, port, &m, blocking_policy, &ap);
     CHECK(sess != NULL);
 
-    long delay_ms = 400; /* cancel while the policy is blocking for input */
+    long delay_ms = 100; /* cancel while the policy is blocking for input */
     caretaker ct;
     ct.sess = sess;
     ct.delay_ms = delay_ms;
@@ -708,8 +710,8 @@ static void test_cancellation_equivalence(void) {
     memset(&pl, 0, sizeof(pl));
     pl.mode = MODE_LOOP;
     pl.count = 4;
-    pl.chunks = 200;
-    pl.delay_ms = 5; /* ~1000ms stream */
+    pl.chunks = 50;
+    pl.delay_ms = 2;
 
     pid_t spid = 0;
     int port = spawn_server(&pl, &spid);
@@ -726,7 +728,7 @@ static void test_cancellation_equivalence(void) {
 
     caretaker ct_block;
     ct_block.sess = sess_block;
-    ct_block.delay_ms = 100;
+    ct_block.delay_ms = 30;
     pthread_t th_block;
     CHECK(pthread_create(&th_block, NULL, caretaker_thread, &ct_block) == 0);
     puci_status st_block = puci_session_send(sess_block, "stream to cancel");

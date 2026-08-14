@@ -37,7 +37,7 @@ typedef struct puci_session_options {
     puci_session_event_cb event_cb; /**< streaming/event callback (optional) */
     void *event_userdata;           /**< passed to event_cb */
     const char *system_prompt;      /**< optional system prompt */
-    size_t max_tool_iterations;     /**< cap on tool calls per turn, 0 = default(32); exceeding it returns PUCI_ERR_LIMIT_EXCEEDED */
+    size_t max_tool_iterations;     /**< cap on tool iterations per turn, 0 = default (32). A value of N permits up to N tool dispatch rounds; requesting tools on round N+1 aborts the turn with PUCI_ERR_LIMIT_EXCEEDED */
     puci_approval_cb approve_cb;    /**< tool approval policy hook, invoked before each tool runs (optional) */
     void *approve_userdata;         /**< passed to approve_cb */
 } puci_session_options;

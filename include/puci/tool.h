@@ -106,6 +106,7 @@ typedef int (*puci_tool_async_begin_cb)(void *userdata,
 /** Reports the fds the host should poll while this invocation is in flight.
  *  Same sizing contract as puci_session_get_fds: with cap == 0, writes the
  *  required count into *out_count without touching fds (fds may be NULL).
+ *  The vtable implementation MUST NOT write more than cap entries into fds.
  *  Must not block. */
 typedef void (*puci_tool_async_get_fds_cb)(void *userdata,
                                            puci_tool_async_handle handle,

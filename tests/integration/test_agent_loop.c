@@ -171,13 +171,19 @@ static void server_child(int pipe_w) {
         }
     }
 
-    /* Turns 2 & 3: Error equivalence (max_tool_iterations=1, 1 request each: SSE0) */
+    /* Turns 2 & 3: Error equivalence (max_tool_iterations=1, 2 requests each: SSE0 then SSE0) */
     for (int turn = 0; turn < 2; turn++) {
         int c1 = accept(srv, NULL, NULL);
         if (c1 >= 0) {
             drain_request(c1);
             serve_sse(c1, SSE0);
             close(c1);
+        }
+        int c2 = accept(srv, NULL, NULL);
+        if (c2 >= 0) {
+            drain_request(c2);
+            serve_sse(c2, SSE0);
+            close(c2);
         }
     }
 
@@ -186,7 +192,8 @@ static void server_child(int pipe_w) {
         int c1 = accept(srv, NULL, NULL);
         if (c1 >= 0) {
             drain_request(c1);
-            write_all(c1, "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", 75);
+            const char *resp500 = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            write_all(c1, resp500, strlen(resp500));
             close(c1);
         }
     }
@@ -403,10 +410,13 @@ static void test_full_agent_loop(void) {
         }
     }
 
+    CHECK(limited_status == limited_async_status);
+    CHECK(limited_status == PUCI_ERR_LIMIT_EXCEEDED);
+    CHECK(puci_session_last_status(limited_sess) == PUCI_ERR_LIMIT_EXCEEDED);
     CHECK(limited_async_status == PUCI_ERR_LIMIT_EXCEEDED);
     CHECK(puci_session_last_status(limited_async_sess) == PUCI_ERR_LIMIT_EXCEEDED);
-    CHECK(limited_tool_starts == 0);
-    CHECK(limited_tool_ends == 0);
+    CHECK(limited_tool_starts == 1);
+    CHECK(limited_tool_ends == 1);
     CHECK(limited_completes == 0);
     CHECK(limited_errors == 1);
 
