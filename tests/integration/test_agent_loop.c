@@ -51,6 +51,7 @@ static void on_event(void *ud, puci_session *sess, puci_event ev,
     case PUCI_EVENT_TURN_COMPLETE:
         c->completes++;
         if (ctx) {
+            free(c->final_text);
             c->final_text = strdup((const char *)ctx);
         }
         break;

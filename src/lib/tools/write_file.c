@@ -7,6 +7,7 @@
 
 #include "puci_internal.h"
 #include "tools/tools_internal.h"
+#include "path_guard.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -52,28 +53,26 @@ static int invoke_write(void *userdata, const puci_cancel_token *cancel,
         return 1;
     }
 
-    FILE *f = fopen(path, "wb");
-    if (!f) {
-        char ebuf[160];
-        snprintf(ebuf, sizeof(ebuf),
-                 "{\"ok\":false,\"error\":\"cannot open for write: %s\"}",
-                 strerror(errno));
+    size_t written = 0;
+    char err_buf[256];
+    err_buf[0] = '\0';
+    if (puci_atomic_write_file(path, content, content_len, &written, err_buf, sizeof(err_buf)) != 0) {
         puci_arena_destroy(&arena);
-        *out_result = strdup(ebuf);
+        puci_strbuf err_res;
+        puci_strbuf_init(&err_res, NULL);
+        puci_strbuf_appendz(&err_res, "{\"ok\":false,\"error\":");
+        puci_strbuf_append_json_string(&err_res, err_buf[0] ? err_buf : "write failed");
+        puci_strbuf_appendz(&err_res, "}");
+        *out_result = strdup(puci_strbuf_cstr(&err_res));
+        puci_strbuf_destroy(&err_res);
         return 1;
     }
-    size_t written = fwrite(content, 1, content_len, f);
-    fclose(f);
 
     puci_strbuf res;
     puci_strbuf_init(&res, NULL);
-    if (written != content_len) {
-        puci_strbuf_appendz(&res, "{\"ok\":false,\"error\":\"short write\"}");
-    } else {
-        puci_strbuf_append_fmt(&res, "{\"ok\":true,\"path\":");
-        puci_strbuf_append_json_string(&res, path);
-        puci_strbuf_append_fmt(&res, ",\"bytes\":%zu}", written);
-    }
+    puci_strbuf_append_fmt(&res, "{\"ok\":true,\"path\":");
+    puci_strbuf_append_json_string(&res, path);
+    puci_strbuf_append_fmt(&res, ",\"bytes\":%zu}", written);
     *out_result = strdup(puci_strbuf_cstr(&res));
     puci_strbuf_destroy(&res);
     puci_arena_destroy(&arena);
