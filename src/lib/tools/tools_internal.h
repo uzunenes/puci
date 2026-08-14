@@ -14,6 +14,13 @@
 
 puci_status puci_register_tool_read_file(puci_context *ctx);
 puci_status puci_register_tool_write_file(puci_context *ctx);
+puci_status puci_register_tool_edit_file(puci_context *ctx);
+puci_status puci_register_tool_grep(puci_context *ctx);
+puci_status puci_register_tool_glob(puci_context *ctx);
 puci_status puci_register_tool_run_shell(puci_context *ctx);
+
+int puci_apply_file_edits(const char *original, size_t orig_len,
+                          const char *args_json, char **out_new, size_t *out_new_len,
+                          char *err_msg, size_t err_cap);
 
 #endif /* PUCI_INTERNAL_TOOLS_H */

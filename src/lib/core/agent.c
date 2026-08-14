@@ -39,6 +39,7 @@
 #include "json/json.h"
 #include "net/http.h"
 #include "net/sse.h"
+#include "tools/tools_internal.h"
 #include "util/arena.h"
 #include "util/strbuf.h"
 
@@ -500,6 +501,41 @@ static void build_approval_request(puci_session *sess, const puci_tool_call *pub
                     req->display = "create new file";
                 } else {
                     req->display = "unable to read target file";
+                }
+            }
+        }
+    } else if (strcmp(pub->name, "edit_file") == 0) {
+        pj_val *root = NULL;
+        if (pub->args_json &&
+            pj_parse(arena, pub->args_json, strlen(pub->args_json), &root) == 0 &&
+            root) {
+            pj_val *pathv = pj_get(root, "path");
+            const char *path = pathv ? pj_str(pathv) : NULL;
+            if (path) {
+                char *old = NULL;
+                size_t old_len = 0;
+                puci_status rst = read_file_whole(path, &old, &old_len);
+                if (rst == PUCI_OK) {
+                    req->file_existed = 1;
+                    char err_msg[128];
+                    err_msg[0] = '\0';
+                    char *new_content = NULL;
+                    size_t new_len = 0;
+                    int nrepl = puci_apply_file_edits(old, old_len, pub->args_json,
+                                                      &new_content, &new_len,
+                                                      err_msg, sizeof(err_msg));
+                    if (nrepl > 0 && new_content) {
+                        req->diff = puci_compute_diff(old, old_len, new_content, new_len);
+                        free(new_content);
+                        if (req->diff) {
+                            req->display = req->diff;
+                        }
+                    } else {
+                        req->display = err_msg[0] ? puci_arena_strdup(arena, err_msg) : "edit validation failed";
+                    }
+                    free(old);
+                } else {
+                    req->display = "unable to read target file for editing";
                 }
             }
         }
