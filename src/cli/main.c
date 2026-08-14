@@ -8,9 +8,11 @@
 #include <puci/puci.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "cmd/cmd.h"
+#include "cmd/session_mgr.h"
 #include "repl/repl.h"
 
 static void print_help(FILE *f) {
@@ -18,16 +20,24 @@ static void print_help(FILE *f) {
             "puci - a minimal C17 AI coding agent harness\n"
             "\n"
             "Usage:\n"
-            "  puci run \"<prompt>\"   Run a one-shot, non-interactive agent turn\n"
-            "  puci                  Start the interactive REPL\n"
-            "  puci doctor           Diagnose config, credentials, and reachability\n"
-            "  puci --version        Print version\n"
-            "  puci --help           Show this help\n"
+            "  puci [options]                  Start the interactive REPL\n"
+            "  puci [options] run \"<prompt>\"   Run a one-shot, non-interactive agent turn\n"
+            "  puci doctor                     Diagnose config, credentials, and reachability\n"
+            "  puci --list-sessions            List saved session transcripts\n"
+            "  puci --version                  Print version\n"
+            "  puci --help                     Show this help\n"
             "\n"
-            "Configuration (environment, until config.toml support lands):\n"
-            "  PUCI_BASE_URL   provider base URL (default https://api.openai.com/v1)\n"
-            "  PUCI_API_KEY    API key for hosted providers\n"
-            "  PUCI_MODEL      model identifier (default gpt-4o-mini)\n");
+            "Options:\n"
+            "  --session <id>                  Use or create a specific named session\n"
+            "  --resume [latest|<id>]          Continue a previous session\n"
+            "  --plan, --dry-run               Plan mode: simulate file mutations without writing to disk\n"
+            "\n"
+            "Configuration:\n"
+            "  PUCI_BASE_URL                   Provider base URL (default https://api.openai.com/v1)\n"
+            "  PUCI_API_KEY                    API key for hosted providers\n"
+            "  PUCI_MODEL                      Model identifier (default gpt-4o-mini)\n"
+            "  ~/.config/puci/config.toml      User global configuration file\n"
+            "  .puci.toml                      Project configuration file (credentials forbidden)\n");
 }
 
 static void print_version(void) {
@@ -35,25 +45,77 @@ static void print_version(void) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 2) {
-        return puci_cli_repl();
+    puci_cli_params params;
+    memset(&params, 0, sizeof(params));
+
+    int argi = 1;
+    char *prompt_buf = NULL;
+
+    while (argi < argc) {
+        const char *arg = argv[argi];
+        if (strcmp(arg, "--help") == 0 || strcmp(arg, "-h") == 0) {
+            print_help(stdout);
+            return 0;
+        } else if (strcmp(arg, "--version") == 0 || strcmp(arg, "-V") == 0) {
+            print_version();
+            return 0;
+        } else if (strcmp(arg, "--list-sessions") == 0) {
+            return puci_cli_list_sessions();
+        } else if (strcmp(arg, "doctor") == 0) {
+            return puci_cli_doctor();
+        } else if (strcmp(arg, "--plan") == 0 || strcmp(arg, "--dry-run") == 0) {
+            params.plan_mode = 1;
+            argi++;
+        } else if (strcmp(arg, "--session") == 0) {
+            if (argi + 1 < argc) {
+                params.session_id = argv[++argi];
+                argi++;
+            } else {
+                fprintf(stderr, "puci: --session requires an argument\n");
+                return 2;
+            }
+        } else if (strcmp(arg, "--resume") == 0) {
+            if (argi + 1 < argc && argv[argi + 1][0] != '-') {
+                params.resume_id = argv[++argi];
+            } else {
+                params.resume_id = "latest";
+            }
+            argi++;
+        } else if (strcmp(arg, "run") == 0) {
+            argi++;
+            if (argi >= argc) {
+                fprintf(stderr, "usage: puci [options] run \"<prompt>\"\n");
+                return 2;
+            }
+            size_t total = 1;
+            for (int i = argi; i < argc; i++) {
+                total += strlen(argv[i]) + 1;
+            }
+            prompt_buf = (char *)malloc(total);
+            if (!prompt_buf) {
+                fprintf(stderr, "out of memory\n");
+                return 1;
+            }
+            size_t off = 0;
+            for (int i = argi; i < argc; i++) {
+                size_t len = strlen(argv[i]);
+                if (i > argi) {
+                    prompt_buf[off++] = ' ';
+                }
+                memcpy(prompt_buf + off, argv[i], len);
+                off += len;
+            }
+            prompt_buf[off] = '\0';
+            params.prompt = prompt_buf;
+            int rc = puci_cli_run_with_params(&params);
+            free(prompt_buf);
+            return rc;
+        } else {
+            fprintf(stderr, "puci: unknown command or flag '%s'\n", arg);
+            print_help(stderr);
+            return 2;
+        }
     }
-    const char *a1 = argv[1];
-    if (strcmp(a1, "--help") == 0 || strcmp(a1, "-h") == 0) {
-        print_help(stdout);
-        return 0;
-    }
-    if (strcmp(a1, "--version") == 0 || strcmp(a1, "-V") == 0) {
-        print_version();
-        return 0;
-    }
-    if (strcmp(a1, "run") == 0) {
-        return puci_cli_run(argc - 1, argv + 1);
-    }
-    if (strcmp(a1, "doctor") == 0) {
-        return puci_cli_doctor();
-    }
-    fprintf(stderr, "puci: unknown command or flag '%s'\n", a1);
-    print_help(stderr);
-    return 2;
+
+    return puci_cli_repl_with_params(&params);
 }

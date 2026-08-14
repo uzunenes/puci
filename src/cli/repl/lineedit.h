@@ -32,6 +32,12 @@ void ledit_free(ledit *ed);
  * Never exceeds max_history (oldest dropped). */
 void ledit_history_add(ledit *ed, const char *line);
 
+/* Loads history from file. Returns 0 on success, non-zero on failure. */
+int ledit_history_load(ledit *ed, const char *filepath);
+
+/* Saves history to file. Returns 0 on success, non-zero on failure. */
+int ledit_history_save(ledit *ed, const char *filepath);
+
 /* Reads one line from the terminal (fd 0), echoing prompt. On LEDIT_OK the
  * caller owns *out (heap) and must free it; the caller is expected to call
  * ledit_history_add with it when it is a real command. */

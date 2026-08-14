@@ -265,9 +265,110 @@ static void test_diff(void) {
     puci_diff_free(d);
 }
 
+#define SSE_WRITE_FILE                                                     \
+    "data: {\"id\":\"t\",\"choices\":[{\"index\":0,\"delta\":{\"role\":" \
+    "\"assistant\"},\"finish_reason\":null}]}\n\n"                       \
+    "data: {\"id\":\"t\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":" \
+    "[{\"index\":0,\"id\":\"call_w\",\"type\":\"function\",\"function\":{" \
+    "\"name\":\"write_file\",\"arguments\":\"{\\\"path\\\":\\\"/tmp/puci_plan_test.txt\\\",\\\"content\\\":\\\"dry\\\"}\"}}]},\"finish_reason\":null}]}\n\n" \
+    "data: {\"id\":\"t\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n" \
+    "data: [DONE]\n\n"
+
+static void test_plan_mode_dry_run(void) {
+    const char *target_file = "/tmp/puci_plan_test.txt";
+    unlink(target_file);
+
+    int srv = socket(AF_INET, SOCK_STREAM, 0);
+    CHECK(srv >= 0);
+    int yes = 1;
+    setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(0);
+    CHECK(bind(srv, (struct sockaddr *)&addr, sizeof(addr)) == 0);
+    socklen_t alen = sizeof(addr);
+    getsockname(srv, (struct sockaddr *)&addr, &alen);
+    int port = ntohs(addr.sin_port);
+    CHECK(listen(srv, 8) == 0);
+
+    int pipefd[2];
+    CHECK(pipe(pipefd) == 0);
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(pipefd[0]);
+        char pbuf[16];
+        int n = snprintf(pbuf, sizeof(pbuf), "%d\n", port);
+        write_all(pipefd[1], pbuf, (size_t)n);
+        close(pipefd[1]);
+
+        for (int r = 0; r < 2; r++) {
+            int c = accept(srv, NULL, NULL);
+            if (c >= 0) {
+                drain_request(c);
+                const char *b = (r == 0) ? SSE_WRITE_FILE : SSE_FINAL;
+                char head[160];
+                int hn = snprintf(head, sizeof(head),
+                                  "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                                  "Content-Length: %zu\r\nConnection: close\r\n\r\n",
+                                  strlen(b));
+                write_all(c, head, (size_t)hn);
+                write_all(c, b, strlen(b));
+                close(c);
+            }
+        }
+        close(srv);
+        _exit(0);
+    }
+    close(pipefd[1]);
+    close(srv);
+    char pbuf[32];
+    ssize_t rd = read(pipefd[0], pbuf, sizeof(pbuf) - 1);
+    close(pipefd[0]);
+    CHECK(rd > 0);
+
+    char base_url[128];
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+
+    puci_context *ctx = NULL;
+    CHECK(puci_context_create(NULL, &ctx) == PUCI_OK);
+
+    puci_provider_config pcfg = {
+        .name = "openai",
+        .base_url = base_url,
+        .api_key = NULL,
+        .model = "mock",
+        .timeout_ms = 15000,
+    };
+    puci_context_set_provider(ctx, &pcfg);
+
+    puci_session_options sopts = {0};
+    sopts.provider = pcfg;
+    sopts.plan_mode = 1;
+    sopts.max_tool_iterations = 8;
+
+    puci_session *sess = NULL;
+    CHECK(puci_session_create(ctx, &sopts, &sess) == PUCI_OK);
+    CHECK(puci_session_get_plan_mode(sess) == 1);
+
+    puci_status st = puci_session_send(sess, "write file");
+    CHECK(st == PUCI_OK);
+
+    /* File must NOT have been written to disk */
+    FILE *check_f = fopen(target_file, "r");
+    CHECK(check_f == NULL);
+
+    puci_session_destroy(sess);
+    puci_context_destroy(ctx);
+    int ws = 0;
+    waitpid(pid, &ws, 0);
+}
+
 int main(void) {
     test_diff();
     run_one(PUCI_APPROVAL_DENY, /*expect_ran*/ 0, /*expect_blocked*/ 1);
     run_one(PUCI_APPROVAL_ALLOW, /*expect_ran*/ 1, /*expect_blocked*/ 0);
+    test_plan_mode_dry_run();
     TEST_END();
 }

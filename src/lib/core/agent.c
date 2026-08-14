@@ -1062,12 +1062,86 @@ static int run_dispatch_tools(puci_session *sess, struct puci_turn_run *run) {
                 break;
             }
             if (ap == PUCI_APPROVAL_DENY) {
-                char *content = strdup(
-                    "{\"ok\":false,\"error\":\"blocked by approval policy\"}");
+                char *content = NULL;
+                if (sess->approval_feedback && sess->approval_feedback[0]) {
+                    puci_strbuf eb;
+                    puci_strbuf_init(&eb, NULL);
+                    puci_strbuf_appendz(&eb, "{\"ok\":false,\"error\":");
+                    puci_strbuf_append_json_string(&eb, sess->approval_feedback);
+                    puci_strbuf_appendz(&eb, "}");
+                    content = strdup(puci_strbuf_cstr(&eb));
+                    puci_strbuf_destroy(&eb);
+                    puci_alloc_free(&sess->alloc, sess->approval_feedback);
+                    sess->approval_feedback = NULL;
+                } else {
+                    content = strdup(
+                        "{\"ok\":false,\"error\":\"blocked by approval policy\"}");
+                }
                 qtool_end(sess, pub.id, content, 1);
                 run->tool_contents[k] = content;
                 run->tool_idx++;
                 continue;
+            }
+        }
+
+        if (sess->plan_mode) {
+            if (strcmp(pub.name, "write_file") == 0) {
+                puci_arena pa;
+                puci_arena_init(&pa, NULL, 0);
+                pj_val *root = NULL;
+                (void)pj_parse(&pa, pub.args_json ? pub.args_json : "{}", strlen(pub.args_json ? pub.args_json : "{}"), &root);
+                pj_val *pv = root ? pj_get(root, "path") : NULL;
+                pj_val *cv = root ? pj_get(root, "content") : NULL;
+                const char *path = pv ? pj_str(pv) : "";
+                size_t clen = cv && cv->type == PJ_STR ? cv->u.str.len : 0;
+                puci_strbuf pb;
+                puci_strbuf_init(&pb, NULL);
+                puci_strbuf_append_fmt(&pb, "{\"ok\":true,\"dry_run\":true,\"path\":");
+                puci_strbuf_append_json_string(&pb, path);
+                puci_strbuf_append_fmt(&pb, ",\"bytes\":%zu,\"message\":\"[plan mode: write simulated without modifying disk]\"}", clen);
+                char *content = strdup(puci_strbuf_cstr(&pb));
+                puci_strbuf_destroy(&pb);
+                puci_arena_destroy(&pa);
+                qtool_end(sess, pub.id, content, 0);
+                run->tool_contents[k] = content;
+                run->tool_idx++;
+                continue;
+            } else if (strcmp(pub.name, "edit_file") == 0) {
+                puci_arena pa;
+                puci_arena_init(&pa, NULL, 0);
+                pj_val *root = NULL;
+                (void)pj_parse(&pa, pub.args_json ? pub.args_json : "{}", strlen(pub.args_json ? pub.args_json : "{}"), &root);
+                pj_val *pv = root ? pj_get(root, "path") : NULL;
+                const char *path = pv ? pj_str(pv) : NULL;
+                char *old = NULL;
+                size_t old_len = 0;
+                puci_status rst = path ? read_file_whole(path, &old, &old_len) : PUCI_ERR_INVALID_ARG;
+                if (rst == PUCI_OK) {
+                    char err_msg[128];
+                    err_msg[0] = '\0';
+                    char *new_c = NULL;
+                    size_t new_len = 0;
+                    int nrepl = puci_apply_file_edits(old, old_len, pub.args_json, &new_c, &new_len, err_msg, sizeof(err_msg));
+                    free(old);
+                    if (new_c) free(new_c);
+                    if (nrepl > 0) {
+                        puci_strbuf pb;
+                        puci_strbuf_init(&pb, NULL);
+                        puci_strbuf_append_fmt(&pb, "{\"ok\":true,\"dry_run\":true,\"path\":");
+                        puci_strbuf_append_json_string(&pb, path);
+                        puci_strbuf_append_fmt(&pb, ",\"replacements\":%d,\"bytes\":%zu,\"message\":\"[plan mode: edits simulated without modifying disk]\"}", nrepl, new_len);
+                        char *content = strdup(puci_strbuf_cstr(&pb));
+                        puci_strbuf_destroy(&pb);
+                        puci_arena_destroy(&pa);
+                        qtool_end(sess, pub.id, content, 0);
+                        run->tool_contents[k] = content;
+                        run->tool_idx++;
+                        continue;
+                    }
+                } else if (old) {
+                    free(old);
+                }
+                puci_arena_destroy(&pa);
             }
         }
 

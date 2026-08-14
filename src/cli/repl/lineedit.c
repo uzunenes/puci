@@ -108,6 +108,43 @@ void ledit_history_add(ledit *ed, const char *line) {
     }
 }
 
+int ledit_history_load(ledit *ed, const char *filepath) {
+    if (!ed || !filepath) {
+        return -1;
+    }
+    FILE *f = fopen(filepath, "r");
+    if (!f) {
+        return -1;
+    }
+    char line[4096];
+    while (fgets(line, sizeof(line), f)) {
+        size_t len = strlen(line);
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+            line[--len] = '\0';
+        }
+        if (len > 0) {
+            ledit_history_add(ed, line);
+        }
+    }
+    fclose(f);
+    return 0;
+}
+
+int ledit_history_save(ledit *ed, const char *filepath) {
+    if (!ed || !filepath) {
+        return -1;
+    }
+    FILE *f = fopen(filepath, "w");
+    if (!f) {
+        return -1;
+    }
+    for (size_t i = 0; i < ed->nhist; i++) {
+        fprintf(f, "%s\n", ed->history[i]);
+    }
+    fclose(f);
+    return 0;
+}
+
 static int enable_raw(ledit *ed) {
     if (ed->raw) {
         return 0;

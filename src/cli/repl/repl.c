@@ -9,6 +9,7 @@
 #include "repl.h"
 #include "lineedit.h"
 #include "../cmd/config.h"
+#include "../cmd/session_mgr.h"
 
 #include <puci/puci.h>
 
@@ -93,7 +94,36 @@ typedef struct repl {
     ledit *ed;
     const char *system_prompt; /* owned only when allocated */
     int free_system_prompt;
+    char session_id[256];
+    char history_path[1024];
+    int always_allow_turn;
+    int plan_mode;
 } repl;
+
+static void print_colored_diff(FILE *out, const char *diff) {
+    if (!diff) return;
+    int is_tty = isatty(fileno(out));
+    const char *p = diff;
+    while (*p) {
+        const char *next = strchr(p, '\n');
+        size_t len = next ? (size_t)(next - p) : strlen(p);
+        if (is_tty) {
+            if (p[0] == '+' && (len < 3 || strncmp(p, "+++", 3) != 0)) {
+                fprintf(out, "\033[32m%.*s\033[0m\n", (int)len, p);
+            } else if (p[0] == '-' && (len < 3 || strncmp(p, "---", 3) != 0)) {
+                fprintf(out, "\033[31m%.*s\033[0m\n", (int)len, p);
+            } else if (p[0] == '@' && p[1] == '@') {
+                fprintf(out, "\033[36m%.*s\033[0m\n", (int)len, p);
+            } else {
+                fprintf(out, "%.*s\n", (int)len, p);
+            }
+        } else {
+            fprintf(out, "%.*s\n", (int)len, p);
+        }
+        if (!next) break;
+        p = next + 1;
+    }
+}
 
 static void on_event(void *ud, puci_session *sess, puci_event ev,
                      const void *ctx) {
@@ -131,23 +161,60 @@ static void on_event(void *ud, puci_session *sess, puci_event ev,
 /* Interactive approval policy: show the exact action (parsed argv or unified
  * diff) and ask. Non-interactive stdin auto-allows so piped use still works. */
 static puci_approval policy(const puci_approval_request *req, void *ud) {
-    (void)ud;
+    repl *r = (repl *)ud;
+    if (r && r->always_allow_turn) {
+        return PUCI_APPROVAL_ALLOW;
+    }
+
     fprintf(stderr, "\n[approve] %s\n", req->tool);
-    if (req->display && req->display[0]) {
+    if (req->diff) {
+        print_colored_diff(stderr, req->diff);
+    } else if (req->display && req->display[0]) {
         fprintf(stderr, "%s\n", req->display);
     }
+
     if (!isatty(STDIN_FILENO)) {
         /* Non-interactive: do not block; allow. */
         return PUCI_APPROVAL_ALLOW;
     }
-    fprintf(stderr, "Allow? [y]es [n]o: ");
-    fflush(stderr);
-    char b[64];
-    if (!fgets(b, sizeof(b), stdin)) {
-        return PUCI_APPROVAL_DENY;
+
+    for (;;) {
+        fprintf(stderr, "Allow? [y]es, [n]o (with feedback), [a]lways (for turn), [q]uit: ");
+        fflush(stderr);
+        char b[256];
+        if (!fgets(b, sizeof(b), stdin)) {
+            return PUCI_APPROVAL_DENY;
+        }
+        char choice = b[0];
+        if (choice == 'y' || choice == 'Y') {
+            return PUCI_APPROVAL_ALLOW;
+        }
+        if (choice == 'a' || choice == 'A') {
+            if (r) r->always_allow_turn = 1;
+            return PUCI_APPROVAL_ALLOW;
+        }
+        if (choice == 'q' || choice == 'Q') {
+            if (r && r->sess) {
+                puci_session_cancel(r->sess);
+            }
+            return PUCI_APPROVAL_DENY;
+        }
+        if (choice == 'n' || choice == 'N') {
+            fprintf(stderr, "Feedback / reason for agent: ");
+            fflush(stderr);
+            char fb[1024];
+            if (fgets(fb, sizeof(fb), stdin)) {
+                size_t flen = strlen(fb);
+                while (flen > 0 && (fb[flen - 1] == '\r' || fb[flen - 1] == '\n')) {
+                    fb[--flen] = '\0';
+                }
+                if (flen > 0 && r && r->sess) {
+                    puci_session_set_approval_feedback(r->sess, fb);
+                }
+            }
+            return PUCI_APPROVAL_DENY;
+        }
     }
-    return (b[0] == 'y' || b[0] == 'Y') ? PUCI_APPROVAL_ALLOW
-                                        : PUCI_APPROVAL_DENY;
 }
 
 /* ---- slash-command dispatch ---- */
@@ -161,6 +228,7 @@ static void cmd_tools(repl *r, const char *arg);
 static void cmd_config(repl *r, const char *arg);
 static void cmd_cost(repl *r, const char *arg);
 static void cmd_plan(repl *r, const char *arg);
+static void cmd_session(repl *r, const char *arg);
 static void cmd_quit(repl *r, const char *arg);
 
 typedef struct slash {
@@ -178,7 +246,8 @@ static const slash g_slash[] = {
     {"tools", "list enabled tools", cmd_tools},
     {"config", "show provider configuration", cmd_config},
     {"cost", "show token usage and cost", cmd_cost},
-    {"plan", "enter plan-only mode (Phase 3b)", cmd_plan},
+    {"plan", "toggle plan / dry-run mode", cmd_plan},
+    {"session", "show or set session id (/session [name])", cmd_session},
     {"quit", "exit the REPL", cmd_quit},
     {"exit", "exit the REPL", cmd_quit},
 };
@@ -199,12 +268,6 @@ static void cmd_model(repl *r, const char *arg) {
         puci_status st = puci_session_set_model(r->sess, arg);
         printf("%s\n", st == PUCI_OK ? "model set" : "failed to set model");
     } else {
-        size_t count = 0;
-        (void)count;
-        const char *prov = NULL;
-        (void)prov;
-        /* Display the active model via a query of the public config is not
-         * available; report that /model <name> sets it. */
         printf("usage: /model <name>\n");
     }
 }
@@ -237,6 +300,8 @@ static void recreate_session(repl *r) {
     op.system_prompt = r->system_prompt;
     op.approve_cb = policy;
     op.approve_userdata = r;
+    op.plan_mode = r->plan_mode;
+    op.tool_timeout_ms = 60000;
     if (puci_session_create(r->ctx, &op, &r->sess) != PUCI_OK) {
         fprintf(stderr, "puci: failed to create session\n");
     }
@@ -304,9 +369,20 @@ static void cmd_cost(repl *r, const char *arg) {
 }
 
 static void cmd_plan(repl *r, const char *arg) {
-    (void)r;
     (void)arg;
-    printf("plan mode is added in Phase 3b.\n");
+    int cur = puci_session_get_plan_mode(r->sess);
+    puci_session_set_plan_mode(r->sess, !cur);
+    r->plan_mode = !cur;
+    printf("plan mode: %s\n", !cur ? "enabled (read-only dry-run)" : "disabled");
+}
+
+static void cmd_session(repl *r, const char *arg) {
+    if (arg && *arg) {
+        snprintf(r->session_id, sizeof(r->session_id), "%s", arg);
+        printf("session id set to: %s\n", r->session_id);
+    } else {
+        printf("current session: %s\n", r->session_id[0] ? r->session_id : "(unnamed)");
+    }
 }
 
 static void cmd_quit(repl *r, const char *arg) {
@@ -414,7 +490,7 @@ static char *build_project_context(char *branch, size_t branch_cap,
 
 /* ---- main loop ---- */
 
-int puci_cli_repl(void) {
+int puci_cli_repl_with_params(const puci_cli_params *params) {
     puci_context *ctx = NULL;
     if (puci_context_create(NULL, &ctx) != PUCI_OK) {
         fprintf(stderr, "puci: failed to create context\n");
@@ -433,6 +509,18 @@ int puci_cli_repl(void) {
     r.ed = ledit_new(200);
     r.system_prompt = DEFAULT_SYSTEM_PROMPT;
     r.free_system_prompt = 0;
+    r.plan_mode = params ? params->plan_mode : 0;
+
+    puci_cli_get_history_file(r.history_path, sizeof(r.history_path));
+    if (r.history_path[0]) {
+        ledit_history_load(r.ed, r.history_path);
+    }
+
+    if (params && params->session_id && params->session_id[0]) {
+        snprintf(r.session_id, sizeof(r.session_id), "%s", params->session_id);
+    } else {
+        snprintf(r.session_id, sizeof(r.session_id), "session_%lld", (long long)time(NULL));
+    }
 
     /* Optional project context appended to the system prompt. */
     {
@@ -457,10 +545,27 @@ int puci_cli_repl(void) {
     install_signal_handlers();
     recreate_session(&r);
 
+    if (params && params->resume_id) {
+        char loaded[256] = "";
+        if (puci_cli_load_session(r.sess, params->resume_id, loaded, sizeof(loaded)) == 0) {
+            printf("[resumed session: %s]\n", loaded);
+            snprintf(r.session_id, sizeof(r.session_id), "%s", loaded);
+        } else {
+            fprintf(stderr, "puci: could not resume session '%s'\n", params->resume_id);
+        }
+    } else if (params && params->session_id) {
+        char loaded[256] = "";
+        if (puci_cli_load_session(r.sess, params->session_id, loaded, sizeof(loaded)) == 0) {
+            printf("[resumed session: %s]\n", loaded);
+        }
+    }
+
     printf("puci REPL. /help for commands, /quit to exit.\n");
     if (isatty(STDOUT_FILENO)) {
-        printf("(project: %s)\n",
-               detect_project_type() ? detect_project_type() : "none");
+        printf("(project: %s, session: %s%s)\n",
+               detect_project_type() ? detect_project_type() : "none",
+               r.session_id,
+               r.plan_mode ? ", plan-mode" : "");
     }
 
     int quit = 0;
@@ -485,17 +590,31 @@ int puci_cli_repl(void) {
         if (line[0] == '/') {
             quit = dispatch_slash(&r, line);
             ledit_history_add(r.ed, line);
+            if (r.history_path[0]) {
+                ledit_history_save(r.ed, r.history_path);
+            }
             free(line);
             continue;
         }
 
         ledit_history_add(r.ed, line);
+        if (r.history_path[0]) {
+            ledit_history_save(r.ed, r.history_path);
+        }
 
         puci_provider_config *cur_pc = puci_cli_provider("openai");
         if (!cur_pc || !cur_pc->api_key || !cur_pc->api_key[0]) {
             fprintf(stderr, "puci: missing API key. Set PUCI_API_KEY environment variable or configure 'api_key' in ~/.config/puci/config.toml\n");
             free(line);
             continue;
+        }
+
+        r.always_allow_turn = 0;
+
+        size_t est_chars = 0, est_tokens = 0;
+        puci_session_estimate_context(r.sess, &est_chars, &est_tokens);
+        if (est_tokens > 50000) {
+            fprintf(stderr, "[notice] transcript context size: ~%zu tokens, nearing budget\n", est_tokens);
         }
 
         g_cur_sess = r.sess;
@@ -510,14 +629,20 @@ int puci_cli_repl(void) {
                     fprintf(stderr, "  %s\n", err);
                 }
             }
+        } else {
+            puci_cli_save_session(r.sess, r.session_id);
         }
         free(line);
     }
 
     if (r.ed) {
+        if (r.history_path[0]) {
+            ledit_history_save(r.ed, r.history_path);
+        }
         ledit_free(r.ed);
     }
     if (r.sess) {
+        puci_cli_save_session(r.sess, r.session_id);
         puci_session_destroy(r.sess);
     }
     if (r.free_system_prompt) {
@@ -526,4 +651,8 @@ int puci_cli_repl(void) {
     puci_context_destroy(ctx);
     signal(SIGINT, SIG_DFL);
     return 0;
+}
+
+int puci_cli_repl(void) {
+    return puci_cli_repl_with_params(NULL);
 }

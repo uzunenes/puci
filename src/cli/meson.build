@@ -22,6 +22,7 @@ cli_sources = files(
     'cmd/run.c',
     'cmd/config.c',
     'cmd/doctor.c',
+    'cmd/session_mgr.c',
     'repl/repl.c',
     'repl/lineedit.c',
 )
