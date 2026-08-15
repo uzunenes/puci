@@ -29,6 +29,7 @@
 #endif
 
 #include "tui.h"
+#include "../cmd/config.h"
 #include <puci/puci.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -288,11 +289,9 @@ int puci_tui_run(const puci_cli_params *params){
     for(int i=0;i<MAX_PANES;i++){ memset(&g_panes[i],0,sizeof g_panes[i]); snprintf(g_panes[i].title,sizeof g_panes[i].title,"Agent %c",'A'+i); }
     puci_context *ctx=NULL;
     if(puci_context_create(NULL,&ctx)!=PUCI_OK){ tb_shutdown(); fprintf(stderr,"ctx fail\n"); return 1; }
-    puci_provider_config pcfg={0};
-    const char *key=getenv("PUCI_API_KEY"); if(!key||!*key) key=getenv("OPENROUTER_API_KEY");
-    const char *base=getenv("PUCI_BASE_URL"); if(!base){ if(key && getenv("OPENROUTER_API_KEY")) base="https://openrouter.ai/api/v1"; else base="https://api.openai.com/v1"; }
-    const char *model=getenv("PUCI_MODEL"); if(!model){ if(key && getenv("OPENROUTER_API_KEY")) model="anthropic/claude-3.5-sonnet"; else model="gpt-4o-mini"; }
-    pcfg.name="openai"; pcfg.base_url=base; pcfg.api_key=key; pcfg.model=model; pcfg.timeout_ms=60000;
+    puci_provider_config *pcfg_ptr = puci_cli_provider("openai");
+    if(!pcfg_ptr){ tb_shutdown(); fprintf(stderr,"tui: provider config failed\n"); puci_context_destroy(ctx); return 1; }
+    puci_provider_config pcfg = *pcfg_ptr;
     puci_context_set_provider(ctx,&pcfg);
     for(int i=0;i<g_npane;i++){
         puci_session_options sopts={0}; sopts.provider=pcfg; sopts.system_prompt="You are puci, a fast C coding agent. Be concise.";
