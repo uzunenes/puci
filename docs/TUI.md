@@ -15,8 +15,11 @@ PUCI_NO_TUI=1 puci → suppress
 ## Architecture
 
 - `src/cli/tui/tui.c` (~700 LOC) + `tui.h` + `vendor/termbox2.h` — `tb_init/tb_present` double-buffer, `poll([STDIN,…session_fds])` master (250 ms idle).
-- Ring: logical lines (`RING 800×4096`) + `ring_append_to_last` stream coalescing → word-wrap at render (`wrap_visual_count`).
-- Dirty: key, `TOKEN_DELTA` append, `TURN_COMPLETE`, `SIGWINCH`, 2 Hz gauge (500 ms). No 60 Hz flicker (`\x1b[H` + `K`).
+- Ring: `RING 800×4096` + `ring_append_to_last` stream coalescing → word-wrap at render (`wrap_visual_count`).
+- Markdown light: `tb_print_styled` inline `**bold**`, `` `code` ``, `# heading`, `- list`, `> quote`, `[text](url)` underline at render (no extra alloc).
+- History: `~/.local/share/puci/history` (200 lines), `↑/↓` navigates in input, `history_save_line` dedup.
+- Slash: `/clear /help /model [name] /sessions /new /compact /doctor /plan` handled inline, no network.
+- Dirty: key, `TOKEN_DELTA` coalesce, `TURN_COMPLETE`, `SIGWINCH`, 2 Hz gauge (500 ms). No 60 Hz flicker (`tb_present` dirty diff).
 
 ## Views
 
@@ -44,8 +47,12 @@ for(;;){
 
 ## Keys
 
-`Enter` prompt/send, `Esc` cancel, `↑/↓` or `j/k` scroll (or picker), `PgUp/Dn`, `g`/`G` top/bottom, `←/→` cursor, `Ctrl-U` clear line,
-`TAB` next pane, `s` sessions, `m` model, `q` quit, `y/n` approval, `?` help.
+`Enter` prompt/send (`/cmd` for slash), `Esc` cancel, `↑/↓` history (in input) or scroll (in pager) / picker, `PgUp/Dn`, `g`/`G` top/bottom, `←/→` cursor, `Ctrl-U` clear,
+`TAB` pane, `s` sessions picker, `m` model picker, `q` quit, `y/n` approval, `?` help.
+
+## Speed vs jcode
+
+PUCI TUI: single `poll([STDIN,…sess])` 250 ms idle, `tb_present` cell diff, <60 KB `RING` + 173 KB binary (termbox2 header-only, no tokio), 14 ms first-frame capable. jcode: `tokio` multi-thread + `ratatui` widget tree — same dirty ideas, 30× heavier binary.
 
 ## Embed Guarantee
 
