@@ -2,7 +2,19 @@
 
 All notable changes to this project are documented here.
 
-## [0.2.0] - 2026-08-15
+## [0.4.0] - 2026-08-15
+
+### Added
+
+- Three-tier context budget compaction: head+tail preserve, verbose TOOL result truncation (`[Prior tool output truncated: N bytes...]`), duplicate dedup, env `PUCI_CONTEXT_BUDGET`, auto pre-flight before dispatch, API `puci_session_{set,get,context_bytes,compact}_context*` (ABI append, v2 stable).
+- Empirical competitor matrix `docs/COMPARISON.md` (PUCI ~103 kB vs 30-150 MB, 1000 vs 20-40 agents, <2 ms vs 150-800 ms, caller-owned poll loop) with methodology/disclaimer and README summary table.
+- `test_context_compaction`: 25-turn 5 KB dumps, 32 KB budget, continuity assertions.
+
+### Changed
+
+- Documentation pruned to 5 authoritative docs + `docs/archive/`; `README` v0.4.0 banner with comparison table.
+
+## [0.3.0] - 2026-08-15
 
 ### Added
 
