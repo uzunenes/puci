@@ -115,6 +115,27 @@ PUCI auto-detects the provider from the endpoint URL or the model name:
   endpoints: Ollama (`http://127.0.0.1:11434/v1`), vLLM, LM Studio, and
   OpenRouter (set `PUCI_BASE_URL` and `PUCI_API_KEY` accordingly).
 
+**OpenRouter BYOK** — `OPENROUTER_API_KEY` is a first-class fallback for `PUCI_API_KEY`; when present alone, PUCI defaults `base_url` to `https://openrouter.ai/api/v1` and `model` to `anthropic/claude-3.5-sonnet`.
+
+Recommended `~/.bashrc`:
+
+```bash
+# GitHub Copilot CLI / OpenRouter BYOK for PUCI
+export OPENROUTER_API_KEY="sk-or-v1-..."
+export PUCI_API_KEY="$OPENROUTER_API_KEY"
+export PUCI_BASE_URL="https://openrouter.ai/api/v1"
+export PUCI_MODEL="anthropic/claude-3.5-sonnet"
+```
+
+Global config template (`~/.config/puci/config.toml`):
+
+```toml
+base_url = "https://openrouter.ai/api/v1"
+model = "anthropic/claude-3.5-sonnet"
+context_budget_bytes = 131072
+tool_timeout_ms = 60000
+```
+
 ## MCP servers
 
 Connect external Model Context Protocol (MCP) servers via stdio by adding them

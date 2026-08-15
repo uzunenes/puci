@@ -102,6 +102,9 @@ int puci_cli_parse_toml_file(const char *filepath, int is_project_local,
             snprintf(ca_bundle, ca_cap, "%s", val);
         } else if (strcmp(key, "extra_body") == 0 && extra_body) {
             snprintf(extra_body, extra_cap, "%s", val);
+        } else if (strcmp(key, "context_budget_bytes") == 0) {
+            /* parsed but not directly used in provider config; kept for template completeness */
+        } else if (strcmp(key, "tool_timeout_ms") == 0) {
         } else if (strcmp(key, "tls_verify") == 0 && tls_verify) {
             *tls_verify = (strcmp(val, "0") == 0 || strcmp(val, "false") == 0 || strcmp(val, "no") == 0 || strcmp(val, "off") == 0) ? 0 : 1;
         } else if (strcmp(key, "stream_idle_timeout_secs") == 0 && stream_idle_ms) {
@@ -183,6 +186,27 @@ puci_provider_config *puci_cli_provider(const char *name) {
 
     const char *env_key = getenv("PUCI_API_KEY");
     if (env_key && *env_key) snprintf(key, sizeof(key), "%s", env_key);
+
+    /* OPENROUTER_API_KEY fallback (first-class BYOK): if PUCI_API_KEY absent, use OPENROUTER_API_KEY.
+     * When falling back, also default base_url/model to OpenRouter if not explicitly set. */
+    int used_openrouter_fallback = 0;
+    if (!key[0]) {
+        const char *or_key = getenv("OPENROUTER_API_KEY");
+        if (or_key && *or_key) {
+            snprintf(key, sizeof(key), "%s", or_key);
+            used_openrouter_fallback = 1;
+        }
+    }
+    if (used_openrouter_fallback) {
+        const char *env_base_explicit = getenv("PUCI_BASE_URL");
+        if ((!env_base_explicit || !*env_base_explicit) && strcmp(base, "https://api.openai.com/v1") == 0) {
+            snprintf(base, sizeof(base), "%s", "https://openrouter.ai/api/v1");
+        }
+        const char *env_model_explicit = getenv("PUCI_MODEL");
+        if ((!env_model_explicit || !*env_model_explicit) && strcmp(model, "gpt-4o-mini") == 0) {
+            snprintf(model, sizeof(model), "%s", "anthropic/claude-3.5-sonnet");
+        }
+    }
 
     const char *env_ca = getenv("PUCI_CA_BUNDLE");
     if (env_ca && *env_ca) snprintf(cafile, sizeof(cafile), "%s", env_ca);

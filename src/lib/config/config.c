@@ -85,6 +85,8 @@ int puci_config_parse_file(const char *filepath, int is_project_local,
             snprintf(ca_bundle, ca_cap, "%s", val);
         } else if (strcmp(key, "extra_body") == 0 && extra_body) {
             snprintf(extra_body, extra_cap, "%s", val);
+        } else if (strcmp(key, "context_budget_bytes") == 0) {
+        } else if (strcmp(key, "tool_timeout_ms") == 0) {
         } else if (strcmp(key, "tls_verify") == 0 && tls_verify) {
             *tls_verify = (strcmp(val, "0") == 0 || strcmp(val, "false") == 0 || strcmp(val, "no") == 0 || strcmp(val, "off") == 0) ? 0 : 1;
         } else if (strcmp(key, "stream_idle_timeout_secs") == 0 && stream_idle_ms) {

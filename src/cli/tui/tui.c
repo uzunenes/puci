@@ -252,9 +252,9 @@ int puci_tui_run(const puci_cli_params *params){
     puci_context *ctx=NULL;
     if(puci_context_create(NULL,&ctx)!=PUCI_OK){ restore_term(); fprintf(stderr,"ctx fail\n"); return 1; }
     puci_provider_config pcfg={0};
-    const char *base=getenv("PUCI_BASE_URL"); if(!base) base="https://api.openai.com/v1";
-    const char *model=getenv("PUCI_MODEL"); if(!model) model="gpt-4o-mini";
-    const char *key=getenv("PUCI_API_KEY");
+    const char *key=getenv("PUCI_API_KEY"); if(!key||!*key) key=getenv("OPENROUTER_API_KEY");
+    const char *base=getenv("PUCI_BASE_URL"); if(!base){ if(key && getenv("OPENROUTER_API_KEY")) base="https://openrouter.ai/api/v1"; else base="https://api.openai.com/v1"; }
+    const char *model=getenv("PUCI_MODEL"); if(!model){ if(key && getenv("OPENROUTER_API_KEY")) model="anthropic/claude-3.5-sonnet"; else model="gpt-4o-mini"; }
     pcfg.name="openai"; pcfg.base_url=base; pcfg.api_key=key; pcfg.model=model; pcfg.timeout_ms=60000;
     puci_context_set_provider(ctx,&pcfg);
     for(int i=0;i<g_npane;i++){

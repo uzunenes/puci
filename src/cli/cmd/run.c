@@ -58,7 +58,7 @@ int puci_cli_run_with_params(const puci_cli_params *params) {
     }
 
     if (!pcfg->api_key || !pcfg->api_key[0]) {
-        fprintf(stderr, "puci: missing API key. Set PUCI_API_KEY environment variable or configure 'api_key' in ~/.config/puci/config.toml\n");
+        fprintf(stderr, "puci: missing API key. Set PUCI_API_KEY or OPENROUTER_API_KEY, or configure 'api_key' in ~/.config/puci/config.toml\n");
         return 1;
     }
 
