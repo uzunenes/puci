@@ -407,23 +407,30 @@ void tui_render_frame(void){
             const char *s=g_panes[i].ring.lines[idx];
             rtype_t t=g_panes[i].ring.types[idx];
             int wrapped = wrap_visual_count(s, inner_w);
+            int seg_off=0;
             for(int w=0; w<wrapped && rendered<inner_h; w++){
-                if(cur_vis < start_vis){ cur_vis++; continue; }
-                // slice
-                int off = w*inner_w;
-                // word-wrap slice extraction
-                char seg[ RING_COLS ];
-                // find cut
-                int rem=(int)strlen(s)-off;
+                if(cur_vis < start_vis){ cur_vis++; /* still advance seg_off */ 
+                    int rem2=(int)strlen(s)-seg_off;
+                    int take2 = rem2 < inner_w ? rem2 : inner_w;
+                    if(rem2 > inner_w){
+                        int last_sp=-1;
+                        for(int j=0;j<take2;j++) if(s[seg_off+j]==' ') last_sp=j;
+                        if(last_sp> inner_w/2) take2=last_sp+1;
+                    }
+                    seg_off += take2;
+                    continue;
+                }
+                int rem=(int)strlen(s)-seg_off;
                 if(rem<=0) break;
                 int take = rem < inner_w ? rem : inner_w;
-                // try word boundary if not last
                 if(rem > inner_w){
                     int last_sp=-1;
-                    for(int j=0;j<take;j++) if(s[off+j]==' ') last_sp=j;
+                    for(int j=0;j<take;j++) if(s[seg_off+j]==' ') last_sp=j;
                     if(last_sp> inner_w/2) take=last_sp+1;
                 }
-                memcpy(seg, s+off, (size_t)take); seg[take]=0;
+                char seg[ RING_COLS ];
+                memcpy(seg, s+seg_off, (size_t)take); seg[take]=0;
+                seg_off += take;
                 // trim trailing spaces for visual
                 uint32_t fg=TB_WHITE;
                 if(t==RL_USER) fg=TB_CYAN|TB_BOLD;
@@ -621,10 +628,16 @@ int puci_tui_run(const puci_cli_params *params){
             gauge_due = (int)(500 - ge);
             if(gauge_due < 0) gauge_due = 0;
         }
+        // streaming = ultra-responsive 16ms (jcode-like)
+        int is_streaming=0;
+        for(int i=0;i<g_npane;i++) if(g_panes[i].streaming) is_streaming=1;
         int poll_to;
-        if(session_to >= 0) poll_to = session_to < gauge_due ? session_to : gauge_due;
+        if(is_streaming){
+            poll_to = session_to>=0 ? (session_to < 16 ? session_to : 16) : 16;
+            if(gauge_due < poll_to) poll_to = gauge_due;
+        } else if(session_to >= 0) poll_to = session_to < gauge_due ? session_to : gauge_due;
         else poll_to = gauge_due < 250 ? gauge_due : 250;
-        if(poll_to < 0) poll_to = 250;
+        if(poll_to < 0) poll_to = 0;
         int pr=poll(fds,(nfds_t)nf,poll_to);
         if(pr<0 && errno==EINTR) continue;
         if(pr==0){
