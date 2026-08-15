@@ -125,19 +125,23 @@ static void get_winsize(int *rows,int *cols){
     if(w>0 && h>0){ *cols=w; *rows=h; return; }
     struct winsize ws; if(ioctl(STDOUT_FILENO,TIOCGWINSZ,&ws)==0 && ws.ws_col>0 && ws.ws_row>0){ *rows=ws.ws_row; *cols=ws.ws_col; } else { *rows=24; *cols=80; }
 }
+static long g_rss_cache=-1; static long g_pss_cache=-1; static uint64_t g_rss_last_ns=0;
 static long read_rss_kb(void){
     TRACE(TR_PROCFS,0);
-    FILE *f=fopen("/proc/self/status","r"); if(!f) return -1;
+    uint64_t now=trace_now_mono_ns(); if(g_rss_cache>=0 && now - g_rss_last_ns < 500000000ULL) return g_rss_cache;
+    FILE *f=fopen("/proc/self/status","r"); if(!f) return g_rss_cache>=0?g_rss_cache:-1;
     char line[128]; long v=-1;
     while(fgets(line,sizeof line,f)){ if(strncmp(line,"VmRSS:",6)==0){ v=strtol(line+6,NULL,10); break; } }
-    fclose(f); return v;
+    fclose(f); if(v>=0){ g_rss_cache=v; g_rss_last_ns=now; } return v>=0?v:(g_rss_cache>=0?g_rss_cache:-1);
 }
 static long read_pss_kb(void){
     TRACE(TR_PROCFS,1);
+    uint64_t now=trace_now_mono_ns(); if(g_pss_cache>=0 && now - g_rss_last_ns < 500000000ULL) return g_pss_cache;
     FILE *f=fopen("/proc/self/smaps_rollup","r"); if(!f) return read_rss_kb();
     char line[128]; long v=-1;
     while(fgets(line,sizeof line,f)){ if(strncmp(line,"Pss:",4)==0){ v=strtol(line+4,NULL,10); break; } }
-    fclose(f); return v<0?read_rss_kb():v;
+    fclose(f); if(v>=0){ g_pss_cache=v; g_rss_last_ns=trace_now_mono_ns(); }
+    return v>=0?v:(g_pss_cache>=0?g_pss_cache:read_rss_kb());
 }
 
 /* ── Ring with logical lines + role ── */
@@ -170,7 +174,10 @@ typedef struct Pane {
     Ring ring;
     char title[64];
     char session_id[128];
-    int streaming; // 1 while assistant streaming
+    int streaming;
+    int layout_dirty;
+    int cached_total_vis;
+    int cached_inner_w; // to invalidate on resize
     char stream_buf[STREAM_BUF];
     size_t stream_len;
     int scroll_off; // 0=bottom, >0 scrolled up (visual lines)
@@ -628,7 +635,22 @@ static int wrap_visual_count(const char *s, int width){
 
 void tui_render_frame(void){
     TRACE(TR_RENDER_BEG,0);
-    if(g_headless){ TRACE(TR_RENDER_END,0); TRACE(TR_PRESENT,0); return; }
+    if(g_headless){
+        // Headless simulation: still compute layout CPU but skip terminal draws
+        int rows=g_rows, cols=g_cols;
+        int usable_rows = rows-3; if(usable_rows<4) usable_rows=4;
+        int pane_h = usable_rows/2; if(pane_h<4) pane_h=4;
+        int pane_w = (cols-3)/2; if(pane_w<20) pane_w=20;
+        for(int i=0;i<g_npane && i<MAX_PANES;i++){
+            int inner_h = pane_h-2; int inner_w = pane_w-2; if(inner_h<=0||inner_w<=0) continue;
+            int total_vis;
+            if(!g_panes[i].layout_dirty && g_panes[i].cached_inner_w==inner_w && g_panes[i].cached_total_vis>=0) total_vis=g_panes[i].cached_total_vis;
+            else { total_vis=0; for(int k=0;k<g_panes[i].ring.count;k++){ int idx=(g_panes[i].ring.head + k)%RING_LINES; total_vis += wrap_visual_count(g_panes[i].ring.lines[idx], inner_w); } g_panes[i].cached_total_vis=total_vis; g_panes[i].cached_inner_w=inner_w; g_panes[i].layout_dirty=0; }
+            // simulate scan without tb draws
+            (void)total_vis;
+        }
+        TRACE(TR_RENDER_END,0); TRACE(TR_PRESENT,0); return;
+    }
     int rows=g_rows, cols=g_cols;
     tb_clear();
     long rss=read_rss_kb(); long pss=read_pss_kb();
@@ -659,11 +681,18 @@ void tui_render_frame(void){
         tb_draw_box(pr, pc, pane_h, pane_w, g_panes[i].title, is_focus);
         int inner_h = pane_h-2; int inner_w = pane_w-2;
         if(inner_h<=0||inner_w<=0) continue;
-        // compute total visual lines
-        int total_vis=0;
-        for(int k=0;k<g_panes[i].ring.count;k++){
-            int idx=(g_panes[i].ring.head + k)%RING_LINES;
-            total_vis += wrap_visual_count(g_panes[i].ring.lines[idx], inner_w);
+        int total_vis;
+        if(!g_panes[i].layout_dirty && g_panes[i].cached_inner_w==inner_w && g_panes[i].cached_total_vis>=0){
+            total_vis=g_panes[i].cached_total_vis;
+        } else {
+            total_vis=0;
+            for(int k=0;k<g_panes[i].ring.count;k++){
+                int idx=(g_panes[i].ring.head + k)%RING_LINES;
+                total_vis += wrap_visual_count(g_panes[i].ring.lines[idx], inner_w);
+            }
+            g_panes[i].cached_total_vis=total_vis;
+            g_panes[i].cached_inner_w=inner_w;
+            g_panes[i].layout_dirty=0;
         }
         // scroll_off is visual lines above bottom
         if(g_panes[i].scroll_off > total_vis) g_panes[i].scroll_off = total_vis;
@@ -911,7 +940,7 @@ int puci_tui_run(const puci_cli_params *params){
     if(!headless){ tb_set_input_mode(TB_INPUT_ESC); tb_set_output_mode(TB_OUTPUT_NORMAL); }
     struct sigaction sa; memset(&sa,0,sizeof sa); sa.sa_handler=on_winch; sigemptyset(&sa.sa_mask); sa.sa_flags=SA_RESTART; sigaction(SIGWINCH,&sa,NULL);
     g_npane=1; g_focus=0; g_mode=0;
-    for(int i=0;i<MAX_PANES;i++){ memset(&g_panes[i],0,sizeof g_panes[i]); snprintf(g_panes[i].title,sizeof g_panes[i].title,"Agent %c",'A'+i); snprintf(g_panes[i].session_id,sizeof g_panes[i].session_id,"tui-%ld-%d-%d",(long)time(NULL),i,++g_sess_seq); g_panes[i].scroll_off=0; }
+    for(int i=0;i<MAX_PANES;i++){ memset(&g_panes[i],0,sizeof g_panes[i]); snprintf(g_panes[i].title,sizeof g_panes[i].title,"Agent %c",'A'+i); snprintf(g_panes[i].session_id,sizeof g_panes[i].session_id,"tui-%ld-%d-%d",(long)time(NULL),i,++g_sess_seq); g_panes[i].scroll_off=0; g_panes[i].layout_dirty=1; g_panes[i].cached_inner_w=-1; g_panes[i].cached_total_vis=-1; }
     puci_context *ctx=NULL;
     if(puci_context_create(NULL,&ctx)!=PUCI_OK){ tb_shutdown(); trace_dump(); fprintf(stderr,"ctx fail\n"); return 1; }
     puci_provider_config *pcfg_ptr = puci_cli_provider("openai");
@@ -931,7 +960,7 @@ int puci_tui_run(const puci_cli_params *params){
     }
     load_sessions(); history_load(); models_init_static();
     // test hooks
-    { const char *tf=getenv("PUCI_TUI_FILL_RING"); if(tf && *tf){ int n=atoi(tf); if(n>0){ for(int i=0;i<n;i++){ char ln[128]; snprintf(ln,sizeof ln,"prefill line %d Lorem ipsum dolor sit amet consectetur", i); ring_push_typed(&g_panes[0].ring, ln, RL_SYSTEM); } } } }
+    { const char *tf=getenv("PUCI_TUI_FILL_RING"); if(tf && *tf){ int n=atoi(tf); if(n>0){ for(int i=0;i<n;i++){ char ln[128]; snprintf(ln,sizeof ln,"prefill line %d Lorem ipsum dolor sit amet consectetur", i); ring_push_typed(&g_panes[0].ring, ln, RL_SYSTEM); } g_panes[0].layout_dirty=1; } } }
     { const char *pn=getenv("PUCI_TUI_PANES"); if(pn && *pn){ int v=atoi(pn); if(v>=1 && v<=MAX_PANES){ g_npane=v; for(int i=1;i<g_npane;i++){ if(!g_panes[i].sess){ puci_session_options sopts={0}; sopts.provider=pcfg; sopts.system_prompt="test"; sopts.approve_cb=tui_approval_cb; if(puci_session_create(ctx,&sopts,&g_panes[i].sess)==PUCI_OK){ ring_push_typed(&g_panes[i].ring,"— test pane —", RL_SYSTEM); } } } } } }
     get_winsize(&g_rows,&g_cols);
     struct timespec last_gauge; clock_gettime(CLOCK_MONOTONIC,&last_gauge);
@@ -940,7 +969,7 @@ int puci_tui_run(const puci_cli_params *params){
     int dirty=1;
     int running=1;
     while(running){
-        if(g_winch){ g_winch=0; get_winsize(&g_rows,&g_cols); dirty=1; }
+        if(g_winch){ g_winch=0; get_winsize(&g_rows,&g_cols); dirty=1; for(int _di=0;_di<MAX_PANES;_di++){ g_panes[_di].layout_dirty=1; g_panes[_di].cached_inner_w=-1; } }
         if(exit_after_ms>0){ struct timespec now; clock_gettime(CLOCK_MONOTONIC,&now); long el=(now.tv_sec-tui_start.tv_sec)*1000 + (now.tv_nsec-tui_start.tv_nsec)/1000000; if(el>=exit_after_ms) running=0; }
         {
             struct timespec ng; clock_gettime(CLOCK_MONOTONIC,&ng);
@@ -981,18 +1010,19 @@ int puci_tui_run(const puci_cli_params *params){
         for(int i=0;i<g_npane;i++) if(g_panes[i].streaming) is_streaming=1;
         int poll_to;
         if(is_streaming){
-            poll_to = session_to>=0 ? (session_to < 16 ? session_to : 16) : 16;
+            poll_to = session_to>=0 ? (session_to < 20 ? session_to : 20) : 20;
             if(gauge_due < poll_to) poll_to = gauge_due;
-            if(poll_to==0) poll_to=5;
+            if(poll_to==0) poll_to=10;
         } else if(session_to >= 0){
             poll_to = session_to < gauge_due ? session_to : gauge_due;
-            if(poll_to==0) poll_to=5;
+            if(poll_to==0) poll_to=10;
         } else poll_to = gauge_due < 250 ? gauge_due : 250;
-        if(poll_to < 0) poll_to = 5;
-        if(poll_to==0) poll_to=5;
+        if(poll_to < 0) poll_to = 10;
+        if(poll_to==0) poll_to=10;
         int pr=poll(fds,(nfds_t)nf,poll_to);
         {
-            int backlog=0; ioctl(STDIN_FILENO, FIONREAD, &backlog);
+            int backlog=0;
+            if(g_trace_enabled) { ioctl(STDIN_FILENO, FIONREAD, &backlog); }
             TRACE(TR_POLL_RET, (uint32_t)(pr<0?0:backlog));
         }
         if(pr<0){ if(errno==EINTR) continue; else { struct timespec _ts={0,20000000L}; nanosleep(&_ts,NULL); continue; } }
@@ -1207,7 +1237,7 @@ int puci_tui_run(const puci_cli_params *params){
                 }
             }
         }
-        if(had_event) dirty=1;
+        if(had_event){ dirty=1; for(int _di=0;_di<g_npane;_di++) g_panes[_di].layout_dirty=1; }
     }
     for(int i=0;i<MAX_PANES;i++) if(g_panes[i].sess) puci_session_destroy(g_panes[i].sess);
     puci_context_destroy(ctx);

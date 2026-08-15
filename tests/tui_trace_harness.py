@@ -56,17 +56,19 @@ def run_tui_once(base_url, extra_env, exit_ms, feed_prompt=True):
     cmd = ["script","-q","-c", f"{PUCI} 2>&1", "/dev/null"]
     # script expects command, but we need to pass env; use env -i? easier: just use `unbuffer` if available else python pty
     # Try python pty approach: spawn with pty
-    import pty, select, os as _os
+    env["TERM"]="xterm-256color"
+    import pty, os as _os, fcntl, termios, struct as st, signal as _sig
     master, slave = pty.openpty()
+    try:
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, st.pack("HHHH", 24, 80, 0, 0))
+    except: pass
     proc = subprocess.Popen([str(PUCI)], env=env, stdin=slave, stdout=slave, stderr=slave, preexec_fn=_os.setsid, text=False)
     _os.close(slave)
-    # feed prompt after short delay
-    time.sleep(0.3)
+    time.sleep(0.5)
     if feed_prompt:
-        # enter input mode then send prompt
         try:
             _os.write(master, b"\n")
-            import time as _t; _t.sleep(0.15)
+            import time as _t; _t.sleep(0.2)
             _os.write(master, b"hello world trigger stream\n")
         except: pass
     # for key inject scenario, inject keys during stream
