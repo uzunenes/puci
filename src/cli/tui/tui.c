@@ -57,6 +57,61 @@
 #pragma clang diagnostic ignored "-Wconversion"
 #pragma clang diagnostic ignored "-Wsign-conversion"
 #endif
+
+/* ── PUCI_TRACE instrumentation ── */
+#include <stdint.h>
+#include <stdatomic.h>
+#define TRACE_RING_CAP (1<<18) // 262k entries
+typedef enum {
+    TR_POLL_RET=0, TR_PROCESS, TR_EVENT, TR_RENDER_BEG, TR_RENDER_END, TR_PRESENT, TR_PROCFS, TR_SAVE, TR_ESCWAIT
+} trace_phase_t;
+static const char *trace_phase_name[] = {"POLL_RET","PROCESS","EVENT","RENDER_BEG","RENDER_END","PRESENT","PROCFS","SAVE","ESCWAIT"};
+typedef struct { uint64_t mono_ns; uint64_t cpu_ns; uint32_t phase; uint32_t extra; } trec_t;
+static trec_t g_trace_ring[TRACE_RING_CAP];
+static _Atomic size_t g_trace_head=0;
+static int g_trace_enabled=0;
+static const char *g_trace_file=NULL;
+static inline uint64_t trace_now_mono_ns(void){
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec*1000000000ull + (uint64_t)ts.tv_nsec;
+}
+static inline uint64_t trace_now_cpu_ns(void){
+    struct timespec ts; clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return (uint64_t)ts.tv_sec*1000000000ull + (uint64_t)ts.tv_nsec;
+}
+static inline void trace_emit(uint32_t phase, uint32_t extra){
+    if(!g_trace_enabled) return;
+    size_t idx = atomic_fetch_add(&g_trace_head, 1);
+    trec_t *r = &g_trace_ring[idx % TRACE_RING_CAP];
+    r->mono_ns = trace_now_mono_ns();
+    r->cpu_ns = trace_now_cpu_ns();
+    r->phase = phase;
+    r->extra = extra;
+}
+static void trace_init(void){
+    const char *v=getenv("PUCI_TRACE");
+    if(v && *v && strcmp(v,"0")!=0) g_trace_enabled=1;
+    const char *f=getenv("PUCI_TRACE_FILE");
+    g_trace_file = f && *f ? f : "/tmp/puci_trace.ndjson";
+}
+static void trace_dump(void){
+    if(!g_trace_enabled) return;
+    size_t n = atomic_load(&g_trace_head);
+    if(n > TRACE_RING_CAP) n = TRACE_RING_CAP;
+    // if overflow, we have last TRACE_RING_CAP entries; start from head-n
+    size_t total = atomic_load(&g_trace_head);
+    size_t start = total > TRACE_RING_CAP ? total - TRACE_RING_CAP : 0;
+    FILE *f=fopen(g_trace_file,"w");
+    if(!f) f=stderr;
+    for(size_t i=start;i<total;i++){
+        trec_t *r=&g_trace_ring[i % TRACE_RING_CAP];
+        const char *pn = r->phase < 9 ? trace_phase_name[r->phase] : "UNKNOWN";
+        fprintf(f,"{\"phase\":\"%s\",\"mono_ns\":%llu,\"cpu_ns\":%llu,\"extra\":%u,\"seq\":%zu}\n", pn, (unsigned long long)r->mono_ns, (unsigned long long)r->cpu_ns, r->extra, i);
+    }
+    if(f!=stderr) fclose(f);
+    fprintf(stderr,"[trace] dumped %zu records to %s\n", total, g_trace_file);
+}
+#define TRACE(p,e) trace_emit((p),(e))
 #define MAX_PANES 4
 #define RING_LINES 800
 #define RING_COLS 4096
@@ -71,12 +126,14 @@ static void get_winsize(int *rows,int *cols){
     struct winsize ws; if(ioctl(STDOUT_FILENO,TIOCGWINSZ,&ws)==0 && ws.ws_col>0 && ws.ws_row>0){ *rows=ws.ws_row; *cols=ws.ws_col; } else { *rows=24; *cols=80; }
 }
 static long read_rss_kb(void){
+    TRACE(TR_PROCFS,0);
     FILE *f=fopen("/proc/self/status","r"); if(!f) return -1;
     char line[128]; long v=-1;
     while(fgets(line,sizeof line,f)){ if(strncmp(line,"VmRSS:",6)==0){ v=strtol(line+6,NULL,10); break; } }
     fclose(f); return v;
 }
 static long read_pss_kb(void){
+    TRACE(TR_PROCFS,1);
     FILE *f=fopen("/proc/self/smaps_rollup","r"); if(!f) return read_rss_kb();
     char line[128]; long v=-1;
     while(fgets(line,sizeof line,f)){ if(strncmp(line,"Pss:",4)==0){ v=strtol(line+4,NULL,10); break; } }
@@ -135,6 +192,7 @@ static size_t g_input_curs=0;
 static int g_input_mode=0;
 static int g_rows=24, g_cols=80;
 static char g_current_model[256]="";
+static int g_headless=0;
 
 static int g_sess_seq=0;
 #define HIST_MAX 200
@@ -569,6 +627,8 @@ static int wrap_visual_count(const char *s, int width){
 }
 
 void tui_render_frame(void){
+    TRACE(TR_RENDER_BEG,0);
+    if(g_headless){ TRACE(TR_RENDER_END,0); TRACE(TR_PRESENT,0); return; }
     int rows=g_rows, cols=g_cols;
     tb_clear();
     long rss=read_rss_kb(); long pss=read_pss_kb();
@@ -745,7 +805,10 @@ void tui_render_frame(void){
         // sessions picker overlay already via sidebar, but add help
         // footer overwrites
     }
+    TRACE(TR_RENDER_END,0);
+    TRACE(TR_PRESENT,0);
     tb_present();
+    // present end could be another trace but keep single point
 }
 
 int puci_tui_available(void){ return 1; }
@@ -760,7 +823,7 @@ int puci_tui_should_launch(int argc, char **argv){
         if(strcmp(argv[i],"--version")==0) return 0;
     }
     if(getenv("PUCI_NO_TUI")) return 0;
-    if(!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) return 0;
+    if(!getenv("PUCI_TUI_FORCE") && (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))) return 0;
     if(argc>1) return 0;
     return 1;
 }
@@ -773,6 +836,27 @@ static void pane_stream_begin(Pane *p){
 static void pane_stream_append(Pane *p, const char *txt, size_t len){
     if(!p->streaming){
         pane_stream_begin(p);
+    }
+    // TTG sentinel detection: look for U+2063 (E2 81 A3) markers
+    if(len>=6){
+        const char *a=(const char*)memchr(txt, (char)0xE2, len);
+        if(a){
+            const char *b=a+3;
+            // find second U2063
+            const char *c=b ? (const char*)memchr(b, (char)0xE2, len-(size_t)(b-txt)) : NULL;
+            if(a && c && (size_t)(c-a) < 64){
+                // extract decimal between markers
+                char num[32]={0};
+                // b points just after first marker (3 bytes), but we need to skip first marker fully
+                // Actually a is E2, so sentinel start = a, end first = a+3, then digits, then second marker c
+                // Digits are from a+3 to c-1
+                size_t dlen=0;
+                if(c > a+3){
+                    dlen=(size_t)(c - (a+3));
+                    if(dlen<sizeof num){ memcpy(num, a+3, dlen); num[dlen]=0; uint64_t sent=0; sent=strtoull(num,NULL,10); if(sent>0){ uint64_t now=trace_now_mono_ns(); int64_t ttg=(int64_t)(now - sent); if(ttg>=0 && ttg < 1000000000LL){ TRACE(TR_EVENT, (uint32_t)(10000 + ttg/1000000)); } } }
+                }
+            }
+        }
     }
     size_t add = len < STREAM_BUF - p->stream_len -1 ? len : STREAM_BUF - p->stream_len -1;
     memcpy(p->stream_buf + p->stream_len, txt, add); p->stream_len+=add; p->stream_buf[p->stream_len]=0;
@@ -816,17 +900,23 @@ static void pane_stream_end(Pane *p){
 
 int puci_tui_run(const puci_cli_params *params){
     (void)params;
-    if(tb_init()!=0){ fprintf(stderr,"tui: tb_init failed\n"); return 1; }
-    tb_set_input_mode(TB_INPUT_ESC);
-    tb_set_output_mode(TB_OUTPUT_NORMAL);
+    trace_init();
+    int headless=0;
+    if(tb_init()!=0){
+        if(getenv("PUCI_TUI_FORCE")){
+            headless=1; g_headless=1;
+            fprintf(stderr,"[tui] headless trace mode (tb_init failed)\n");
+        } else { fprintf(stderr,"tui: tb_init failed\n"); return 1; }
+    }
+    if(!headless){ tb_set_input_mode(TB_INPUT_ESC); tb_set_output_mode(TB_OUTPUT_NORMAL); }
     struct sigaction sa; memset(&sa,0,sizeof sa); sa.sa_handler=on_winch; sigemptyset(&sa.sa_mask); sa.sa_flags=SA_RESTART; sigaction(SIGWINCH,&sa,NULL);
     g_npane=1; g_focus=0; g_mode=0;
     for(int i=0;i<MAX_PANES;i++){ memset(&g_panes[i],0,sizeof g_panes[i]); snprintf(g_panes[i].title,sizeof g_panes[i].title,"Agent %c",'A'+i); snprintf(g_panes[i].session_id,sizeof g_panes[i].session_id,"tui-%ld-%d-%d",(long)time(NULL),i,++g_sess_seq); g_panes[i].scroll_off=0; }
     puci_context *ctx=NULL;
-    if(puci_context_create(NULL,&ctx)!=PUCI_OK){ tb_shutdown(); fprintf(stderr,"ctx fail\n"); return 1; }
+    if(puci_context_create(NULL,&ctx)!=PUCI_OK){ tb_shutdown(); trace_dump(); fprintf(stderr,"ctx fail\n"); return 1; }
     puci_provider_config *pcfg_ptr = puci_cli_provider("openai");
     if(pcfg_ptr && pcfg_ptr->model) snprintf(g_current_model,sizeof g_current_model,"%.255s",pcfg_ptr->model);
-    if(!pcfg_ptr){ tb_shutdown(); fprintf(stderr,"tui: provider config failed\n"); puci_context_destroy(ctx); return 1; }
+    if(!pcfg_ptr){ tb_shutdown(); trace_dump(); fprintf(stderr,"tui: provider config failed\n"); puci_context_destroy(ctx); return 1; }
     puci_provider_config pcfg = *pcfg_ptr;
     puci_context_set_provider(ctx,&pcfg);
     for(int i=0;i<g_npane;i++){
@@ -840,12 +930,18 @@ int puci_tui_run(const puci_cli_params *params){
         }
     }
     load_sessions(); history_load(); models_init_static();
+    // test hooks
+    { const char *tf=getenv("PUCI_TUI_FILL_RING"); if(tf && *tf){ int n=atoi(tf); if(n>0){ for(int i=0;i<n;i++){ char ln[128]; snprintf(ln,sizeof ln,"prefill line %d Lorem ipsum dolor sit amet consectetur", i); ring_push_typed(&g_panes[0].ring, ln, RL_SYSTEM); } } } }
+    { const char *pn=getenv("PUCI_TUI_PANES"); if(pn && *pn){ int v=atoi(pn); if(v>=1 && v<=MAX_PANES){ g_npane=v; for(int i=1;i<g_npane;i++){ if(!g_panes[i].sess){ puci_session_options sopts={0}; sopts.provider=pcfg; sopts.system_prompt="test"; sopts.approve_cb=tui_approval_cb; if(puci_session_create(ctx,&sopts,&g_panes[i].sess)==PUCI_OK){ ring_push_typed(&g_panes[i].ring,"— test pane —", RL_SYSTEM); } } } } } }
     get_winsize(&g_rows,&g_cols);
     struct timespec last_gauge; clock_gettime(CLOCK_MONOTONIC,&last_gauge);
+    struct timespec tui_start; clock_gettime(CLOCK_MONOTONIC,&tui_start);
+    long exit_after_ms=0; { const char *ev=getenv("PUCI_TUI_EXIT_AFTER_MS"); if(ev) exit_after_ms=atol(ev); }
     int dirty=1;
     int running=1;
     while(running){
         if(g_winch){ g_winch=0; get_winsize(&g_rows,&g_cols); dirty=1; }
+        if(exit_after_ms>0){ struct timespec now; clock_gettime(CLOCK_MONOTONIC,&now); long el=(now.tv_sec-tui_start.tv_sec)*1000 + (now.tv_nsec-tui_start.tv_nsec)/1000000; if(el>=exit_after_ms) running=0; }
         {
             struct timespec ng; clock_gettime(CLOCK_MONOTONIC,&ng);
             long ge = (ng.tv_sec-last_gauge.tv_sec)*1000 + (ng.tv_nsec-last_gauge.tv_nsec)/1000000;
@@ -895,14 +991,17 @@ int puci_tui_run(const puci_cli_params *params){
         if(poll_to < 0) poll_to = 5;
         if(poll_to==0) poll_to=5;
         int pr=poll(fds,(nfds_t)nf,poll_to);
+        {
+            int backlog=0; ioctl(STDIN_FILENO, FIONREAD, &backlog);
+            TRACE(TR_POLL_RET, (uint32_t)(pr<0?0:backlog));
+        }
         if(pr<0){ if(errno==EINTR) continue; else { struct timespec _ts={0,20000000L}; nanosleep(&_ts,NULL); continue; } }
         if(pr==0){
             struct timespec ng3; clock_gettime(CLOCK_MONOTONIC,&ng3);
             long ge2 = (ng3.tv_sec-last_gauge.tv_sec)*1000 + (ng3.tv_nsec-last_gauge.tv_nsec)/1000000;
             if(ge2 >= 500) dirty=1;
-            continue;
         }
-        if(fds[0].revents&(POLLIN|POLLHUP|POLLERR|POLLNVAL)){
+        if(pr>0 && (fds[0].revents&(POLLIN|POLLHUP|POLLERR|POLLNVAL))){
             char buf[128]; ssize_t n=read(STDIN_FILENO,buf,sizeof buf);
             if(n<=0){ running=0; break; }
             int had_key=0;
@@ -913,12 +1012,12 @@ int puci_tui_run(const puci_cli_params *params){
                 if(c==27){
                     char seq[8]={0}; int seq_len=0;
                     if(k+1 < n){ seq[seq_len++]=buf[++k]; }
-                    else { struct pollfd _pf={STDIN_FILENO,POLLIN,0}; if(poll(&_pf,1,30)>0 && (_pf.revents&POLLIN)){ char _ch; if(read(STDIN_FILENO,&_ch,1)==1) seq[seq_len++]=_ch; } }
+                    else { struct pollfd _pf={STDIN_FILENO,POLLIN,0}; TRACE(TR_ESCWAIT,0); if(poll(&_pf,1,30)>0 && (_pf.revents&POLLIN)){ char _ch; if(read(STDIN_FILENO,&_ch,1)==1) seq[seq_len++]=_ch; } TRACE(TR_ESCWAIT,1); }
                     if(seq_len==1 && seq[0]=='['){
-                        if(k+1 >= n){ struct pollfd _pf2={STDIN_FILENO,POLLIN,0}; if(poll(&_pf2,1,30)>0 && (_pf2.revents&POLLIN)){ char _ch; if(read(STDIN_FILENO,&_ch,1)==1) seq[seq_len++]=_ch; } else if(k+2 < n){ seq[seq_len++]=buf[++k]; } }
+                        if(k+1 >= n){ struct pollfd _pf2={STDIN_FILENO,POLLIN,0}; TRACE(TR_ESCWAIT,2); if(poll(&_pf2,1,30)>0 && (_pf2.revents&POLLIN)){ char _ch; if(read(STDIN_FILENO,&_ch,1)==1) seq[seq_len++]=_ch; } else if(k+2 < n){ seq[seq_len++]=buf[++k]; } TRACE(TR_ESCWAIT,3); }
                         else seq[seq_len++]=buf[++k];
                         if(seq_len>=2 && (seq[1]=='5' || seq[1]=='6')){
-                            if(seq_len==2){ struct pollfd _pf3={STDIN_FILENO,POLLIN,0}; if(poll(&_pf3,1,30)>0 && (_pf3.revents&POLLIN)){ char _ch; if(read(STDIN_FILENO,&_ch,1)==1) seq[seq_len++]=_ch; } else if(k+1 < n) seq[seq_len++]=buf[++k]; }
+                            if(seq_len==2){ struct pollfd _pf3={STDIN_FILENO,POLLIN,0}; TRACE(TR_ESCWAIT,4); if(poll(&_pf3,1,30)>0 && (_pf3.revents&POLLIN)){ char _ch; if(read(STDIN_FILENO,&_ch,1)==1) seq[seq_len++]=_ch; } else if(k+1 < n) seq[seq_len++]=buf[++k]; TRACE(TR_ESCWAIT,5); }
                         }
                     }
                     if(seq_len>=1 && seq[0]=='[' && seq_len>=2){
@@ -1014,7 +1113,7 @@ int puci_tui_run(const puci_cli_params *params){
                                 else if(strcmp(g_input,"/help")==0 || strcmp(g_input,"/?")==0){ ring_push_typed(&g_panes[g_focus].ring,"/clear /help /model [name] /sessions /new /compact /doctor /plan", RL_SYSTEM); ring_push_typed(&g_panes[g_focus].ring,"Keys: Enter send  Esc cancel  ↑↓ history/scroll  s sessions  m model  g/G top/bottom", RL_SYSTEM); }
                                 else if(strncmp(g_input,"/model",6)==0 && (g_input[6]=='\0' || g_input[6]==' ')){ char *arg=g_input+6; while(*arg==' ') arg++; if(*arg){ setenv("PUCI_MODEL",arg,1); { for(int _mi=0;_mi<g_npane;_mi++) if(g_panes[_mi].sess && !g_panes[_mi].streaming) puci_session_set_model(g_panes[_mi].sess, arg); snprintf(g_current_model,sizeof g_current_model,"%.255s",arg); } char msg[160]; snprintf(msg,sizeof msg,"Model → %.120s",arg); ring_push_typed(&g_panes[g_focus].ring,msg,RL_SYSTEM); } else { models_init_static(); picker_open(3); fetch_live_models(); if(g_mode==3) rebuild_pick_filter(); } }
                                 else if(strcmp(g_input,"/sessions")==0 || strcmp(g_input,"/s")==0){ load_sessions(); picker_open(2); }
-                                else if(strcmp(g_input,"/new")==0){ Pane *pp=&g_panes[g_focus]; if(pp->sess){ puci_cli_save_session(pp->sess, pp->session_id); puci_session_cancel(pp->sess); puci_session_clear(pp->sess); } pp->streaming=0; pp->pending_nl=0; pp->ring.count=0; pp->ring.head=0; pp->scroll_off=0; snprintf(pp->session_id,sizeof pp->session_id,"tui-%ld-%d-%d",(long)time(NULL),g_focus,++g_sess_seq); ring_push_typed(&pp->ring,"— new session —", RL_SYSTEM); }
+                                else if(strcmp(g_input,"/new")==0){ Pane *pp=&g_panes[g_focus]; if(pp->sess){ TRACE(TR_SAVE,1); puci_cli_save_session(pp->sess, pp->session_id); puci_session_cancel(pp->sess); puci_session_clear(pp->sess); } pp->streaming=0; pp->pending_nl=0; pp->ring.count=0; pp->ring.head=0; pp->scroll_off=0; snprintf(pp->session_id,sizeof pp->session_id,"tui-%ld-%d-%d",(long)time(NULL),g_focus,++g_sess_seq); ring_push_typed(&pp->ring,"— new session —", RL_SYSTEM); }
                                 else if(strcmp(g_input,"/compact")==0){ Pane *pp=&g_panes[g_focus]; if(pp->sess){ size_t pr=0; puci_session_compact_context(pp->sess,&pr); char msg[96]; snprintf(msg,sizeof msg,"Compacted %zu bytes",pr); ring_push_typed(&pp->ring,msg,RL_SYSTEM); } }
                                 else if(strcmp(g_input,"/doctor")==0){ puci_provider_config *pc=puci_cli_provider("openai"); char msg[256]; snprintf(msg,sizeof msg,"model=%s base=%s", pc?pc->model:"?", pc?pc->base_url:"?"); ring_push_typed(&g_panes[g_focus].ring,msg,RL_SYSTEM); }
                                 else if(strcmp(g_input,"/plan")==0){ ring_push_typed(&g_panes[g_focus].ring,"plan mode: use --plan flag for now", RL_SYSTEM); }
@@ -1067,10 +1166,11 @@ int puci_tui_run(const puci_cli_params *params){
             int _off=pane_off[i]; int _cnt=pane_cnt[i];
             const struct pollfd *_pfds=NULL; size_t _pcnt=0;
             if(_off>=1 && _cnt>0){ _pfds=fds+_off; _pcnt=(size_t)_cnt; }
-            puci_session_process(g_panes[i].sess, _pfds, _pcnt);
+            TRACE(TR_PROCESS, (uint32_t)i); puci_session_process(g_panes[i].sess, _pfds, _pcnt);
             puci_event ev;
             while(puci_session_next_event(g_panes[i].sess,&ev)){
                 had_event=1;
+                TRACE(TR_EVENT, (uint32_t)ev.text_len);
                 if(ev.kind==PUCI_EVENT_TOKEN_DELTA && ev.text){
                     pane_stream_append(&g_panes[i], ev.text, ev.text_len);
                 } else if(ev.kind==PUCI_EVENT_REASONING_DELTA && ev.text){
@@ -1094,7 +1194,7 @@ int puci_tui_run(const puci_cli_params *params){
                     // autosave to stable per-pane file
                     {
                         const char *sid = g_panes[i].session_id[0]?g_panes[i].session_id:"tui-autosave";
-                        puci_cli_save_session(g_panes[i].sess, sid);
+                        TRACE(TR_SAVE,0); puci_cli_save_session(g_panes[i].sess, sid);
                     }
                     g_panes[i].scroll_off=0;
                 } else if(ev.kind==PUCI_EVENT_TURN_CANCELLED){
@@ -1111,7 +1211,8 @@ int puci_tui_run(const puci_cli_params *params){
     }
     for(int i=0;i<MAX_PANES;i++) if(g_panes[i].sess) puci_session_destroy(g_panes[i].sess);
     puci_context_destroy(ctx);
-    tb_shutdown();
+    if(!headless) tb_shutdown();
+    trace_dump();
     return 0;
 }
 #ifdef __clang__
