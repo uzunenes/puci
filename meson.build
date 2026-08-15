@@ -1,7 +1,7 @@
 project(
     'puci',
     'c',
-    version: '0.1.0',
+    version: '0.2.0',
     license: 'MIT',
     meson_version: '>=1.0.0',
     default_options: [
@@ -88,4 +88,7 @@ if get_option('bench')
 endif
 if get_option('fuzz')
     subdir('fuzz')
+endif
+if get_option('lua')
+    subdir('bindings/lua')
 endif

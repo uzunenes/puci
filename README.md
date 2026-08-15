@@ -6,27 +6,33 @@ embedders that want a small provider/tool core and a caller-owned poll loop.
 ## What works
 
 - OpenAI-compatible streaming and provider transcript fixtures
+- Anthropic Messages API (`anthropic-version: 2023-06-01`) with `tool_use` round-trip
+- Local / OpenAI-compatible endpoints (Ollama, vLLM, LM Studio, OpenRouter)
 - Blocking `puci_session_send()` and non-blocking, pollable session driving
-- Non-blocking (async) tool execution lifecycle (new in 0.1.0, lightly tested)
+- Non-blocking (async) tool execution lifecycle: long-running tools yield their
+  execution and register file descriptors so the host loop never stalls
+- Model Context Protocol (MCP) stdio client: connect external MCP servers,
+  discover their tools dynamically, and dispatch `tools/call` over JSON-RPC 2.0
 - Text, reasoning, tool-call, tool-result, completion, cancellation, and error
 	event payloads
 - Custom tools, approval callbacks, cancellation, ASan/UBSan, and Clang builds
+- Concurrent agents: multiple sessions driven from a single host `poll()` loop
 
 ## Current limitations
 
-The v0.1.0 release includes the non-blocking async tool lifecycle and
-multi-agent poll-loop support in `libpuci`. However, async tool execution is
-newly introduced and lightly tested; Stage A CLI examples and embedding guides
-do not yet demonstrate advanced features such as interactive stdin-driven
-cancellation or full terminal-based multiplexing. Python bindings and Phase 3b
-feature sets are not part of this source release.
-
-The public API is an early 0.x contract and may change before 1.0.
+The public API is an early 0.x contract and may change before 1.0. The MCP
+client and Anthropic provider are new in the v0.2.0 track and are exercised by
+offline mock fixtures; live MCP servers and live Anthropic endpoints should be
+validated against your own deployments.
 
 ## Repository layout
 
-- `libpuci` — the reusable core (agent loop, providers, tools, streaming HTTP)
+- `libpuci` — the reusable core (agent loop, providers, tools, streaming HTTP,
+  MCP client)
 - `puci-cli` — the terminal client, a thin consumer of libpuci
+- `bindings/lua` — minimal C-ABI Lua module (`puci.so`) for Neovim / LuaJIT
+- `examples/` — embedder examples including `embedded_editor_agent` and
+  `benchmark_footprint`
 - See `docs/ARCHITECTURE.md` for the system design.
 
 ## Building
@@ -55,6 +61,40 @@ meson compile -C build
 meson install -C build
 cc examples/embedded_headless.c $(pkg-config --cflags --libs puci) -o embedded_headless
 ```
+
+Build the examples and Lua bindings:
+
+```sh
+meson setup build-examples -Dexamples=true -Dlua=true
+ninja -C build-examples
+```
+
+## Multi-provider configuration
+
+PUCI auto-detects the provider from the endpoint URL or the model name:
+
+- `base_url` containing `anthropic` or a model beginning with `claude` selects
+  the Anthropic Messages API provider (`anthropic-version: 2023-06-01`).
+- Everything else uses the OpenAI-compatible provider, which also covers local
+  endpoints: Ollama (`http://127.0.0.1:11434/v1`), vLLM, LM Studio, and
+  OpenRouter (set `PUCI_BASE_URL` and `PUCI_API_KEY` accordingly).
+
+## MCP servers
+
+Connect external Model Context Protocol (MCP) servers via stdio by adding them
+to `~/.config/puci/config.toml` or `.puci.toml`:
+
+```toml
+[mcp_servers.git]
+command = "mcp-server-git"
+args = ["--repository", "."]
+```
+
+PUCI launches each server as a subprocess, performs the MCP
+`initialize`/`notifications/initialized` handshake, fetches `tools/list`, and
+registers the discovered tools dynamically onto the context. Invoking an MCP
+tool dispatches `tools/call` over JSON-RPC 2.0. MCP binaries are subject to the
+same path guards as built-in tools (they cannot live inside `.git/` or `build*/`).
 
 ## Configuration and Credentials
 
