@@ -23,6 +23,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <errno.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -128,10 +129,29 @@ static void swarm_server(int wfd, int rfd, int expected) {
 
 int main(int argc, char **argv) {
     int N = 1000;
-    if (argc > 1) {
-        N = atoi(argv[1]);
-        if (N < 1) N = 1;
-        if (N > 5000) N = 5000;
+    const char *json_path = NULL;
+    int json_enabled = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--json") == 0) {
+            json_enabled = 1;
+            if (i + 1 < argc && argv[i+1][0] != '-' && strchr(argv[i+1], '.')) {
+                json_path = argv[++i];
+            } else {
+                json_path = "docs/benchmarks.json";
+            }
+        } else if (strncmp(argv[i], "--json=", 7) == 0) {
+            json_enabled = 1;
+            json_path = argv[i] + 7;
+            if (!*json_path) json_path = "docs/benchmarks.json";
+        } else if (argv[i][0] != '-') {
+            int v = atoi(argv[i]);
+            if (v > 0) { N = v; if (N < 1) N = 1; if (N > 5000) N = 5000; }
+        } else if (strcmp(argv[i], "--help")==0 || strcmp(argv[i],"-h")==0) {
+            printf("Usage: %s [N] [--json [path]]\n", argv[0]);
+            printf("  N         number of sessions (1..5000, default 1000)\n");
+            printf("  --json    export structured JSON (default docs/benchmarks.json)\n");
+            return 0;
+        }
     }
 
     long base_rss = read_rss_kb();
@@ -291,6 +311,48 @@ int main(int argc, char **argv) {
     else printf("WARN: RSS exceeds 250 MB target\n");
     if (per_sess_pss < 300) printf("PASS: per-session PSS %.1f kB <300 kB\n", per_sess_pss);
     else printf("WARN: per-session PSS %.1f kB exceeds 300 kB\n", per_sess_pss);
+
+    if (json_enabled && json_path) {
+        time_t now_t = time(NULL);
+        struct tm tm_now;
+        gmtime_r(&now_t, &tm_now);
+        char ts[32];
+        strftime(ts, sizeof ts, "%Y-%m-%dT%H:%M:%SZ", &tm_now);
+        double ev_rate = poll_ms ? (double)events * 1000.0 / (double)poll_ms : 0;
+        double turn_rate = poll_ms ? (double)N * 1000.0 / (double)poll_ms : 0;
+        FILE *jf = fopen(json_path, "w");
+        if (jf) {
+            fprintf(jf, "{\n");
+            fprintf(jf, "  \"timestamp\": \"%s\",\n", ts);
+            fprintf(jf, "  \"N\": %d,\n", N);
+            fprintf(jf, "  \"baseline_rss_kb\": %ld,\n", base_rss);
+            fprintf(jf, "  \"baseline_pss_kb\": %ld,\n", base_pss);
+            fprintf(jf, "  \"after_ctx_rss_kb\": %ld,\n", after_ctx_rss);
+            fprintf(jf, "  \"after_ctx_pss_kb\": %ld,\n", after_ctx_pss);
+            fprintf(jf, "  \"after_create_rss_kb\": %ld,\n", after_create_rss);
+            fprintf(jf, "  \"after_create_pss_kb\": %ld,\n", after_create_pss);
+            fprintf(jf, "  \"peak_rss_kb\": %ld,\n", peak_rss);
+            fprintf(jf, "  \"peak_pss_kb\": %ld,\n", peak_pss);
+            fprintf(jf, "  \"delta_rss_kb\": %ld,\n", delta_rss);
+            fprintf(jf, "  \"delta_pss_kb\": %ld,\n", delta_pss);
+            fprintf(jf, "  \"per_session_rss_kb\": %.2f,\n", per_sess_rss);
+            fprintf(jf, "  \"per_session_pss_kb\": %.2f,\n", per_sess_pss);
+            fprintf(jf, "  \"wall_ms\": %ld,\n", wall_ms);
+            fprintf(jf, "  \"poll_ms\": %ld,\n", poll_ms);
+            fprintf(jf, "  \"create_ms\": %ld,\n", create_ms);
+            fprintf(jf, "  \"events\": %ld,\n", events);
+            fprintf(jf, "  \"events_per_sec\": %.1f,\n", ev_rate);
+            fprintf(jf, "  \"turns_per_sec\": %.1f,\n", turn_rate);
+            fprintf(jf, "  \"done\": %d,\n", done);
+            fprintf(jf, "  \"pass_rss_250mb\": %s,\n", (peak_rss - base_rss < 250*1024) ? "true" : "false");
+            fprintf(jf, "  \"pass_pss_300kb\": %s\n", (per_sess_pss < 300) ? "true" : "false");
+            fprintf(jf, "}\n");
+            fclose(jf);
+            printf("JSON exported to %s\n", json_path);
+        } else {
+            fprintf(stderr, "Failed to write JSON to %s: %s\n", json_path, strerror(errno));
+        }
+    }
 
     for (int i=0;i<N;i++) if(sessions[i]) puci_session_destroy(sessions[i]);
     free(sessions);
