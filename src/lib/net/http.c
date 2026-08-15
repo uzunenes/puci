@@ -53,6 +53,7 @@ struct puci_http_req {
     char *accept;
     char *ca_bundle;
     char *noproxy;
+    char *extra_header;
 
     const puci_cancel_token *cancel; /* borrowed */
     int *conn_dirty;                 /* borrowed; set on abort/incomplete end */
@@ -303,15 +304,22 @@ puci_status puci_http_post_stream(const puci_allocator *alloc,
         }
         puci_strbuf_destroy(&h);
     }
-    if (req->auth_header) {
-        puci_strbuf h;
-        puci_strbuf_init(&h, alloc);
-        puci_strbuf_appendz(&h, "Authorization: ");
-        puci_strbuf_appendz(&h, req->auth_header);
-        if (h.oom == PUCI_OK && h.data) {
-            hdr = curl_slist_append(hdr, h.data);
+    if (req->auth_header && req->auth_header[0]) {
+        if (strchr(req->auth_header, ':') != NULL) {
+            hdr = curl_slist_append(hdr, req->auth_header);
+        } else {
+            puci_strbuf h;
+            puci_strbuf_init(&h, alloc);
+            puci_strbuf_appendz(&h, "Authorization: ");
+            puci_strbuf_appendz(&h, req->auth_header);
+            if (h.oom == PUCI_OK && h.data) {
+                hdr = curl_slist_append(hdr, h.data);
+            }
+            puci_strbuf_destroy(&h);
         }
-        puci_strbuf_destroy(&h);
+    }
+    if (req->extra_header && req->extra_header[0]) {
+        hdr = curl_slist_append(hdr, req->extra_header);
     }
     if (hdr) {
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdr);
@@ -536,6 +544,7 @@ static void req_free(puci_http_req *r) {
     free(r->accept);
     free(r->ca_bundle);
     free(r->noproxy);
+    free(r->extra_header);
     free(r);
 }
 
@@ -556,14 +565,27 @@ static puci_status req_config(puci_http_req *r, const puci_http_request *req) {
         r->body_len = req->body_len;
     }
     if (req->auth_header && req->auth_header[0]) {
-        size_t n = strlen("Authorization: ") + strlen(req->auth_header);
-        r->auth_value = (char *)malloc(n + 1);
+        if (strchr(req->auth_header, ':') != NULL) {
+            r->auth_value = dupn(req->auth_header, strlen(req->auth_header));
+        } else {
+            size_t n = strlen("Authorization: ") + strlen(req->auth_header);
+            r->auth_value = (char *)malloc(n + 1);
+            if (!r->auth_value) {
+                return PUCI_ERR_NOMEM;
+            }
+            memcpy(r->auth_value, "Authorization: ", strlen("Authorization: "));
+            memcpy(r->auth_value + strlen("Authorization: "), req->auth_header,
+               strlen(req->auth_header) + 1);
+        }
         if (!r->auth_value) {
             return PUCI_ERR_NOMEM;
         }
-        memcpy(r->auth_value, "Authorization: ", strlen("Authorization: "));
-        memcpy(r->auth_value + strlen("Authorization: "), req->auth_header,
-               strlen(req->auth_header) + 1);
+    }
+    if (req->extra_header && req->extra_header[0]) {
+        r->extra_header = dupn(req->extra_header, strlen(req->extra_header));
+        if (!r->extra_header) {
+            return PUCI_ERR_NOMEM;
+        }
     }
     if (req->content_type) {
         r->content_type = dupn(req->content_type, strlen(req->content_type));
@@ -643,6 +665,9 @@ static puci_status req_config(puci_http_req *r, const puci_http_request *req) {
     }
     if (r->auth_value) {
         r->hdr = curl_slist_append(r->hdr, r->auth_value);
+    }
+    if (r->extra_header) {
+        r->hdr = curl_slist_append(r->hdr, r->extra_header);
     }
     if (r->hdr) {
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, r->hdr);

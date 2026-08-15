@@ -79,6 +79,8 @@ struct puci_provider_vtable {
     const char *name;
     const char *endpoint; /* URL path appended to base_url, e.g. "/chat/completions" */
     int supports_tools;
+    const char *auth_prefix; /* e.g. "x-api-key: " or NULL for "Bearer " */
+    const char *extra_header; /* e.g. "anthropic-version: 2023-06-01" */
 
     /* Serialize an OpenAI-style message array (msgs_json is a valid JSON array
      * of message objects) plus an optional tools array (tools_json may be NULL)
@@ -377,6 +379,9 @@ puci_status puci_provider_register_internal(struct puci_context *ctx,
 
 /* providers/openai.c */
 extern const puci_provider_vtable puci_openai_provider;
+
+/* providers/anthropic.c */
+extern const puci_provider_vtable puci_anthropic_provider;
 
 /* core/agent.c - the non-blocking agent state machine + blocking wrapper */
 /* Blocking convenience wrapper: pumps the state machine. */

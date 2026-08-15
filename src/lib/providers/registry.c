@@ -8,7 +8,7 @@
 
 #include "json/json.h"
 
-static const puci_provider_vtable *g_builtin_known[] = { &puci_openai_provider };
+static const puci_provider_vtable *g_builtin_known[] = { &puci_openai_provider, &puci_anthropic_provider };
 
 puci_status puci_provider_register_internal(struct puci_context *ctx,
                                             const puci_provider_vtable *vt) {

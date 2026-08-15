@@ -45,6 +45,7 @@ typedef struct puci_http_request {
     const char *auth_header;  /* full "Bearer <token>" value (no header name) */
     const char *content_type; /* value for Content-Type */
     const char *accept;       /* value for Accept, e.g. "text/event-stream" */
+    const char *extra_header; /* optional custom header, e.g. "anthropic-version: 2023-06-01" */
 
     /* Total request timeout in ms; 0 = library default. */
     int timeout_ms;

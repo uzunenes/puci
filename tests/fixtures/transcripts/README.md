@@ -12,6 +12,9 @@ regression fixtures for the SSE parser and the provider stream parsers.
   from the final `content`.
 - `anthropic.jsonl` — Anthropic Messages shape (`message_start`,
   `content_block_delta`, `message_delta`, `message_stop`).
+- `anthropic_toolcall.jsonl` — Anthropic Messages shape with a `tool_use`
+  content block whose `input` is assembled from fragmented
+  `input_json_delta` chunks.
 
 The final non-JSON line `[DONE]` is SSE's terminal marker and is intentionally
 left as-is; it is not part of any JSON payload.

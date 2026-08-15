@@ -15,6 +15,7 @@ lib_sources = files(
     'net/sse.c',
     'json/json.c',
     'providers/openai.c',
+    'providers/anthropic.c',
     'providers/registry.c',
     'mcp/mcp_client.c',
     'tools/path_guard.c',

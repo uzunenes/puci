@@ -663,10 +663,21 @@ static void fin_error(puci_session *sess, struct puci_turn_run *run,
  * run is left in STREAMING with req owned by run. */
 static puci_status run_build_request(puci_session *sess,
                                      struct puci_turn_run *run) {
+    const char *prov_name = (sess->cfg.name && sess->cfg.name[0]) ? sess->cfg.name : "openai";
+    if (sess->cfg.base_url && strstr(sess->cfg.base_url, "anthropic") != NULL) {
+        prov_name = "anthropic";
+    } else if (sess->cfg.model && strncmp(sess->cfg.model, "claude", 6) == 0) {
+        prov_name = "anthropic";
+    }
+
     const puci_provider *provider =
-        puci_provider_get(sess->ctx, sess->cfg.name);
+        puci_provider_get(sess->ctx, prov_name);
     if (!provider || !provider->vtable) {
-        return PUCI_ERR_NOT_FOUND;
+        /* Fallback to openai if available */
+        provider = puci_provider_get(sess->ctx, "openai");
+        if (!provider || !provider->vtable) {
+            return PUCI_ERR_NOT_FOUND;
+        }
     }
     const puci_provider_vtable *vt = provider->vtable;
 
@@ -745,11 +756,12 @@ static puci_status run_build_request(puci_session *sess,
     }
     char *auth = NULL;
     if (sess->cfg.api_key && sess->cfg.api_key[0]) {
-        size_t n = strlen("Bearer ") + strlen(sess->cfg.api_key);
+        const char *pfx = (vt->auth_prefix && vt->auth_prefix[0]) ? vt->auth_prefix : "Bearer ";
+        size_t n = strlen(pfx) + strlen(sess->cfg.api_key);
         auth = (char *)malloc(n + 1);
         if (auth) {
-            memcpy(auth, "Bearer ", strlen("Bearer "));
-            memcpy(auth + strlen("Bearer "), sess->cfg.api_key,
+            memcpy(auth, pfx, strlen(pfx));
+            memcpy(auth + strlen(pfx), sess->cfg.api_key,
                    strlen(sess->cfg.api_key) + 1);
         } else {
             puci_alloc_free(&sess->alloc, url);
@@ -814,6 +826,7 @@ static puci_status run_build_request(puci_session *sess,
     hreq.auth_header = run->auth;
     hreq.content_type = "application/json";
     hreq.accept = "text/event-stream";
+    hreq.extra_header = vt->extra_header;
     hreq.timeout_ms = sess->cfg.timeout_ms;
     hreq.idle_timeout_ms = sess->cfg.stream_idle_timeout_ms;
     hreq.ca_bundle = sess->cfg.ca_bundle;
