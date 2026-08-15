@@ -24,8 +24,23 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <errno.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+
+static void ensure_parent_dir(const char *path) {
+    if (!path) return;
+    char *dup = strdup(path);
+    if (!dup) return;
+    char *slash = strrchr(dup, '/');
+    if (!slash) { free(dup); return; }
+    *slash = '\0';
+    if (dup[0]=='\0') { free(dup); return; }
+    /* mkdir -p */
+    for (char *p=dup+1; *p; p++) if (*p=='/') { *p='\0'; mkdir(dup, 0755); *p='/'; }
+    mkdir(dup, 0755);
+    free(dup);
+}
 
 static long read_pss_kb(void) {
     FILE *f = fopen("/proc/self/smaps_rollup", "r");
@@ -320,6 +335,7 @@ int main(int argc, char **argv) {
         strftime(ts, sizeof ts, "%Y-%m-%dT%H:%M:%SZ", &tm_now);
         double ev_rate = poll_ms ? (double)events * 1000.0 / (double)poll_ms : 0;
         double turn_rate = poll_ms ? (double)N * 1000.0 / (double)poll_ms : 0;
+        ensure_parent_dir(json_path);
         FILE *jf = fopen(json_path, "w");
         if (jf) {
             fprintf(jf, "{\n");

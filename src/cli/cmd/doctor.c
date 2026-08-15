@@ -111,9 +111,11 @@ int puci_cli_doctor(void) {
 
     HEAD("credentials");
     if (pc->api_key && *pc->api_key) {
-        ok("API key present (via environment)");
+        const char *src = getenv("PUCI_API_KEY") ? "PUCI_API_KEY" : (getenv("OPENROUTER_API_KEY") ? "OPENROUTER_API_KEY (fallback)" : "config");
+        ok("API key present via %s", src);
     } else {
-        note("no PUCI_API_KEY set; this is fine for local endpoints that need none.");
+        note("no PUCI_API_KEY nor OPENROUTER_API_KEY set; this is fine for local endpoints that need none.");
+        note("for OpenRouter BYOK: export OPENROUTER_API_KEY=sk-or-v1-... (PUCI_API_KEY fallback, base https://openrouter.ai/api/v1)");
     }
 
     HEAD("TLS");
@@ -193,8 +195,8 @@ int puci_cli_doctor(void) {
                     if (err) {
                         note("  %s", err);
                     }
-                    note("check PUCI_BASE_URL is reachable and PUCI_API_KEY is "
-                         "correct; for TLS trust issues set PUCI_CA_BUNDLE.");
+                    note("check PUCI_BASE_URL is reachable and PUCI_API_KEY/OPENROUTER_API_KEY is "
+                         "correct; for OpenRouter BYOK ensure base https://openrouter.ai/api/v1; for TLS set PUCI_CA_BUNDLE.");
                 }
                 puci_session_destroy(sess);
             }
