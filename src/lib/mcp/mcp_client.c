@@ -111,22 +111,43 @@ static int mcp_write_line(puci_mcp_client *c, const char *data) {
     return 0;
 }
 
-static int mcp_read_line(puci_mcp_client *c, const puci_cancel_token *cancel, char **out_line, int timeout_ms) {
+#define MCP_BUF_SIZE 4096
+
+typedef struct puci_mcp_buf_reader {
+    char buf[MCP_BUF_SIZE];
+    size_t pos;
+    size_t len;
+    int eof;
+} puci_mcp_buf_reader;
+
+typedef enum mcp_read_result {
+    MCP_READ_OK = 0,
+    MCP_READ_CANCELLED = 1,
+    MCP_READ_TIMEOUT = 2,
+    MCP_READ_PROTOCOL = 3
+} mcp_read_result;
+
+static int mcp_read_line_ex(puci_mcp_client *c, const puci_cancel_token *cancel,
+                            char **out_line, int timeout_ms,
+                            mcp_read_result *out_reason) {
+    if (out_reason) *out_reason = MCP_READ_PROTOCOL;
     *out_line = NULL;
     if (!c || c->out_fd < 0) return -1;
 
     puci_strbuf sb;
     puci_strbuf_init(&sb, NULL);
+    puci_mcp_buf_reader br;
+    memset(&br, 0, sizeof(br));
 
     long long start = 0;
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     start = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 
-    char ch;
     for (;;) {
         if (cancel && cancel->flag && *cancel->flag) {
             puci_strbuf_destroy(&sb);
+            if (out_reason) *out_reason = MCP_READ_CANCELLED;
             return -1;
         }
 
@@ -136,6 +157,32 @@ static int mcp_read_line(puci_mcp_client *c, const puci_cancel_token *cancel, ch
         int rem = timeout_ms - (int)(now - start);
         if (rem <= 0 && timeout_ms > 0) {
             puci_strbuf_destroy(&sb);
+            if (out_reason) *out_reason = MCP_READ_TIMEOUT;
+            return -1;
+        }
+
+        if (br.pos < br.len) {
+            char ch = br.buf[br.pos++];
+            if (ch == '\n') {
+                if (sb.len > 0 && sb.data[sb.len - 1] == '\r') {
+                    sb.data[sb.len - 1] = '\0';
+                    sb.len--;
+                }
+                break;
+            }
+            puci_strbuf_append_char(&sb, ch);
+            if (sb.len > 4 * 1024 * 1024) {
+                puci_strbuf_destroy(&sb);
+                if (out_reason) *out_reason = MCP_READ_PROTOCOL;
+                return -1;
+            }
+            continue;
+        }
+
+        if (br.eof && sb.len > 0) break;
+        if (br.eof) {
+            puci_strbuf_destroy(&sb);
+            if (out_reason) *out_reason = MCP_READ_PROTOCOL;
             return -1;
         }
 
@@ -151,50 +198,64 @@ static int mcp_read_line(puci_mcp_client *c, const puci_cancel_token *cancel, ch
             nfds = 2;
         }
 
-        int prc = poll(pfd, (nfds_t)nfds, (rem > 0 && timeout_ms > 0) ? rem : 1000);
+        int prc = poll(pfd, (nfds_t)nfds, (rem > 0 && timeout_ms > 0) ? rem : 200);
         if (prc < 0) {
             if (errno == EINTR) continue;
             puci_strbuf_destroy(&sb);
+            if (out_reason) *out_reason = MCP_READ_PROTOCOL;
             return -1;
         }
-        if (prc == 0 && timeout_ms > 0) {
-            puci_strbuf_destroy(&sb);
-            return -1;
+        if (prc == 0) {
+            if (timeout_ms > 0) {
+                puci_strbuf_destroy(&sb);
+                if (out_reason) *out_reason = MCP_READ_TIMEOUT;
+                return -1;
+            }
+            continue;
         }
         if (nfds > 1 && (pfd[1].revents & (POLLIN | POLLHUP | POLLERR))) {
             puci_strbuf_destroy(&sb);
+            if (out_reason) *out_reason = MCP_READ_CANCELLED;
             return -1;
         }
-
-        if (pfd[0].revents & POLLIN) {
-            ssize_t n = read(c->out_fd, &ch, 1);
-            if (n <= 0) {
-                if (sb.len > 0) break;
-                puci_strbuf_destroy(&sb);
-                return -1;
-            }
-            if (ch == '\n') {
-                if (sb.len > 0 && sb.data[sb.len - 1] == '\r') {
-                    sb.data[sb.len - 1] = '\0';
-                    sb.len--;
-                }
-                break;
-            }
-            puci_strbuf_append_char(&sb, ch);
-            if (sb.len > 4 * 1024 * 1024) {
-                puci_strbuf_destroy(&sb);
-                return -1;
-            }
-        } else if (pfd[0].revents & (POLLHUP | POLLERR)) {
+        if (pfd[0].revents & (POLLHUP | POLLERR)) {
             if (sb.len > 0) break;
             puci_strbuf_destroy(&sb);
+            if (out_reason) *out_reason = MCP_READ_PROTOCOL;
             return -1;
+        }
+        if (pfd[0].revents & POLLIN) {
+            ssize_t n = read(c->out_fd, br.buf, sizeof(br.buf));
+            if (n <= 0) {
+                if (n == 0) {
+                    br.eof = 1;
+                    if (sb.len > 0) break;
+                }
+                if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+                    continue;
+                }
+                if (sb.len > 0) break;
+                puci_strbuf_destroy(&sb);
+                if (out_reason) *out_reason = MCP_READ_PROTOCOL;
+                return -1;
+            }
+            br.pos = 0;
+            br.len = (size_t)n;
         }
     }
 
     *out_line = strdup(puci_strbuf_cstr(&sb));
     puci_strbuf_destroy(&sb);
-    return *out_line ? 0 : -1;
+    if (!*out_line) {
+        if (out_reason) *out_reason = MCP_READ_PROTOCOL;
+        return -1;
+    }
+    if (out_reason) *out_reason = MCP_READ_OK;
+    return 0;
+}
+
+static int mcp_read_line(puci_mcp_client *c, const puci_cancel_token *cancel, char **out_line, int timeout_ms) {
+    return mcp_read_line_ex(c, cancel, out_line, timeout_ms, NULL);
 }
 
 static int mcp_tool_invoke(void *userdata, const puci_cancel_token *cancel,
@@ -228,8 +289,15 @@ static int mcp_tool_invoke(void *userdata, const puci_cancel_token *cancel,
     puci_strbuf_destroy(&req);
 
     char *resp_line = NULL;
-    if (mcp_read_line(c, cancel, &resp_line, 60000) != 0 || !resp_line) {
-        *out_result = strdup("{\"ok\":false,\"error\":\"MCP server response timeout or error\"}");
+    mcp_read_result rreason = MCP_READ_PROTOCOL;
+    if (mcp_read_line_ex(c, cancel, &resp_line, 60000, &rreason) != 0 || !resp_line) {
+        if (rreason == MCP_READ_CANCELLED) {
+            *out_result = strdup("{\"ok\":false,\"error\":\"cancelled\",\"code\":\"PUCI_ERR_CANCELLED\"}");
+        } else if (rreason == MCP_READ_TIMEOUT) {
+            *out_result = strdup("{\"ok\":false,\"error\":\"MCP server timeout\",\"code\":\"PUCI_ERR_TOOL_TIMEOUT\"}");
+        } else {
+            *out_result = strdup("{\"ok\":false,\"error\":\"MCP server response timeout or error\"}");
+        }
         return 1;
     }
 

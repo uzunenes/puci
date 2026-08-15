@@ -9,6 +9,8 @@
 
 #include "util/strbuf.h"
 
+#define PUCI_SSE_MAX_BUFFER ((size_t)8 * 1024 * 1024)
+
 struct puci_sse_parser {
     puci_strbuf buf;       /* unprocessed input bytes */
     puci_strbuf pending;   /* current event payload */
@@ -115,9 +117,16 @@ puci_status puci_sse_parser_feed(puci_sse_parser *p, const char *data,
     if (!p || (!data && len > 0)) {
         return PUCI_ERR_INVALID_ARG;
     }
+    if (p->buf.len + len > PUCI_SSE_MAX_BUFFER ||
+        p->pending.len > PUCI_SSE_MAX_BUFFER) {
+        return PUCI_ERR_LIMIT_EXCEEDED;
+    }
     p->oom = puci_strbuf_append(&p->buf, data, len);
     if (p->oom != PUCI_OK) {
         return p->oom;
+    }
+    if (p->buf.len > PUCI_SSE_MAX_BUFFER || p->pending.len > PUCI_SSE_MAX_BUFFER) {
+        return PUCI_ERR_LIMIT_EXCEEDED;
     }
     return process_buffer(p, cb, ud);
 }

@@ -222,6 +222,9 @@ typedef struct counts {
 static void test_bounded_process_calls(void) {
     int NCHUNKS = 300;
     int DELAY_MS = 2; /* ~600 ms of dribbled streaming */
+    struct timespec cpu_start, wall_start;
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &cpu_start);
+    clock_gettime(CLOCK_MONOTONIC, &wall_start);
 
     int pf[2];
     if (pipe(pf) != 0) {
@@ -351,10 +354,20 @@ static void test_bounded_process_calls(void) {
 
     CHECK(completed == 1);
     CHECK(errored == 0);
-    /* The real, throttled cost is ~NCHUNKS-ish process() calls (plus setup).
-     * A busy-spin over ~600 ms would be ~hundreds of thousands. 20k cleanly
-     * separates honest throttling from a spin. */
     CHECK(process_calls < 20000);
+    {
+        struct timespec cpu_end, wall_end;
+        clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &cpu_end);
+        clock_gettime(CLOCK_MONOTONIC, &wall_end);
+        long long cpu_ms = (cpu_end.tv_sec - cpu_start.tv_sec) * 1000 +
+                           (cpu_end.tv_nsec - cpu_start.tv_nsec) / 1000000;
+        long long wall_ms = (wall_end.tv_sec - wall_start.tv_sec) * 1000 +
+                            (wall_end.tv_nsec - wall_start.tv_nsec) / 1000000;
+        CHECK(wall_ms >= 200);
+        if (wall_ms > 0) {
+            CHECK(cpu_ms * 4 < wall_ms);
+        }
+    }
     CHECK(c.deltas == NCHUNKS);
     /* Slice 1 test 1: text must arrive on the async path. All 300 chunks are
      * single 't' deltas; assert the accumulated text is exactly 300 't's. */

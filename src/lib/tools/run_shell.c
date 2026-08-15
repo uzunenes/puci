@@ -417,26 +417,42 @@ static int shell_async_step(void *userdata, puci_tool_async_handle handle,
 }
 
 /* Forced teardown (session/context destroyed mid-flight): kill the whole
- * process group and reap. This is the one place a bounded blocking wait is
- * acceptable, per puci_tool_async_abort_cb's contract. */
+ * process group and reap. Grace: 2s non-blocking SIGTERM→SIGKILL escalation
+ * before the bounded blocking reap fallback, per puci_tool_async_abort_cb. */
 static void shell_async_abort(void *userdata, puci_tool_async_handle handle) {
     (void)userdata;
     shell_async_state *st = (shell_async_state *)handle;
     if (!st) {
         return;
     }
-    (void)killpg(st->pid, SIGKILL);
+    (void)killpg(st->pid, SIGTERM);
     int ws;
-    for (;;) {
-        pid_t r = waitpid(st->pid, &ws, 0);
+    int reaped = 0;
+    for (int i = 0; i < 40; i++) {
+        pid_t r = waitpid(st->pid, &ws, WNOHANG);
         if (r == st->pid || (r < 0 && errno == ECHILD)) {
+            reaped = 1;
             break;
         }
-        if (r < 0 && errno == EINTR) {
-            continue;
-        }
-        if (r < 0) {
+        if (r < 0 && errno != EINTR) {
             break;
+        }
+        struct timespec ts = {0, 50000000L};
+        nanosleep(&ts, NULL);
+    }
+    if (!reaped) {
+        (void)killpg(st->pid, SIGKILL);
+        for (;;) {
+            pid_t r = waitpid(st->pid, &ws, 0);
+            if (r == st->pid || (r < 0 && errno == ECHILD)) {
+                break;
+            }
+            if (r < 0 && errno == EINTR) {
+                continue;
+            }
+            if (r < 0) {
+                break;
+            }
         }
     }
     if (st->out_fd >= 0) {
