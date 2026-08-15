@@ -33,9 +33,7 @@ cli_deps = [puci_dep]
 # feature. libpuci never links it.
 tui_sources = files('tui/tui.c')
 if get_option('tui').enabled()
-    tui_dep = dependency('ncurses', required: false)
     cli_sources += tui_sources
-    cli_deps += tui_dep
 endif
 
 if get_option('cli')

@@ -14,6 +14,7 @@
 #include "cmd/cmd.h"
 #include "cmd/session_mgr.h"
 #include "repl/repl.h"
+#include "tui/tui.h"
 
 static void print_help(FILE *f) {
     fprintf(f,
@@ -48,6 +49,10 @@ int main(int argc, char **argv) {
     puci_cli_params params;
     memset(&params, 0, sizeof(params));
 
+    if (puci_tui_should_launch(argc, argv)) {
+        return puci_tui_run(&params);
+    }
+
     int argi = 1;
     char *prompt_buf = NULL;
 
@@ -63,6 +68,9 @@ int main(int argc, char **argv) {
             return puci_cli_list_sessions();
         } else if (strcmp(arg, "doctor") == 0) {
             return puci_cli_doctor();
+        } else if (strcmp(arg, "--no-tui") == 0 || strcmp(arg, "--tui") == 0) {
+            if (strcmp(arg, "--tui")==0) return puci_tui_run(&params);
+            argi++;
         } else if (strcmp(arg, "--plan") == 0 || strcmp(arg, "--dry-run") == 0) {
             params.plan_mode = 1;
             argi++;
