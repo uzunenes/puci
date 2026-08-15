@@ -150,6 +150,8 @@ struct puci_session {
     char *approval_feedback;
     long tool_timeout_ms;
 
+    size_t context_budget_bytes; /* 0 = default 128 kB */
+
     long long total_prompt_tokens;
     long long total_completion_tokens;
     long long total_cached_tokens;
@@ -424,6 +426,7 @@ void session_cancel_clear(puci_session *sess);
  * by a matching tool result message, so the history stays valid for the next
  * turn even after an interruption. Returns PUCI_OK or PUCI_ERR_NOMEM. */
 puci_status session_fixup_dangling_tool_calls(puci_session *sess);
+void puci_session_estimate_context_budget(const puci_session *sess, size_t *out_bytes, size_t *out_budget);
 
 /* json/json.h helpers for message serialization */
 typedef struct puci_json puci_json;

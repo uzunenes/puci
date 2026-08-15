@@ -240,6 +240,24 @@ puci_status puci_session_set_plan_mode(puci_session *sess, int plan_mode);
 /** Returns 1 if session is in plan / dry-run mode, 0 otherwise. */
 int puci_session_get_plan_mode(const puci_session *sess);
 
+/** Sets the context budget in bytes for automatic compaction (0 = default
+ *  131072). When the serialized history exceeds this, the oldest verbose tool
+ *  results are pruned before the next HTTP dispatch. Thread: owning thread. */
+puci_status puci_session_set_context_budget(puci_session *sess, size_t budget_bytes);
+
+/** Returns the effective context budget in bytes (never 0). */
+size_t puci_session_get_context_budget(const puci_session *sess);
+
+/** Returns the current serialized context size in bytes (chars). */
+size_t puci_session_context_bytes(const puci_session *sess);
+
+/** Compacts the session history to fit within the budget.
+ *  Head (system prompt + first turn) and the last 4 turns are preserved.
+ *  Older verbose TOOL results are truncated with a marker and duplicate
+ *  tool outputs are deduplicated. Sets *out_pruned to bytes removed (0 if
+ *  already within budget). Returns PUCI_OK or PUCI_ERR_NOMEM. */
+puci_status puci_session_compact_context(puci_session *sess, size_t *out_pruned);
+
 /* Ownership contract: the caller owns session handles and destroys them with
  * puci_session_destroy. Session-returned strings, arrays, descriptors, and
  * event payload pointers are borrowed until the documented next operation;

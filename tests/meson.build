@@ -82,6 +82,14 @@ test_mcp = executable(
 )
 test('test_mcp', test_mcp)
 
+test_compaction = executable(
+    'test_context_compaction',
+    'unit/test_context_compaction.c',
+    include_directories: [internal_inc],
+    dependencies: puci_static_dep,
+)
+test('test_context_compaction', test_compaction)
+
 # End-to-end agent loop test with an embedded mock SSE server.
 test_agent = executable(
     'test_agent_loop',

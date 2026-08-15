@@ -712,6 +712,16 @@ static puci_status run_build_request(puci_session *sess,
         run->stream_text = NULL;
     }
 
+    /* Pre-flight budget enforcement: compact if over budget before serializing. */
+    {
+        size_t cur = puci_session_context_bytes(sess);
+        size_t budget = puci_session_get_context_budget(sess);
+        if (cur > budget) {
+            size_t pruned = 0;
+            puci_session_compact_context(sess, &pruned);
+            (void)pruned;
+        }
+    }
     puci_strbuf msgs;
     puci_strbuf_init(&msgs, &sess->alloc);
     puci_status st = session_serialize_messages(sess, &msgs);

@@ -211,6 +211,13 @@ puci_status puci_session_create(const puci_context *ctx,
     sess->plan_mode = opts->plan_mode ? 1 : 0;
     sess->tool_timeout_ms = opts->tool_timeout_ms > 0 ? opts->tool_timeout_ms : 60000;
     sess->approval_feedback = NULL;
+    {
+        const char *env = getenv("PUCI_CONTEXT_BUDGET");
+        if (env && env[0]) {
+            long v = strtol(env, NULL, 10);
+            if (v > 0 && v < 100 * 1024 * 1024) sess->context_budget_bytes = (size_t)v;
+        }
+    }
 
     /* Default the session's enabled tools to all context tools. */
     for (size_t i = 0; i < ctx->ntools; i++) {
@@ -1045,6 +1052,128 @@ void puci_session_estimate_context(const puci_session *sess, size_t *out_chars,
     }
     if (out_chars) *out_chars = total_chars;
     if (out_est_tokens) *out_est_tokens = (total_chars + 3) / 4;
+}
+
+#define PUCI_DEFAULT_CONTEXT_BUDGET ((size_t)131072)
+#define PUCI_TAIL_PRESERVE_MSGS 8
+#define PUCI_TOOL_PRUNE_THRESHOLD 512
+#define PUCI_TOOL_KEEP_PREFIX 64
+
+static size_t msg_bytes(const puci_msg *m) {
+    size_t n = 0;
+    if (m->content) n += strlen(m->content);
+    if (m->tool_call_id) n += strlen(m->tool_call_id);
+    for (size_t k = 0; k < m->ntool_calls; k++) {
+        if (m->tool_calls[k].id) n += strlen(m->tool_calls[k].id);
+        n += m->tool_calls[k].name.len;
+        n += m->tool_calls[k].args.len;
+    }
+    return n;
+}
+
+size_t puci_session_context_bytes(const puci_session *sess) {
+    if (!sess) return 0;
+    size_t n = 0;
+    if (sess->system_prompt) n += strlen(sess->system_prompt);
+    for (size_t i = 0; i < sess->nmessages; i++) n += msg_bytes(&sess->messages[i]);
+    return n;
+}
+
+size_t puci_session_get_context_budget(const puci_session *sess) {
+    if (!sess) return PUCI_DEFAULT_CONTEXT_BUDGET;
+    return sess->context_budget_bytes ? sess->context_budget_bytes : PUCI_DEFAULT_CONTEXT_BUDGET;
+}
+
+puci_status puci_session_set_context_budget(puci_session *sess, size_t budget_bytes) {
+    if (!sess) return PUCI_ERR_INVALID_ARG;
+    sess->context_budget_bytes = budget_bytes;
+    return PUCI_OK;
+}
+
+void puci_session_estimate_context_budget(const puci_session *sess, size_t *out_bytes, size_t *out_budget) {
+    if (out_bytes) *out_bytes = puci_session_context_bytes(sess);
+    if (out_budget) *out_budget = puci_session_get_context_budget(sess);
+}
+
+static size_t hash_content(const char *s) {
+    size_t h = 5381;
+    if (!s) return 0;
+    while (*s) { h = ((h << 5) + h) ^ (unsigned char)*s++; }
+    return h;
+}
+
+puci_status puci_session_compact_context(puci_session *sess, size_t *out_pruned) {
+    if (out_pruned) *out_pruned = 0;
+    if (!sess) return PUCI_ERR_INVALID_ARG;
+    size_t budget = puci_session_get_context_budget(sess);
+    size_t cur = puci_session_context_bytes(sess);
+    if (cur <= budget) return PUCI_OK;
+    if (sess->nmessages <= 2) return PUCI_OK;
+
+    size_t tail_start = sess->nmessages > PUCI_TAIL_PRESERVE_MSGS ? sess->nmessages - PUCI_TAIL_PRESERVE_MSGS : 1;
+    if (tail_start < 1) tail_start = 1;
+    size_t head_end = 1;
+
+    size_t pruned = 0;
+    /* Dedup map for middle TOOL messages: simple hash set */
+    size_t *seen_hashes = NULL;
+    size_t seen_cap = 0, seen_n = 0;
+
+    for (size_t i = head_end; i < tail_start; i++) {
+        if (cur <= budget) break;
+        puci_msg *m = &sess->messages[i];
+        if (m->role != PUCI_ROLE_TOOL || !m->content) continue;
+        size_t clen = strlen(m->content);
+        if (clen < PUCI_TOOL_PRUNE_THRESHOLD && clen < 512) continue;
+
+        /* Tier 3: dedup - if identical content seen before in middle, replace with marker */
+        size_t h = hash_content(m->content);
+        int duplicate = 0;
+        for (size_t j = 0; j < seen_n; j++) if (seen_hashes[j] == h) { duplicate = 1; break; }
+        if (!duplicate) {
+            if (seen_n == seen_cap) {
+                size_t ncap = seen_cap ? seen_cap * 2 : 16;
+                size_t *nh = (size_t *)puci_alloc_malloc(&sess->alloc, ncap * sizeof(size_t));
+                if (!nh) { if (seen_hashes) puci_alloc_free(&sess->alloc, seen_hashes); return PUCI_ERR_NOMEM; }
+                if (seen_hashes) { memcpy(nh, seen_hashes, seen_n * sizeof(size_t)); puci_alloc_free(&sess->alloc, seen_hashes); }
+                seen_hashes = nh; seen_cap = ncap;
+            }
+            seen_hashes[seen_n++] = h;
+        }
+        if (duplicate) {
+            const char *marker = "[Duplicate tool output removed for context budget]";
+            size_t mlen = strlen(marker);
+            char *nc = puci_alloc_strdup(&sess->alloc, marker);
+            if (!nc) { if (seen_hashes) puci_alloc_free(&sess->alloc, seen_hashes); return PUCI_ERR_NOMEM; }
+            size_t old = clen;
+            puci_alloc_free(&sess->alloc, m->content);
+            m->content = nc;
+            size_t nb = mlen;
+            if (old > nb) { pruned += old - nb; cur -= old - nb; }
+            continue;
+        }
+
+        /* Tier 2: truncate verbose output */
+        if (clen > PUCI_TOOL_PRUNE_THRESHOLD) {
+            size_t keep = PUCI_TOOL_KEEP_PREFIX < clen ? PUCI_TOOL_KEEP_PREFIX : clen;
+            char marker[128];
+            int ml = snprintf(marker, sizeof(marker), "\n[Prior tool output truncated: %zu bytes pruned for context budget]", clen - keep);
+            if (ml < 0) ml = 0;
+            size_t nlen = keep + (size_t)ml;
+            char *nc = (char *)puci_alloc_malloc(&sess->alloc, nlen + 1);
+            if (!nc) { if (seen_hashes) puci_alloc_free(&sess->alloc, seen_hashes); return PUCI_ERR_NOMEM; }
+            memcpy(nc, m->content, keep);
+            memcpy(nc + keep, marker, (size_t)ml);
+            nc[nlen] = '\0';
+            puci_alloc_free(&sess->alloc, m->content);
+            m->content = nc;
+            pruned += clen - nlen;
+            cur -= clen - nlen;
+        }
+    }
+    if (seen_hashes) puci_alloc_free(&sess->alloc, seen_hashes);
+    if (out_pruned) *out_pruned = pruned;
+    return PUCI_OK;
 }
 
 puci_status puci_session_save_file(const puci_session *sess, const char *filepath) {
