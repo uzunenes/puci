@@ -29,4 +29,16 @@ if get_option('examples')
         dependencies: puci_dep,
         install: false,
     )
+    executable(
+        'embedded_editor_agent',
+        'embedded_editor_agent.c',
+        dependencies: puci_dep,
+        install: false,
+    )
+    executable(
+        'benchmark_footprint',
+        'benchmark_footprint.c',
+        dependencies: puci_dep,
+        install: false,
+    )
 endif
