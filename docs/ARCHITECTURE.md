@@ -76,6 +76,10 @@ Every dependency must be justified here. Current list:
 - **Lua** (optional, `bindings/lua`): the Lua C ABI only, no Lua runtime
   dependency beyond what the host (LuaJIT / Neovim) already provides.
 
+## Context compaction
+
+Three-tier budget (`PUCI_CONTEXT_BUDGET`, default 128 kB): head (system + first turn) + tail (last 8 msgs) preserved atomically; middle verbose `TOOL` results truncated to 64 B + `[Prior tool output truncated: N bytes pruned for context budget]`; duplicate tool outputs deduplicated; pre-flight auto-compact before `build_request` (never emits upstream 400).
+
 ## Compile-time stripping
 
 Memory, swarm, browser, and MCP subsystems are each behind a Meson feature flag
