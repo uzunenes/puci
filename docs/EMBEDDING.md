@@ -65,8 +65,33 @@ Set `puci_session_options.max_tool_iterations` to bound tool dispatch per turn;
 zero selects the default of 32. A bounded value is recommended for automated
 audit or batch agents.
 
+## Neovim (puci.nvim)
+
+Zero-dependency plugin: `lua/puci/init.lua` + `plugin/puci.lua` + `bindings/lua/puci.so`.
+
+```lua
+-- init.lua (lazy.nvim)
+{ "uzunenes/puci", config = function() require("puci").open() end }
+-- :Puci [model]  or  :PuciOpen
+local s = require("puci").create_session({model="gpt-4o-mini"})
+s:send("fix the buffer", {on_delta=function(t) io.write(t) end})
+s:register_tool("my_tool","desc", function(args_json) return '{"ok":true}' end)
+s:write_buffer(0, new_text, true) -- vim.diff preview, vim.ui.select approval
+```
+
+Build `puci.so` without linking `-llua` (Neovim provides symbols):
+
+```sh
+cc -fPIC -shared bindings/lua/puci_lua.c -o puci.so $(pkg-config --cflags --libs puci)
+nvim --headless -u NONE -c "lua package.cpath=package.cpath..';./?.so'; require('puci')" -c "q"
+```
+
+## 1000-agent density
+
+`bench/bench_swarm` drives N sessions on one `poll()` loop against a mock SSE server.
+`docs/BENCHMARKS.md` reports 1000 sessions: 106 MB RSS, 104 MB PSS (~103 kB/session), 685 turns/s.
+
 ## Current limitations
 
-- Interactive stdin cancellation and terminal multiplexing examples are
-  deferred to future releases.
-- Phase 3b, Python bindings, and PyPI publication are out of scope for v0.1.0.
+- Python bindings and PyPI publication are out of scope for v0.3.0.
+- Phase 3b features (tree-sitter search, MCP SSE transport) are staged post-v0.3.0.

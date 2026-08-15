@@ -3,6 +3,8 @@
 PUCI is a minimal AI coding-agent harness written in portable C17. It is for
 embedders that want a small provider/tool core and a caller-owned poll loop.
 
+**v0.3.0 — 1000 agents in 106 MB, puci.nvim, hardened core.** `docs/BENCHMARKS.md` | `docs/SHOW_HN.md`
+
 ## What works
 
 - OpenAI-compatible streaming and provider transcript fixtures
@@ -31,8 +33,9 @@ validated against your own deployments.
   MCP client)
 - `puci-cli` — the terminal client, a thin consumer of libpuci
 - `bindings/lua` — minimal C-ABI Lua module (`puci.so`) for Neovim / LuaJIT
-- `examples/` — embedder examples including `embedded_editor_agent` and
-  `benchmark_footprint`
+- `lua/puci` + `plugin/puci.lua` — zero-dependency `puci.nvim` plugin (`:Puci`, `require('puci').create_session()`)
+- `examples/` — embedder examples including `embedded_editor_agent`, `poll_loop`, and `bench_swarm`
+- `bench/bench_swarm` — 1000-agent density benchmark (`docs/BENCHMARKS.md`)
 - See `docs/ARCHITECTURE.md` for the system design.
 
 ## Building
@@ -67,6 +70,21 @@ Build the examples and Lua bindings:
 ```sh
 meson setup build-examples -Dexamples=true -Dlua=true
 ninja -C build-examples
+```
+
+Neovim (`puci.nvim`, no `-llua` needed — Neovim provides Lua symbols):
+
+```sh
+meson setup build -Dlua=true && ninja -C build
+# manual: cc -fPIC -shared bindings/lua/puci_lua.c -o puci.so $(pkg-config --cflags --libs puci)
+# headless smoke: nvim --headless -u NONE -c "lua package.cpath=package.cpath..';build/bindings/lua/?.so'; require('puci')" -c "q"
+```
+
+Swarm density benchmark:
+
+```sh
+meson setup build-bench -Dbench=true && ninja -C build-bench bench/bench_swarm
+./build-bench/bench/bench_swarm 1000  # ~106 MB RSS for 1000 sessions, see docs/BENCHMARKS.md
 ```
 
 ## Multi-provider configuration
