@@ -5,14 +5,11 @@
  * (begin_turn / get_fds / next_timeout_ms / process / next_event)
  * allows the agent to be driven from a host-owned poll() loop.
  *
- * Limitations (current Phase 3.5):
- * - Non-blocking next_event() returns only the event enum; context payloads
- *   (like token text) are freed after delivery and unavailable to the caller.
- *   The blocking API (send) provides payloads via callbacks.
- * - This example counts and acknowledges events but cannot display token text
- *   without moving to the blocking send() API or implementing a separate
- *   callback delivery channel.
- * - Tool execution blocks (Stage A; async tools = Issue #2, Stage B).
+ * No known limitations: next_event() delivers owned payloads (TOKEN_DELTA text,
+ * REASONING_DELTA, TOOL_CALL_START/END, TURN_COMPLETE) via the session's
+ * reusable buffer (valid until the next next_event()/process()), and
+ * run_shell executes via the async lifecycle (begin/get_fds/step/abort) so
+ * the host poll loop never blocks during tool execution.
  *
  * This example demonstrates:
  * - Proper poll timeout flooring (curl_multi_timeout==0 is upper bound)
@@ -37,19 +34,45 @@
 #include <string.h>
 #include <unistd.h>
 
-/* Print event summaries. Event text payloads are owned by the session's
- * reusable buffer and are valid until the next next_event()/process(). */
 static void handle_event(puci_event ev) {
     switch (ev.kind) {
     case PUCI_EVENT_TOKEN_DELTA:
-        fprintf(stderr, ".");
-        fflush(stderr);
+        if (ev.text && ev.text_len > 0) {
+            fwrite(ev.text, 1, ev.text_len, stdout);
+            fflush(stdout);
+        }
+        break;
+    case PUCI_EVENT_REASONING_DELTA:
+        if (ev.text && ev.text_len > 0) {
+            fwrite(ev.text, 1, ev.text_len, stderr);
+        }
         break;
     case PUCI_EVENT_TOOL_CALL_START:
-        fprintf(stderr, "\n[tool starting]\n");
+        fprintf(stderr, "\n[tool %s starting: %s]\n",
+                ev.payload.tool_call.name ? ev.payload.tool_call.name : "?",
+                ev.payload.tool_call.args_json ? ev.payload.tool_call.args_json : "");
+        break;
+    case PUCI_EVENT_TOOL_CALL_END: {
+        const char *c = ev.payload.tool_result.content;
+        int clen = c ? (int)strlen(c) : 0;
+        if (clen > 120) clen = 120;
+        fprintf(stderr, "[tool %s done%s] %.*s\n",
+                ev.payload.tool_result.call_id ? ev.payload.tool_result.call_id : "?",
+                ev.payload.tool_result.is_error ? " (error)" : "",
+                clen, c ? c : "");
+        break;
+    }
         break;
     case PUCI_EVENT_TURN_COMPLETE:
-        fprintf(stderr, "\n[turn complete]\n");
+        fprintf(stderr, "\n[turn complete: %s]\n",
+                ev.payload.turn_complete.finish_reason ? ev.payload.turn_complete.finish_reason : "unknown");
+        break;
+    case PUCI_EVENT_TURN_CANCELLED:
+        fprintf(stderr, "\n[turn cancelled]\n");
+        break;
+    case PUCI_EVENT_ERROR:
+        fprintf(stderr, "\n[error %s] %.*s\n", puci_status_string(ev.payload.error.status),
+                (int)ev.text_len, ev.text ? ev.text : "");
         break;
     default:
         break;
