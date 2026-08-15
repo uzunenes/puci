@@ -41,4 +41,10 @@ if get_option('examples')
         dependencies: puci_dep,
         install: false,
     )
+    executable(
+        'bench_swarm',
+        'bench_swarm.c',
+        dependencies: puci_dep,
+        install: false,
+    )
 endif

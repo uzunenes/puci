@@ -10,3 +10,10 @@ executable(
     include_directories: [internal_inc],
     dependencies: puci_static_dep,
 )
+
+executable(
+    'bench_swarm',
+    'bench_swarm.c',
+    include_directories: [internal_inc],
+    dependencies: puci_static_dep,
+)
