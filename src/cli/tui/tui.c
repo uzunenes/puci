@@ -1,5 +1,5 @@
 /* tui.c - Featherweight POSIX ANSI TUI (v0.5.0)
- * Single-thread poll ring: STDIN + N*session fds, 60Hz floor, no ncurses.
+ * Single-thread poll ring: STDIN + N*session fds, dirty rendering 2Hz gauges, no ncurses.
  * Views: header, 2x2 swarm grid, gauges, diff overlay, sidebar, footer.
  */
 #include "tui.h"
@@ -160,17 +160,23 @@ static void draw_gauge(int r,int c,int w,long cur,long max,const char *label){
     twrite(bar,strlen(bar));
     char info[32]; snprintf(info,sizeof info," %ld/%ld",cur,max);
     twrite(info,strlen(info));
+    twrite("\x1b[K",3);
 }
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
 static void render_frame(int rows,int cols){
-    twrite("\x1b[2J\x1b[H",7);
+    twrite("\x1b[H",3);
     long rss=read_rss_kb(); long pss=read_pss_kb();
     long ctx_cur=0, ctx_bud=131072;
     if(g_npane>0 && g_panes[0].sess){ ctx_cur=(long)puci_session_context_bytes(g_panes[0].sess); ctx_bud=(long)puci_session_get_context_budget(g_panes[0].sess); }
     char hdr[256];
     snprintf(hdr,sizeof hdr," PUCI v0.5.0 ─ Swarm %d/%d ─ RSS %ld kB (PSS %ld) ─ Context %ld/%ld ", g_npane, MAX_PANES, rss, pss, ctx_cur, ctx_bud);
     char seq[32]; ansi_goto(1,1,seq,sizeof seq); twrite(seq,strlen(seq));
-    twrite("\x1b[1;44;37m",10); twrite(hdr,strlen(hdr)); twrite("\x1b[0m",4);
+    twrite("\x1b[1;44;37m",10); twrite(hdr,strlen(hdr)); twrite("\x1b[0m",4); twrite("\x1b[K",3);
     int usable_rows = rows-4;
     int pane_h = usable_rows/2; if(pane_h<4) pane_h=4;
     int pane_w = (cols-3)/2; if(pane_w<20) pane_w=20;
@@ -189,7 +195,13 @@ static void render_frame(int rows,int cols){
             if(line[0]=='+') twrite("\x1b[32m",5);
             else if(line[0]=='-') twrite("\x1b[31m",5);
             twrite(line,strlen(line));
+            twrite("\x1b[K",3);
             twrite("\x1b[0m",4);
+        }
+        // clear remaining inner lines
+        for(int l=g_panes[i].ring.count; l<inner_h; l++){
+            ansi_goto(pr+1+l, pc+1, seq, sizeof seq); twrite(seq,strlen(seq));
+            twrite("\x1b[K",3);
         }
     }
     if(g_show_sidebar){
@@ -198,13 +210,13 @@ static void render_frame(int rows,int cols){
         for(int i=0;i<g_npane;i++){
             ansi_goto(sr+1+i, sc+2, seq,sizeof seq); twrite(seq,strlen(seq));
             char ln[32]; snprintf(ln,sizeof ln,"%s %s", g_focus==i?"▸":" ", g_panes[i].title);
-            twrite(ln,strlen(ln));
+            twrite(ln,strlen(ln)); twrite("\x1b[K",3);
         }
     }
     draw_gauge(rows-2,1, cols-2, ctx_cur, ctx_bud, "Context");
     ansi_goto(rows,1,seq,sizeof seq); twrite(seq,strlen(seq));
     const char *footer="[y] Approve  [n] Deny  [j/k] Hunk  [TAB] Focus  [s] Sidebar  [q] Quit  [Enter] Prompt";
-    twrite("\x1b[2m",4); twrite(footer,strlen(footer)); twrite("\x1b[0m",4);
+    twrite("\x1b[2m",4); twrite(footer,strlen(footer)); twrite("\x1b[0m",4); twrite("\x1b[K",3);
     if(g_approval_pending){
         int or_= rows/2 - 6, oc= cols/2 - 30, oh=12, ow=60;
         if(or_<1) or_=1;
@@ -217,12 +229,14 @@ static void render_frame(int rows,int cols){
                 if(tok[0]=='+') twrite("\x1b[32m",5);
                 else if(tok[0]=='-') twrite("\x1b[31m",5);
                 char line[64]; snprintf(line,sizeof line,"%-*.*s", ow-2, ow-2, tok);
-                twrite(line,strlen(line)); twrite("\x1b[0m",4);
+                twrite(line,strlen(line)); twrite("\x1b[K",3); twrite("\x1b[0m",4);
             }
             l++; tok=strtok(NULL,"\n");
         }
         free(copy);
     }
+    // ensure cursor out of way
+    ansi_goto(rows, cols, seq, sizeof seq); twrite(seq,strlen(seq));
 }
 
 int puci_tui_available(void){ return 1; }
@@ -266,16 +280,20 @@ int puci_tui_run(const puci_cli_params *params){
     ring_push(&g_panes[g_focus].ring,"PUCI TUI v0.5.0 — TAB focus, s sidebar, q quit, Enter prompt");
     char input[512]; size_t ilen=0; int input_mode=0;
     int rows, cols; get_winsize(&rows,&cols);
-    struct timespec last_render={0,0};
+    struct timespec last_gauge; clock_gettime(CLOCK_MONOTONIC,&last_gauge);
+    int dirty=1;
     int running=1;
     while(running){
-        if(g_winch){ g_winch=0; get_winsize(&rows,&cols); }
-        struct timespec now; clock_gettime(CLOCK_MONOTONIC,&now);
-        long elapsed = (now.tv_sec-last_render.tv_sec)*1000000 + (now.tv_nsec-last_render.tv_nsec)/1000;
-        if(elapsed>16000 || g_approval_pending){ render_frame(rows,cols); last_render=now; }
+        if(g_winch){ g_winch=0; get_winsize(&rows,&cols); dirty=1; }
+        {
+            struct timespec ng; clock_gettime(CLOCK_MONOTONIC,&ng);
+            long ge = (ng.tv_sec-last_gauge.tv_sec)*1000 + (ng.tv_nsec-last_gauge.tv_nsec)/1000000;
+            if(ge >= 500){ dirty=1; last_gauge=ng; }
+        }
+        if(dirty){ render_frame(rows,cols); dirty=0; if(input_mode){ char seq[32]; ansi_goto(rows-1,1,seq,sizeof seq); twrite(seq,strlen(seq)); twrite("\x1b[7m",4); twrite("> ",2); twrite(input,ilen); twrite("\x1b[K",3); twrite("\x1b[0m",4); } }
         struct pollfd fds[32]; size_t nf=0;
         fds[nf].fd=STDIN_FILENO; fds[nf].events=POLLIN; nf++;
-        int min_to=16;
+        int session_to=-1;
         for(int i=0;i<g_npane;i++) if(g_panes[i].sess){
             size_t cnt=0; puci_session_get_fds(g_panes[i].sess,NULL,0,&cnt);
             if(cnt>0){
@@ -283,17 +301,33 @@ int puci_tui_run(const puci_cli_params *params){
                 size_t got=0; puci_session_get_fds(g_panes[i].sess,fds+nf, cnt, &got); nf+=got;
             }
             int tm=-1; puci_session_next_timeout_ms(g_panes[i].sess,&tm);
-            if(tm>=0 && tm<min_to) min_to=tm;
-            if(tm==0) min_to=0;
+            if(tm>=0 && (session_to<0 || tm < session_to)) session_to=tm;
         }
-        if(min_to<0) min_to=16;
-        if(min_to>16) min_to=16;
-        int pr=poll(fds,(nfds_t)nf,min_to);
+        int gauge_due;
+        {
+            struct timespec ng2; clock_gettime(CLOCK_MONOTONIC,&ng2);
+            long ge = (ng2.tv_sec-last_gauge.tv_sec)*1000 + (ng2.tv_nsec-last_gauge.tv_nsec)/1000000;
+            gauge_due = (int)(500 - ge);
+            if(gauge_due < 0) gauge_due = 0;
+        }
+        int poll_to;
+        if(session_to >= 0) poll_to = session_to < gauge_due ? session_to : gauge_due;
+        else poll_to = gauge_due < 250 ? gauge_due : 250;
+        if(poll_to < 0) poll_to = 250;
+        int pr=poll(fds,(nfds_t)nf,poll_to);
         if(pr<0 && errno==EINTR) continue;
+        if(pr==0){
+            struct timespec ng3; clock_gettime(CLOCK_MONOTONIC,&ng3);
+            long ge2 = (ng3.tv_sec-last_gauge.tv_sec)*1000 + (ng3.tv_nsec-last_gauge.tv_nsec)/1000000;
+            if(ge2 >= 500) dirty=1;
+            continue;
+        }
         if(fds[0].revents&POLLIN){
             char buf[64]; ssize_t n=read(STDIN_FILENO,buf,sizeof buf);
+            int had_key=0;
             for(ssize_t k=0;k<n;k++){
                 char c=buf[k];
+                had_key=1;
                 if(input_mode){
                     if(c=='\n'||c=='\r'){
                         input[ilen]=0;
@@ -310,13 +344,21 @@ int puci_tui_run(const puci_cli_params *params){
                     if(c=='\t'){ g_focus=(g_focus+1)%g_npane; }
                     if(c=='s'){ g_show_sidebar=!g_show_sidebar; }
                     if(c=='\n' || c=='\r'){ input_mode=1; ilen=0; ring_push(&g_panes[g_focus].ring,"> "); }
+                    // y/n handled via approval poll; also allow here if pending
+                    if(g_approval_pending){
+                        if(c=='y'||c=='Y'){ g_approval_result=1; g_approval_pending=0; }
+                        else if(c=='n'||c=='N'){ g_approval_result=-1; g_approval_pending=0; }
+                    }
                 }
             }
+            if(had_key) dirty=1;
         }
+        int had_event=0;
         for(int i=0;i<g_npane;i++) if(g_panes[i].sess){
             puci_session_process(g_panes[i].sess, fds+1, nf-1);
             puci_event ev;
             while(puci_session_next_event(g_panes[i].sess,&ev)){
+                had_event=1;
                 if(ev.kind==PUCI_EVENT_TOKEN_DELTA && ev.text){
                     char tmp[RING_COLS]; snprintf(tmp,sizeof tmp,"%.*s", (int)ev.text_len, ev.text);
                     ring_push(&g_panes[i].ring, tmp);
@@ -331,10 +373,7 @@ int puci_tui_run(const puci_cli_params *params){
                 }
             }
         }
-        if(input_mode){
-            char seq[32]; ansi_goto(rows-1,1,seq,sizeof seq); twrite(seq,strlen(seq));
-            twrite("\x1b[7m",4); twrite("> ",2); twrite(input,ilen); twrite("\x1b[0m",4);
-        }
+        if(had_event) dirty=1;
     }
     for(int i=0;i<MAX_PANES;i++) if(g_panes[i].sess) puci_session_destroy(g_panes[i].sess);
     puci_context_destroy(ctx);
