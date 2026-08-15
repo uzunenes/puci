@@ -3,7 +3,18 @@
 PUCI is a minimal AI coding-agent harness written in portable C17. It is for
 embedders that want a small provider/tool core and a caller-owned poll loop.
 
-**v0.3.0 — 1000 agents in 106 MB, puci.nvim, hardened core.** `docs/BENCHMARKS.md` | `docs/SHOW_HN.md`
+**v0.4.0 — Bounded Context (3-tier compaction), 1000 agents in 106 MB, puci.nvim.** `docs/BENCHMARKS.md` · `docs/COMPARISON.md` · `docs/SHOW_HN.md`
+
+## Comparison (vs Aider / Claude Code / Cline / agent.cpp)
+
+|  | **PUCI (C17)** | Python/Node competitors |
+|--|---------------|------------------------|
+| **PSS / session** | **~103 kB** measured | ~30–150 MB |
+| **8 GB host** | **~1000 agents** (one `poll()` loop) | ~20–40 |
+| **Cold start** | **<2 ms** | 150–800 ms |
+| **Embed** | C ABI + `puci.nvim` (no `-llua`) | IPC only |
+
+Full grounded matrix + methodology: [`docs/COMPARISON.md`](docs/COMPARISON.md) · Repro: `bench/bench_swarm 1000`
 
 ## What works
 
@@ -55,6 +66,13 @@ CC=clang meson setup build-clang && meson compile -C build-clang && meson test -
 For bounded one-shot agent runs, set `PUCI_MAX_TOOL_ITERATIONS` to a positive
 value up to 10000. When the limit is reached, PUCI ends the turn instead of
 continuing tool dispatch indefinitely and returns `PUCI_ERR_LIMIT_EXCEEDED`.
+
+Context budget (3-tier compaction: head+tail preserve, verbose TOOL truncation, dedup):
+
+```sh
+PUCI_CONTEXT_BUDGET=32768 puci run "long session"
+# or puci_session_set_context_budget(sess, 131072); puci_session_compact_context(sess, &pruned);
+```
 
 Install the library and compile an embedder with `pkg-config`:
 
