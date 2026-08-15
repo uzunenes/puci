@@ -179,7 +179,7 @@ static long long now_ms(void) {
     return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-static void test_run_shell_does_not_block_host_loop(void) {
+static void test_async_tool_nonblocking(void) {
     int pipefd[2];
     CHECK(pipe(pipefd) == 0);
     pid_t spid = fork();
@@ -444,8 +444,143 @@ static void test_tool_timeout_and_process_group_cleanup(void) {
     CHECK(count_children() == 0);
 }
 
+#define SSE_TOOL_LONG                                                       \
+    "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":"    \
+    "\"assistant\"},\"finish_reason\":null}]}\n\n"                          \
+    "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":" \
+    "[{\"index\":0,\"id\":\"call_c\",\"type\":\"function\",\"function\":{\"name\":" \
+    "\"run_shell\",\"arguments\":\"{\\\"command\\\":\\\"/bin/sleep\\\",\\\"args\\\":[\\\"10\\\"]}\"}}]},\"finish_reason\":null}]}\n\n"     \
+    "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":" \
+    "\"tool_calls\"}]}\n\n"                                                 \
+    "data: [DONE]\n\n"
+
+static void test_async_tool_cancel(void) {
+    int srv = socket(AF_INET, SOCK_STREAM, 0);
+    CHECK(srv >= 0);
+    int yes = 1;
+    setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(0);
+    CHECK(bind(srv, (struct sockaddr *)&addr, sizeof(addr)) == 0);
+    socklen_t alen = sizeof(addr);
+    getsockname(srv, (struct sockaddr *)&addr, &alen);
+    int port = ntohs(addr.sin_port);
+    CHECK(listen(srv, 8) == 0);
+
+    int pipefd[2];
+    CHECK(pipe(pipefd) == 0);
+    pid_t spid = fork();
+    if (spid == 0) {
+        close(pipefd[0]);
+        char pbuf[16];
+        int n = snprintf(pbuf, sizeof(pbuf), "%d\n", port);
+        write_all(pipefd[1], pbuf, (size_t)n);
+        close(pipefd[1]);
+
+        int c1 = accept(srv, NULL, NULL);
+        if (c1 >= 0) {
+            drain_request(c1);
+            serve_sse(c1, SSE_TOOL_LONG);
+            close(c1);
+        }
+        close(srv);
+        _exit(0);
+    }
+    close(pipefd[1]);
+    close(srv);
+    char pbuf[32];
+    ssize_t rd = read(pipefd[0], pbuf, sizeof(pbuf) - 1);
+    close(pipefd[0]);
+    CHECK(rd > 0);
+
+    char base_url[128];
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+
+    puci_context *ctx = NULL;
+    CHECK(puci_context_create(NULL, &ctx) == PUCI_OK);
+
+    puci_provider_config pcfg = {
+        .name = "openai",
+        .base_url = base_url,
+        .api_key = NULL,
+        .model = "mock-model",
+        .timeout_ms = 15000,
+    };
+    puci_context_set_provider(ctx, &pcfg);
+
+    puci_session_options sopts = {0};
+    sopts.provider = pcfg;
+    sopts.system_prompt = "test cancel";
+    sopts.max_tool_iterations = 8;
+
+    puci_session *sess = NULL;
+    CHECK(puci_session_create(ctx, &sopts, &sess) == PUCI_OK);
+    CHECK(puci_session_begin_turn(sess, "trigger async cancel") == PUCI_OK);
+
+    int cancelled_event_seen = 0;
+    int cancel_triggered = 0;
+    int done = 0;
+    puci_status terminal_status = PUCI_ERR_UNKNOWN;
+
+    /* Bound the loop by wall-clock time rather than a fixed iteration count:
+     * under Valgrind's ~50x slowdown, the cancel fd stays readable every
+     * iteration (poll returns immediately) so a purely iteration-based cap can
+     * be exhausted before the run_shell cancel-grace (SIGTERM -> SIGKILL)
+     * elapses. A 30s wall-clock bound is ample natively (~1s) and under
+     * Valgrind, while still guaranteeing the test cannot hang forever. */
+    long long deadline = now_ms() + 30000;
+    for (int guard = 0; !done && now_ms() < deadline; guard++) {
+        (void)guard;
+        int timeout_ms = -1;
+        CHECK(puci_session_next_timeout_ms(sess, &timeout_ms) == PUCI_OK);
+
+        struct pollfd fds[16];
+        size_t fd_count = 0;
+        CHECK(puci_session_get_fds(sess, fds, 16, &fd_count) == PUCI_OK);
+
+        int wait_ms = timeout_ms < 0 ? 1000 : timeout_ms;
+        if (wait_ms > 1000) {
+            wait_ms = 1000;
+        }
+        (void)poll(fd_count ? fds : NULL, (nfds_t)fd_count, wait_ms);
+
+        terminal_status = puci_session_process(sess, fds, fd_count);
+
+        puci_event ev;
+        while (puci_session_next_event(sess, &ev)) {
+            if (ev.kind == PUCI_EVENT_TOOL_CALL_START && !cancel_triggered) {
+                /* Cancel immediately while tool is executing */
+                CHECK(puci_session_cancel(sess) == PUCI_OK);
+                cancel_triggered = 1;
+            } else if (ev.kind == PUCI_EVENT_TURN_CANCELLED) {
+                cancelled_event_seen = 1;
+                done = 1;
+            } else if (ev.kind == PUCI_EVENT_TURN_COMPLETE ||
+                       ev.kind == PUCI_EVENT_ERROR) {
+                done = 1;
+            }
+        }
+    }
+
+    CHECK(cancel_triggered == 1);
+    CHECK(cancelled_event_seen == 1);
+    CHECK(terminal_status == PUCI_ERR_CANCELLED);
+    CHECK(puci_session_last_status(sess) == PUCI_ERR_CANCELLED);
+    CHECK(puci_session_validate(sess) == PUCI_OK);
+
+    puci_session_destroy(sess);
+    puci_context_destroy(ctx);
+    kill(spid, SIGKILL);
+    waitpid(spid, NULL, 0);
+    CHECK(count_children() == 0);
+}
+
 int main(void) {
-    test_run_shell_does_not_block_host_loop();
+    test_async_tool_nonblocking();
+    test_async_tool_cancel();
     test_tool_timeout_and_process_group_cleanup();
     TEST_END();
 }

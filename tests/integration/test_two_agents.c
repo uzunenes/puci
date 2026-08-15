@@ -368,8 +368,12 @@ static void test_asymmetric_cancel(void) {
     waitpid(pidB, NULL, 0);
 }
 
-int main(void) {
+static void test_concurrent_two_agents(void) {
     test_two_concurrent_agents();
+}
+
+int main(void) {
+    test_concurrent_two_agents();
     test_asymmetric_cancel();
     TEST_END();
 }
