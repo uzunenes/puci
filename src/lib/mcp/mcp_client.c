@@ -436,6 +436,16 @@ puci_status puci_mcp_server_register(puci_context *ctx, const puci_mcp_server_co
     }
     client->name = strdup(cfg->name ? cfg->name : "mcp");
     client->command = strdup(cfg->command);
+    if (!client->name || !client->command) {
+        free(client->name);
+        free(client->command);
+        free(client);
+        (void)killpg(pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+        close(p_in[1]);
+        close(p_out[0]);
+        return PUCI_ERR_NOMEM;
+    }
     client->pid = pid;
     client->in_fd = p_in[1];
     client->out_fd = p_out[0];
@@ -516,6 +526,7 @@ puci_status puci_mcp_server_register(puci_context *ctx, const puci_mcp_server_co
             puci_mcp_tool_info *tinfo = (puci_mcp_tool_info *)calloc(1, sizeof(puci_mcp_tool_info));
             if (tinfo) {
                 tinfo->tool_name = strdup(tname);
+                if (!tinfo->tool_name) { free(tinfo); puci_strbuf_destroy(&schema_sb); continue; }
                 tinfo->client = client;
                 if (puci_tool_register(ctx, &spec, mcp_tool_invoke, tinfo) == PUCI_OK) {
                     tinfo->next = client->tool_infos;

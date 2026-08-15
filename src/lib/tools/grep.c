@@ -62,7 +62,9 @@ static void load_gitignore(const char *root, gitignore_list *gi) {
             gi->patterns = np;
             gi->cap = ncap;
         }
-        gi->patterns[gi->count++] = strdup(line);
+        char *dup = strdup(line);
+        if (!dup) break;
+        gi->patterns[gi->count++] = dup;
     }
     fclose(f);
 }
