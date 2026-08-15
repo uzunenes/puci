@@ -3,7 +3,7 @@
 PUCI is a minimal AI coding-agent harness written in portable C17. It is for
 embedders that want a small provider/tool core and a caller-owned poll loop.
 
-**v0.4.0 — Bounded Context (3-tier compaction), 1000 agents in 106 MB, puci.nvim.** `docs/BENCHMARKS.md` · `docs/COMPARISON.md` · `docs/SHOW_HN.md`
+**v0.5.0 — Featherweight TUI & Swarm Dashboard (no ncurses, 60 Hz poll ring).** `docs/TUI.md` · `docs/BENCHMARKS.md` · `docs/COMPARISON.md`
 
 ## Comparison (vs Aider / Claude Code / Cline / agent.cpp)
 

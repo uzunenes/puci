@@ -15,10 +15,10 @@
  */
 
 #define PUCI_VERSION_MAJOR 0
-#define PUCI_VERSION_MINOR 4
+#define PUCI_VERSION_MINOR 5
 #define PUCI_VERSION_PATCH 0
 
-#define PUCI_VERSION_STRING "0.4.0"
+#define PUCI_VERSION_STRING "0.5.0"
 
  /* ABI version, drives the shared library soname (e.g. libpuci.so.2).
  * Version 2 is deliberate for v0.1.0: the public tool callback gained a cancel

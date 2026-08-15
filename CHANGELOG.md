@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [0.5.0] - 2026-08-15
+
+### Added
+
+- Featherweight TUI: single dual-mode `puci` binary (`isatty` dispatch, `--tui`/`--no-tui`), pure POSIX ANSI state machine in `src/cli/tui/` (zero deps, <100 KB heap, 60 Hz poll ring folding `STDIN` + session fds).
+- 2×2 Swarm Monitor (4 panes, paginated), live RSS/PSS + context budget gauges, interactive diff approval (`y/n`, `j/k`, colors), session sidebar (`s`), SIGWINCH resize.
+- `docs/TUI.md` and `isatty` headless fallback to REPL.
+
 ## [0.4.0] - 2026-08-15
 
 ### Added
