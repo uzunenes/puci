@@ -143,7 +143,7 @@ def analyze(recs):
     stalls=[]
     for i in range(1,len(recs)):
         d=(recs[i]["mono_ns"]-recs[i-1]["mono_ns"])/1e6
-        if d>50: stalls.append((d, recs[i]["phase"], recs[i]["mono_ns"]))
+        if d>50 and recs[i]["phase"] not in ("POLL_RET",): stalls.append((d, recs[i]["phase"], recs[i]["mono_ns"]))
     # monotinik backlog growing? check trend
     backlog_growing=False
     if len(backlog)>10:
