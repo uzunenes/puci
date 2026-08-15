@@ -1,0 +1,7 @@
+[wrap-git]
+url = https://github.com/termbox/termbox2.git
+revision = head
+depth = 1
+
+[provide]
+termbox2 = termbox2_dep

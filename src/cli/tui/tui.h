@@ -4,4 +4,5 @@
 int puci_tui_available(void);
 int puci_tui_should_launch(int argc, char **argv);
 int puci_tui_run(const puci_cli_params *params);
+void tui_render_frame(void);
 #endif

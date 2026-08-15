@@ -30,10 +30,19 @@ cli_sources = files(
 cli_deps = [puci_dep]
 
 # TUI lives exclusively under src/cli/tui and is shielded behind the 'tui'
-# feature. libpuci never links it.
+# feature. libpuci never links it. termbox2 is hybrid cell renderer (header-only).
+# Resolved via Meson Wrap (subprojects/termbox2.wrap) with fallback to vendored
+# header in src/cli/tui/vendor/termbox2.h — zero .so, zero pkg-config needed.
+termbox2_dep = dependency('termbox2', required: false, fallback: ['termbox2', 'termbox2_dep'])
+if not termbox2_dep.found()
+    termbox2_inc = include_directories('tui/vendor')
+    termbox2_dep = declare_dependency(include_directories: termbox2_inc)
+endif
+
 tui_sources = files('tui/tui.c')
 if get_option('tui').enabled()
     cli_sources += tui_sources
+    cli_deps += termbox2_dep
 endif
 
 if get_option('cli')
