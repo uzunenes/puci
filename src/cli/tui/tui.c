@@ -68,7 +68,7 @@ static void on_winch(int s){ (void)s; g_winch=1; }
 static void get_winsize(int *rows,int *cols){
     int w = tb_width(); int h = tb_height();
     if(w>0 && h>0){ *cols=w; *rows=h; return; }
-    struct winsize ws; if(ioctl(STDOUT_FILENO,TIOCGWINSZ,&ws)==0 && ws.ws_col>0){ *rows=ws.ws_row; *cols=ws.ws_col; } else { *rows=24; *cols=80; }
+    struct winsize ws; if(ioctl(STDOUT_FILENO,TIOCGWINSZ,&ws)==0 && ws.ws_col>0 && ws.ws_row>0){ *rows=ws.ws_row; *cols=ws.ws_col; } else { *rows=24; *cols=80; }
 }
 static long read_rss_kb(void){
     FILE *f=fopen("/proc/self/status","r"); if(!f) return -1;
@@ -112,6 +112,7 @@ typedef struct Pane {
     puci_session *sess;
     Ring ring;
     char title[64];
+    char session_id[64];
     int streaming; // 1 while assistant streaming
     char stream_buf[STREAM_BUF];
     size_t stream_len;
@@ -132,6 +133,7 @@ static size_t g_input_len=0;
 static size_t g_input_curs=0;
 static int g_input_mode=0;
 static int g_rows=24, g_cols=80;
+static char g_current_model[256]="";
 
 #define HIST_MAX 200
 static char g_hist[HIST_MAX][2048];
@@ -323,7 +325,7 @@ static int g_mode=0; //0 normal,1 input,2 sess_pick,3 model_pick,4 approval hand
 static int g_pick_sel=0;
 #define PICK_FILTER_MAX 64
 static char g_pick_filter[PICK_FILTER_MAX]="";
-static int g_pick_filtered_idx[MAX_SESS_LIST+32];
+static int g_pick_filtered_idx[MAX_MODELS];
 static int g_pick_filtered_count=0;
 
 static int strcasestr_contains(const char *hay, const char *needle){
@@ -347,12 +349,14 @@ static void rebuild_pick_filter(void){
     g_pick_filtered_count=0;
     if(g_mode==2){
         for(int i=0;i<g_sess_count;i++){
+            if(g_pick_filtered_count >= (int)(sizeof g_pick_filtered_idx/sizeof g_pick_filtered_idx[0])) break;
             if(strcasestr_contains(g_sess_list[i].id, g_pick_filter) || strcasestr_contains(g_sess_list[i].model, g_pick_filter)){
                 g_pick_filtered_idx[g_pick_filtered_count++]=i;
             }
         }
     } else if(g_mode==3){
         for(int i=0;k_models[i];i++){
+            if(g_pick_filtered_count >= (int)(sizeof g_pick_filtered_idx/sizeof g_pick_filtered_idx[0])) break;
             if(strcasestr_contains(k_models[i], g_pick_filter)){
                 g_pick_filtered_idx[g_pick_filtered_count++]=i;
             }
@@ -431,7 +435,8 @@ static puci_approval tui_approval_cb(const puci_approval_request *req, void *ud)
         pf[0].fd=STDIN_FILENO; pf[0].events=POLLIN;
         if(cancel_fd>=0){ pf[1].fd=cancel_fd; pf[1].events=POLLIN; nf=2; }
         int pr=poll(pf,(nfds_t)nf,100);
-        if(pr<0 && errno==EINTR) continue;
+        if(pr<0){ if(errno==EINTR) continue; else { struct timespec _ts={0,50000000L}; nanosleep(&_ts,NULL); continue; } }
+        if(pr==0) continue;
         if(nf==2 && (pf[1].revents&POLLIN)) { g_approval_pending=0; return PUCI_APPROVAL_DENY; }
         if(pf[0].revents&POLLIN){
             char c; ssize_t n=read(STDIN_FILENO,&c,1);
@@ -521,11 +526,13 @@ static void tb_draw_box(int r,int c,int h,int w,const char *title,int focused){
     tb_set_cell(c+w-1, r+h-1, 0x2518, fg, bg);
 }
 static void tb_draw_gauge(int r,int c,int w,long cur,long max,const char *label){
-    char bar[512]; int fill = max>0? (int)((cur* (long)(w-14))/max):0; if(fill<0) fill=0; if(fill>w-14) fill=w-14;
-    int pos=snprintf(bar,sizeof bar,"%s [",label); if(pos<0) pos=0; if(pos> (int)sizeof bar - 24) pos=(int)sizeof bar -24;
-    for(int i=0;i<w-14;i++) bar[pos++]= i<fill ? 0x2588 : 0x2591; // full/shade block fallback to #/-
-    // Use ascii for portability: replace blocks with #/-
-    for(int i=0;i<w-14;i++) bar[pos - (w-14) + i] = (i<fill?'#':'-');
+    char bar[512];
+    if(w<16) w=16;
+    if(w> (int)sizeof bar - 32) w=(int)sizeof bar - 32;
+    int inner=w-14; if(inner<1) inner=1;
+    int fill = max>0? (int)((cur* (long)inner)/max):0; if(fill<0) fill=0; if(fill>inner) fill=inner;
+    int pos=snprintf(bar,sizeof bar,"%s [",label); if(pos<0) pos=0; if(pos> (int)sizeof bar - inner - 4) pos=(int)sizeof bar - inner - 4;
+    for(int i=0;i<inner;i++) bar[pos++]= i<fill ? '#' : '-';
     bar[pos++]=']'; bar[pos]=0;
     tb_print(c, r, TB_WHITE, TB_DEFAULT, bar);
     char info[40]; snprintf(info,sizeof info," %ld/%ld",cur,max);
@@ -534,6 +541,7 @@ static void tb_draw_gauge(int r,int c,int w,long cur,long max,const char *label)
 
 /* Word-wrap one logical line into visual lines */
 static int wrap_visual_count(const char *s, int width){
+    if(width<=0) return 1;
     if(!s||!*s) return 1;
     int n=0; int len=(int)strlen(s);
     int pos=0;
@@ -561,8 +569,8 @@ void tui_render_frame(void){
     tb_print(0, 0, TB_WHITE|TB_BOLD, TB_BLUE, hdr);
     // model indicator top-right
     {
-        const char *m = getenv("PUCI_MODEL"); if(!m) m="deepseek/deepseek-chat";
-        char mod[64]; snprintf(mod,sizeof mod," %s ", m);
+        const char *m = g_current_model[0]?g_current_model:getenv("PUCI_MODEL"); if(!m||!*m) m="deepseek/deepseek-chat";
+        char mod[64]; snprintf(mod,sizeof mod," %.61s ", m);
         int ml=(int)strlen(mod);
         int mx=cols-ml-1; if(mx>0) tb_print(mx,0, TB_WHITE, TB_BLUE, mod);
     }
@@ -686,7 +694,7 @@ void tui_render_frame(void){
         if(oc+ow >= cols) ow = cols - oc -1;
         for(int y=or_; y<or_+oh; y++) for(int x=oc; x<oc+ow; x++) tb_set_cell(x,y,' ', TB_WHITE, TB_BLUE);
         tb_draw_box(or_,oc,oh,ow,"Approval — y=allow n=deny j/k scroll",1);
-        char *copy=strdup(g_approval_diff); char *tok=strtok(copy,"\n"); int l=0;
+        char *copy=strdup(g_approval_diff); if(!copy){ /* allocation failure: skip overlay */ } else { char *save=NULL; char *tok=strtok_r(copy,"\n",&save); int l=0;
         while(tok && l<oh-2){
             if(l>=g_hunk_off){
                 int yy = or_+1+(l-g_hunk_off);
@@ -698,9 +706,9 @@ void tui_render_frame(void){
                     tb_print(oc+1, yy, fg, TB_BLUE, line);
                 }
             }
-            l++; tok=strtok(NULL,"\n");
+            l++; tok=strtok_r(NULL,"\n",&save);
         }
-        free(copy);
+        free(copy); }
     }
     if(g_mode==3){
         int oh=16, ow=54;
@@ -755,13 +763,23 @@ static void pane_stream_append(Pane *p, const char *txt, size_t len){
     if(!p->streaming){
         pane_stream_begin(p);
     }
-    // append to stream_buf and to last ring line
     size_t add = len < STREAM_BUF - p->stream_len -1 ? len : STREAM_BUF - p->stream_len -1;
     memcpy(p->stream_buf + p->stream_len, txt, add); p->stream_len+=add; p->stream_buf[p->stream_len]=0;
-    // append to last logical line (coalesce)
-    ring_append_to_last(&p->ring, txt, len);
-    // keep scroll at bottom if user was at bottom
-    if(p->scroll_off==0) p->scroll_off=0; // auto stays
+    // Split on newlines: each newline starts a new logical line
+    size_t off=0;
+    while(off < len){
+        const char *nl = (const char*)memchr(txt+off, '\n', len-off);
+        size_t chunk = nl ? (size_t)(nl - (txt+off)) : (len - off);
+        if(chunk>0) ring_append_to_last(&p->ring, txt+off, chunk);
+        if(nl){
+            // start new line for remainder
+            if(off+chunk+1 < len || chunk>0){
+                ring_push_typed(&p->ring, "", RL_ASSISTANT);
+            }
+            off += chunk + 1;
+        } else break;
+    }
+    if(p->scroll_off==0) p->scroll_off=0;
 }
 
 static void pane_stream_end(Pane *p){
@@ -778,10 +796,11 @@ int puci_tui_run(const puci_cli_params *params){
     tb_set_output_mode(TB_OUTPUT_NORMAL);
     struct sigaction sa; memset(&sa,0,sizeof sa); sa.sa_handler=on_winch; sigemptyset(&sa.sa_mask); sa.sa_flags=SA_RESTART; sigaction(SIGWINCH,&sa,NULL);
     g_npane=1; g_focus=0; g_mode=0;
-    for(int i=0;i<MAX_PANES;i++){ memset(&g_panes[i],0,sizeof g_panes[i]); snprintf(g_panes[i].title,sizeof g_panes[i].title,"Agent %c",'A'+i); g_panes[i].scroll_off=0; }
+    for(int i=0;i<MAX_PANES;i++){ memset(&g_panes[i],0,sizeof g_panes[i]); snprintf(g_panes[i].title,sizeof g_panes[i].title,"Agent %c",'A'+i); snprintf(g_panes[i].session_id,sizeof g_panes[i].session_id,"tui-%ld-%d",(long)time(NULL),i); g_panes[i].scroll_off=0; }
     puci_context *ctx=NULL;
     if(puci_context_create(NULL,&ctx)!=PUCI_OK){ tb_shutdown(); fprintf(stderr,"ctx fail\n"); return 1; }
     puci_provider_config *pcfg_ptr = puci_cli_provider("openai");
+    if(pcfg_ptr && pcfg_ptr->model) snprintf(g_current_model,sizeof g_current_model,"%.255s",pcfg_ptr->model);
     if(!pcfg_ptr){ tb_shutdown(); fprintf(stderr,"tui: provider config failed\n"); puci_context_destroy(ctx); return 1; }
     puci_provider_config pcfg = *pcfg_ptr;
     puci_context_set_provider(ctx,&pcfg);
@@ -809,12 +828,15 @@ int puci_tui_run(const puci_cli_params *params){
         }
         if(dirty){ tui_render_frame(); dirty=0; }
         struct pollfd fds[32]; size_t nf=0;
+        int pane_off[MAX_PANES]; int pane_cnt[MAX_PANES]; for(int _i=0;_i<MAX_PANES;_i++){ pane_off[_i]=-1; pane_cnt[_i]=0; }
         fds[nf].fd=STDIN_FILENO; fds[nf].events=POLLIN; nf++;
         int session_to=-1;
         for(int i=0;i<g_npane;i++) if(g_panes[i].sess){
             size_t cnt=0; puci_session_get_fds(g_panes[i].sess,NULL,0,&cnt);
+            pane_off[i]=(int)nf; pane_cnt[i]=(int)cnt;
             if(cnt>0){
-                if(nf+cnt>32) cnt=32-nf;
+                if(nf>=32) cnt=0; else if(nf+cnt>32) cnt=32-nf;
+                pane_cnt[i]=(int)cnt;
                 size_t got=0; puci_session_get_fds(g_panes[i].sess,fds+nf, cnt, &got); nf+=got;
             }
             int tm=-1; puci_session_next_timeout_ms(g_panes[i].sess,&tm);
@@ -842,7 +864,7 @@ int puci_tui_run(const puci_cli_params *params){
         if(poll_to < 0) poll_to = 5;
         if(poll_to==0) poll_to=5;
         int pr=poll(fds,(nfds_t)nf,poll_to);
-        if(pr<0 && errno==EINTR) continue;
+        if(pr<0){ if(errno==EINTR) continue; else { struct timespec _ts={0,20000000L}; nanosleep(&_ts,NULL); continue; } }
         if(pr==0){
             struct timespec ng3; clock_gettime(CLOCK_MONOTONIC,&ng3);
             long ge2 = (ng3.tv_sec-last_gauge.tv_sec)*1000 + (ng3.tv_nsec-last_gauge.tv_nsec)/1000000;
@@ -895,12 +917,13 @@ int puci_tui_run(const puci_cli_params *params){
                                     char msg[160]; snprintf(msg,sizeof msg,"Loaded %s (%s)", id, g_sess_list[src].model);
                                     ring_push_typed(&pp->ring, msg, RL_SYSTEM);
                                     snprintf(pp->title,sizeof pp->title,"%.20s", id);
+                                    snprintf(pp->session_id,sizeof pp->session_id,"%.63s", id);
                                     pp->scroll_off=0;
                                 }
                             }
                         }
-                        g_mode=0; g_pick_filter[0]=0;
-                    } else if(c=='q'||c==27){ g_mode=0; g_pick_filter[0]=0; }
+                        g_mode=0; g_pick_filter[0]=0; g_show_sidebar=0;
+                    } else if(c==27 || (c=='q' && g_pick_filter[0]==0)){ g_mode=0; g_pick_filter[0]=0; g_show_sidebar=0; }
                     else if(c=='y' || c=='Y'){
                         if(g_pick_sel < g_pick_filtered_count){
                             int src=g_pick_filtered_idx[g_pick_sel];
@@ -909,6 +932,8 @@ int puci_tui_run(const puci_cli_params *params){
                             ring_push_typed(&g_panes[g_focus].ring, msg, RL_SYSTEM);
                         }
                     }
+                    else if(c=='j' && g_pick_sel < g_pick_filtered_count-1) g_pick_sel++;
+                    else if(c=='k' && g_pick_sel>0) g_pick_sel--;
                     else if(c>=32 && c<127 && c!='\t'){
                         size_t fl=strlen(g_pick_filter);
                         if(fl+1 < sizeof g_pick_filter){ g_pick_filter[fl]=(char)c; g_pick_filter[fl+1]=0; rebuild_pick_filter(); }
@@ -916,8 +941,6 @@ int puci_tui_run(const puci_cli_params *params){
                         size_t fl=strlen(g_pick_filter);
                         if(fl>0){ g_pick_filter[fl-1]=0; rebuild_pick_filter(); }
                     }
-                    else if(c=='j' && g_pick_sel < g_pick_filtered_count-1) g_pick_sel++;
-                    else if(c=='k' && g_pick_sel>0) g_pick_sel--;
                     continue;
                 }
                 if(g_mode==3){ // model picker
@@ -926,13 +949,14 @@ int puci_tui_run(const puci_cli_params *params){
                             int src=g_pick_filtered_idx[g_pick_sel];
                             if(k_models[src]){
                                 setenv("PUCI_MODEL", k_models[src], 1);
+                                { for(int _mi=0;_mi<g_npane;_mi++) if(g_panes[_mi].sess) puci_session_set_model(g_panes[_mi].sess, k_models[src]); snprintf(g_current_model,sizeof g_current_model,"%.255s",k_models[src]); }
                                 FILE *f=fopen("/tmp/puci_model_sel","w"); if(f){ fprintf(f,"%s",k_models[src]); fclose(f); }
                                 char msg[160]; snprintf(msg,sizeof msg,"Model → %s", k_models[src]);
                                 ring_push_typed(&g_panes[g_focus].ring, msg, RL_SYSTEM);
                             }
                         }
                         g_mode=0; g_pick_filter[0]=0;
-                    } else if(c=='q'||c==27){ g_mode=0; g_pick_filter[0]=0; }
+                    } else if(c==27 || (c=='q' && g_pick_filter[0]==0)){ g_mode=0; g_pick_filter[0]=0; }
                     else if(c=='y' || c=='Y'){
                         if(g_pick_sel < g_pick_filtered_count){
                             int src=g_pick_filtered_idx[g_pick_sel];
@@ -941,6 +965,8 @@ int puci_tui_run(const puci_cli_params *params){
                             ring_push_typed(&g_panes[g_focus].ring, msg, RL_SYSTEM);
                         }
                     }
+                    else if(c=='j' && g_pick_sel < g_pick_filtered_count-1) g_pick_sel++;
+                    else if(c=='k' && g_pick_sel>0) g_pick_sel--;
                     else if(c>=32 && c<127 && c!='\t'){
                         size_t fl=strlen(g_pick_filter);
                         if(fl+1 < sizeof g_pick_filter){ g_pick_filter[fl]=(char)c; g_pick_filter[fl+1]=0; rebuild_pick_filter(); }
@@ -948,8 +974,6 @@ int puci_tui_run(const puci_cli_params *params){
                         size_t fl=strlen(g_pick_filter);
                         if(fl>0){ g_pick_filter[fl-1]=0; rebuild_pick_filter(); }
                     }
-                    else if(c=='j' && g_pick_sel < g_pick_filtered_count-1) g_pick_sel++;
-                    else if(c=='k' && g_pick_sel>0) g_pick_sel--;
                     continue;
                 }
                 if(g_input_mode){
@@ -960,9 +984,9 @@ int puci_tui_run(const puci_cli_params *params){
                             if(g_input[0]=='/'){
                                 if(strcmp(g_input,"/clear")==0){ Pane *pp=&g_panes[g_focus]; pp->ring.count=0; pp->ring.head=0; pp->scroll_off=0; ring_push_typed(&pp->ring,"— cleared —", RL_SYSTEM); }
                                 else if(strcmp(g_input,"/help")==0 || strcmp(g_input,"/?")==0){ ring_push_typed(&g_panes[g_focus].ring,"/clear /help /model [name] /sessions /new /compact /doctor /plan", RL_SYSTEM); ring_push_typed(&g_panes[g_focus].ring,"Keys: Enter send  Esc cancel  ↑↓ history/scroll  s sessions  m model  g/G top/bottom", RL_SYSTEM); }
-                                else if(strncmp(g_input,"/model",6)==0){ char *arg=g_input+6; while(*arg==' ') arg++; if(*arg){ setenv("PUCI_MODEL",arg,1); char msg[160]; snprintf(msg,sizeof msg,"Model → %.120s",arg); ring_push_typed(&g_panes[g_focus].ring,msg,RL_SYSTEM); } else { models_init_static(); fetch_live_models(); g_pick_filter[0]=0; rebuild_pick_filter(); g_pick_sel=0; g_mode=3; } }
+                                else if(strncmp(g_input,"/model",6)==0 && (g_input[6]=='\0' || g_input[6]==' ')){ char *arg=g_input+6; while(*arg==' ') arg++; if(*arg){ setenv("PUCI_MODEL",arg,1); { for(int _mi=0;_mi<g_npane;_mi++) if(g_panes[_mi].sess) puci_session_set_model(g_panes[_mi].sess, arg); snprintf(g_current_model,sizeof g_current_model,"%.255s",arg); } char msg[160]; snprintf(msg,sizeof msg,"Model → %.120s",arg); ring_push_typed(&g_panes[g_focus].ring,msg,RL_SYSTEM); } else { models_init_static(); fetch_live_models(); g_pick_filter[0]=0; rebuild_pick_filter(); g_pick_sel=0; g_mode=3; } }
                                 else if(strcmp(g_input,"/sessions")==0 || strcmp(g_input,"/s")==0){ load_sessions(); g_pick_filter[0]=0; rebuild_pick_filter(); g_pick_sel=0; g_mode=2; g_show_sidebar=1; }
-                                else if(strcmp(g_input,"/new")==0){ Pane *pp=&g_panes[g_focus]; pp->ring.count=0; pp->ring.head=0; pp->scroll_off=0; ring_push_typed(&pp->ring,"— new session —", RL_SYSTEM); char sid[64]; snprintf(sid,sizeof sid,"tui-%ld",(long)time(NULL)); if(pp->sess) puci_cli_save_session(pp->sess,sid); }
+                                else if(strcmp(g_input,"/new")==0){ Pane *pp=&g_panes[g_focus]; if(pp->sess){ puci_cli_save_session(pp->sess, pp->session_id); puci_session_clear(pp->sess); } pp->ring.count=0; pp->ring.head=0; pp->scroll_off=0; snprintf(pp->session_id,sizeof pp->session_id,"tui-%ld-%d",(long)time(NULL),g_focus); ring_push_typed(&pp->ring,"— new session —", RL_SYSTEM); }
                                 else if(strcmp(g_input,"/compact")==0){ Pane *pp=&g_panes[g_focus]; if(pp->sess){ size_t pr=0; puci_session_compact_context(pp->sess,&pr); char msg[96]; snprintf(msg,sizeof msg,"Compacted %zu bytes",pr); ring_push_typed(&pp->ring,msg,RL_SYSTEM); } }
                                 else if(strcmp(g_input,"/doctor")==0){ puci_provider_config *pc=puci_cli_provider("openai"); char msg[256]; snprintf(msg,sizeof msg,"model=%s base=%s", pc?pc->model:"?", pc?pc->base_url:"?"); ring_push_typed(&g_panes[g_focus].ring,msg,RL_SYSTEM); }
                                 else if(strcmp(g_input,"/plan")==0){ ring_push_typed(&g_panes[g_focus].ring,"plan mode: use --plan flag for now", RL_SYSTEM); }
@@ -972,7 +996,7 @@ int puci_tui_run(const puci_cli_params *params){
                                 ring_push_typed(&g_panes[g_focus].ring, u, RL_USER);
                                 g_panes[g_focus].scroll_off=0;
                                 g_panes[g_focus].streaming=0;
-                                puci_session_begin_turn(g_panes[g_focus].sess,g_input);
+                                { puci_status _st = puci_session_begin_turn(g_panes[g_focus].sess,g_input); if(_st!=PUCI_OK){ char _em[160]; snprintf(_em,sizeof _em,"begin_turn failed: %s", puci_status_string(_st)); ring_push_typed(&g_panes[g_focus].ring,_em,RL_ERROR); } }
                             }
                         }
                         g_input_len=0; g_input[0]=0; g_input_curs=0; g_input_mode=0;
@@ -992,7 +1016,7 @@ int puci_tui_run(const puci_cli_params *params){
                 } else {
                     if(c=='q'){ running=0; break; }
                     else if(c=='\t'){ g_focus=(g_focus+1)%g_npane; }
-                    else if(c=='s'){ load_sessions(); g_pick_filter[0]=0; rebuild_pick_filter(); g_pick_sel=0; g_mode=2; g_show_sidebar=1; }
+                    else if(c=='s'){ if(g_mode==2){ g_mode=0; g_pick_filter[0]=0; g_show_sidebar=0; } else { load_sessions(); g_pick_filter[0]=0; rebuild_pick_filter(); g_pick_sel=0; g_mode=2; g_show_sidebar=1; } }
                     else if(c=='m'){ models_init_static(); fetch_live_models(); g_pick_filter[0]=0; rebuild_pick_filter(); g_pick_sel=0; g_mode=3; }
                     else if(c=='\n' || c=='\r'){ g_input_mode=1; g_input_len=0; g_input[0]=0; g_input_curs=0; }
                     else if(c=='j'){ Pane *pp=&g_panes[g_focus]; if(pp->scroll_off>0){ pp->scroll_off-=1; if(pp->scroll_off<0) pp->scroll_off=0; }}
@@ -1012,7 +1036,10 @@ int puci_tui_run(const puci_cli_params *params){
         }
         int had_event=0;
         for(int i=0;i<g_npane;i++) if(g_panes[i].sess){
-            puci_session_process(g_panes[i].sess, fds+1, nf-1);
+            int _off=pane_off[i]; int _cnt=pane_cnt[i];
+            const struct pollfd *_pfds=NULL; size_t _pcnt=0;
+            if(_off>=1 && _cnt>0){ _pfds=fds+_off; _pcnt=(size_t)_cnt; }
+            puci_session_process(g_panes[i].sess, _pfds, _pcnt);
             puci_event ev;
             while(puci_session_next_event(g_panes[i].sess,&ev)){
                 had_event=1;
@@ -1036,9 +1063,9 @@ int puci_tui_run(const puci_cli_params *params){
                 } else if(ev.kind==PUCI_EVENT_TURN_COMPLETE){
                     pane_stream_end(&g_panes[i]);
                     ring_push_typed(&g_panes[i].ring,"— done —", RL_SYSTEM);
-                    // autosave
+                    // autosave to stable per-pane file
                     {
-                        char sid[64]; snprintf(sid,sizeof sid,"tui-%ld", (long)time(NULL));
+                        const char *sid = g_panes[i].session_id[0]?g_panes[i].session_id:"tui-autosave";
                         puci_cli_save_session(g_panes[i].sess, sid);
                     }
                     g_panes[i].scroll_off=0;
