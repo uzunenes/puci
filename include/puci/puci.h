@@ -21,6 +21,7 @@
 #include "puci/event.h"
 #include "puci/approval.h"
 #include "puci/diff.h"
+#include "puci/mcp.h"
 
 #ifdef __cplusplus
 extern "C" {

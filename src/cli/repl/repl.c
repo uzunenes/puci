@@ -503,6 +503,9 @@ int puci_cli_repl_with_params(const puci_cli_params *params) {
         return 1;
     }
 
+    /* Connect any MCP servers declared in config.toml / .puci.toml. */
+    (void)puci_cli_load_mcp_servers(ctx);
+
     repl r;
     memset(&r, 0, sizeof(r));
     r.ctx = ctx;

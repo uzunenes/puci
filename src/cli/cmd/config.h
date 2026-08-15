@@ -27,4 +27,12 @@ int puci_cli_parse_toml_file(const char *filepath, int is_project_local,
                              int *tls_verify, int *stream_idle_ms,
                              char *err_buf, size_t err_cap);
 
+/* Connects all MCP servers configured in the global user config
+ * (~/.config/puci/config.toml) and project-local config (.puci.toml). Returns
+ * the total number of MCP servers successfully connected, or -1 if the
+ * project-local config contains a credential violation. Safe to call once after
+ * puci_context_create; the discovered MCP tools become available to every
+ * session on the context. */
+int puci_cli_load_mcp_servers(puci_context *ctx);
+
 #endif /* PUCI_CLI_CONFIG_H */

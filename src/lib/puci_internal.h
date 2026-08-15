@@ -361,11 +361,15 @@ struct puci_context {
     char **secrets;
     size_t nsecrets;
     size_t secrets_cap;
+
+    void *mcp_clients;
 };
 
 /* ------------------------------------------------------------------ */
 /* Internal function declarations.                                     */
 /* ------------------------------------------------------------------ */
+
+void puci_mcp_clients_destroy(struct puci_context *ctx);
 
 /* providers/registry.c */
 puci_status puci_provider_register_internal(struct puci_context *ctx,

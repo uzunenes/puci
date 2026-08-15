@@ -192,6 +192,9 @@ puci_status puci_context_create(const puci_context_options *opts,
     /* Register the default communities of providers and tools. */
     puci_status st = puci_provider_register_internal(ctx, &puci_openai_provider);
     if (st == PUCI_OK) {
+        st = puci_provider_register_internal(ctx, &puci_anthropic_provider);
+    }
+    if (st == PUCI_OK) {
         st = puci_register_tool_read_file(ctx);
     }
     if (st == PUCI_OK) {
@@ -296,6 +299,7 @@ void puci_context_destroy(puci_context *ctx) {
     if (!ctx) {
         return;
     }
+    puci_mcp_clients_destroy(ctx);
     free_tools(ctx);
     free_providers(ctx);
     free_configs(ctx);

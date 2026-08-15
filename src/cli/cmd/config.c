@@ -221,3 +221,47 @@ puci_provider_config *puci_cli_provider(const char *name) {
 
     return &g_cfg;
 }
+
+int puci_cli_load_mcp_servers(puci_context *ctx) {
+    if (!ctx) {
+        return -1;
+    }
+
+    int total = 0;
+
+    /* 1. Global user config (~/.config/puci/config.toml) */
+    const char *xdg = getenv("XDG_CONFIG_HOME");
+    char global_path[1024];
+    if (xdg && xdg[0]) {
+        snprintf(global_path, sizeof(global_path), "%s/puci/config.toml", xdg);
+    } else {
+        const char *home = getenv("HOME");
+        if (home && home[0]) {
+            snprintf(global_path, sizeof(global_path),
+                     "%s/.config/puci/config.toml", home);
+        } else {
+            global_path[0] = '\0';
+        }
+    }
+    if (global_path[0] && access(global_path, R_OK) == 0) {
+        int n = puci_mcp_load_servers_from_file(ctx, global_path);
+        if (n >= 0) {
+            total += n;
+        }
+    }
+
+    /* 2. Project-local config (.puci.toml). MCP servers are allowed here (they
+     *    are not credentials), but a project credential violation is fatal. */
+    const char *proj_files[] = {".puci.toml", ".puci/config.toml", NULL};
+    for (int i = 0; proj_files[i]; i++) {
+        if (access(proj_files[i], R_OK) == 0) {
+            int n = puci_mcp_load_servers_from_file(ctx, proj_files[i]);
+            if (n >= 0) {
+                total += n;
+            }
+            break;
+        }
+    }
+
+    return total;
+}

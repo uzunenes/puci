@@ -16,6 +16,7 @@ lib_sources = files(
     'json/json.c',
     'providers/openai.c',
     'providers/registry.c',
+    'mcp/mcp_client.c',
     'tools/path_guard.c',
     'tools/read_file.c',
     'tools/write_file.c',
@@ -83,6 +84,7 @@ install_headers(
         '../../include/puci/error.h',
         '../../include/puci/approval.h',
         '../../include/puci/diff.h',
+        '../../include/puci/mcp.h',
     ),
     subdir: 'puci',
 )

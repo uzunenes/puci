@@ -79,6 +79,9 @@ int puci_cli_run_with_params(const puci_cli_params *params) {
         return 1;
     }
 
+    /* Connect any MCP servers declared in config.toml / .puci.toml. */
+    (void)puci_cli_load_mcp_servers(ctx);
+
     puci_status st = puci_context_set_provider(ctx, pcfg);
     if (st != PUCI_OK) {
         fprintf(stderr, "puci: failed to set provider: %s\n",

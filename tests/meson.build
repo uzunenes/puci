@@ -74,6 +74,14 @@ test_session_api = executable(
 )
 test('test_session_api', test_session_api)
 
+test_mcp = executable(
+    'test_mcp',
+    'unit/test_mcp.c',
+    include_directories: [internal_inc],
+    dependencies: puci_static_dep,
+)
+test('test_mcp', test_mcp)
+
 # End-to-end agent loop test with an embedded mock SSE server.
 test_agent = executable(
     'test_agent_loop',
