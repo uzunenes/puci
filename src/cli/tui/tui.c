@@ -42,6 +42,12 @@
 #include <errno.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#ifdef HAVE_CURL
+#include <curl/curl.h>
+#elif __has_include(<curl/curl.h>)
+#include <curl/curl.h>
+#define HAVE_CURL 1
+#endif
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wconversion"
@@ -176,7 +182,9 @@ static void history_next(void){
 
 
 /* ── Model & Session pickers ── */
-static const char *k_models[] = {
+#define MAX_MODELS 512
+static char g_model_buf[MAX_MODELS][128];
+static const char *g_static_models[] = {
     "deepseek/deepseek-chat",
     "deepseek/deepseek-v3.2-exp",
     "deepseek/deepseek-r1",
@@ -191,6 +199,122 @@ static const char *k_models[] = {
     "qwen/qwen-2.5-72b-instruct",
     NULL
 };
+static const char *k_models[MAX_MODELS+1];
+static int k_model_count = 0;
+
+static void models_init_static(void){
+    if(k_model_count>0) return;
+    int i=0;
+    for(; g_static_models[i] && i<MAX_MODELS; i++){
+        snprintf(g_model_buf[i], sizeof g_model_buf[i], "%.127s", g_static_models[i]);
+        k_models[i] = g_model_buf[i];
+    }
+    k_model_count = i;
+    k_models[k_model_count]=NULL;
+}
+
+#ifdef HAVE_CURL
+struct MemBuf { char *data; size_t len; size_t cap; };
+static size_t curl_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata){
+    struct MemBuf *m=(struct MemBuf*)userdata;
+    size_t n=size*nmemb;
+    if(m->len + n +1 > m->cap){
+        size_t ncap = m->cap ? m->cap*2 : 8192;
+        while(ncap < m->len + n +1) ncap*=2;
+        if(ncap > 4*1024*1024) ncap=4*1024*1024;
+        if(m->len + n +1 > ncap) n = ncap - m->len -1;
+        char *nd=(char*)realloc(m->data, ncap);
+        if(!nd) return 0;
+        m->data=nd; m->cap=ncap;
+    }
+    memcpy(m->data + m->len, ptr, n);
+    m->len+=n; m->data[m->len]=0;
+    return n;
+}
+static int fetch_live_models(void){
+    puci_provider_config *pc = puci_cli_provider("openai");
+    const char *base = pc ? pc->base_url : NULL;
+    const char *key = pc ? pc->api_key : NULL;
+    if(!base || !*base) base="https://openrouter.ai/api/v1";
+    if(strstr(base, "anthropic.com")) return 0;
+    char url[1024];
+    size_t blen=strlen(base);
+    while(blen>0 && base[blen-1]=='/') blen--;
+    snprintf(url, sizeof url, "%.*s/models", (int)blen, base);
+    CURL *curl=curl_easy_init();
+    if(!curl) return 0;
+    struct MemBuf mem={NULL,0,0};
+    mem.data=(char*)malloc(8192); if(!mem.data){ curl_easy_cleanup(curl); return 0; }
+    mem.cap=8192; mem.data[0]=0;
+    struct curl_slist *hdrs=NULL;
+    hdrs=curl_slist_append(hdrs, "Accept: application/json");
+    hdrs=curl_slist_append(hdrs, "Content-Type: application/json");
+    if(key && *key){
+        char auth[2600];
+        snprintf(auth, sizeof auth, "Authorization: Bearer %s", key);
+        hdrs=curl_slist_append(hdrs, auth);
+        if(strstr(base,"openrouter")){
+            hdrs=curl_slist_append(hdrs, "HTTP-Referer: https://github.com/uzunenes/puci");
+            hdrs=curl_slist_append(hdrs, "X-Title: PUCI");
+        }
+    }
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &mem);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 6L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 4L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "puci/0.5.0");
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+    CURLcode rc=curl_easy_perform(curl);
+    long code=0; curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    curl_slist_free_all(hdrs);
+    curl_easy_cleanup(curl);
+    if(rc!=CURLE_OK || code!=200 || !mem.data || mem.len==0){
+        free(mem.data); return 0;
+    }
+    const char *data_start=strstr(mem.data, "\"data\"");
+    const char *p = data_start ? data_start : mem.data;
+    char tmp_buf[MAX_MODELS][128];
+    int tmp_cnt=0;
+    while((p=strstr(p,"\"id\"")) && tmp_cnt<MAX_MODELS){
+        p+=4;
+        while(*p && (*p==' '||*p=='\t'||*p=='\n'||*p=='\r'||*p==':')) p++;
+        if(*p!='"'){ continue; }
+        p++;
+        const char *q=strchr(p,'"');
+        if(!q) break;
+        size_t idlen=(size_t)(q-p);
+        if(idlen>0 && idlen < sizeof tmp_buf[0]){
+            if(memchr(p,' ', idlen) || memchr(p,'\n', idlen)){
+                p=q+1; continue;
+            }
+            char id[128]; memcpy(id, p, idlen); id[idlen]=0;
+            int dup=0; for(int i=0;i<tmp_cnt;i++) if(strcmp(tmp_buf[i],id)==0) dup=1;
+            if(!dup){
+                snprintf(tmp_buf[tmp_cnt], sizeof tmp_buf[tmp_cnt], "%.127s", id);
+                tmp_cnt++;
+            }
+        }
+        p=q+1;
+    }
+    free(mem.data);
+    if(tmp_cnt>0){
+        for(int i=0;i<tmp_cnt;i++){
+            snprintf(g_model_buf[i], sizeof g_model_buf[i], "%.127s", tmp_buf[i]);
+            k_models[i]=g_model_buf[i];
+        }
+        k_model_count=tmp_cnt;
+        k_models[k_model_count]=NULL;
+        return 1;
+    }
+    return 0;
+}
+#else
+static int fetch_live_models(void){ return 0; }
+#endif
 #define MAX_SESS_LIST 64
 typedef struct { char id[128]; char model[64]; char preview[96]; time_t mtime; } sess_entry_t;
 static sess_entry_t g_sess_list[MAX_SESS_LIST];
@@ -671,7 +795,7 @@ int puci_tui_run(const puci_cli_params *params){
             ring_push_typed(&g_panes[i].ring,"— PUCI TUI v0.5 — Enter prompt, ↑↓ scroll, s sessions, m model, q quit —", RL_SYSTEM);
         }
     }
-    load_sessions(); history_load();
+    load_sessions(); history_load(); models_init_static();
     get_winsize(&g_rows,&g_cols);
     struct timespec last_gauge; clock_gettime(CLOCK_MONOTONIC,&last_gauge);
     int dirty=1;
@@ -836,7 +960,7 @@ int puci_tui_run(const puci_cli_params *params){
                             if(g_input[0]=='/'){
                                 if(strcmp(g_input,"/clear")==0){ Pane *pp=&g_panes[g_focus]; pp->ring.count=0; pp->ring.head=0; pp->scroll_off=0; ring_push_typed(&pp->ring,"— cleared —", RL_SYSTEM); }
                                 else if(strcmp(g_input,"/help")==0 || strcmp(g_input,"/?")==0){ ring_push_typed(&g_panes[g_focus].ring,"/clear /help /model [name] /sessions /new /compact /doctor /plan", RL_SYSTEM); ring_push_typed(&g_panes[g_focus].ring,"Keys: Enter send  Esc cancel  ↑↓ history/scroll  s sessions  m model  g/G top/bottom", RL_SYSTEM); }
-                                else if(strncmp(g_input,"/model",6)==0){ char *arg=g_input+6; while(*arg==' ') arg++; if(*arg){ setenv("PUCI_MODEL",arg,1); char msg[160]; snprintf(msg,sizeof msg,"Model → %.120s",arg); ring_push_typed(&g_panes[g_focus].ring,msg,RL_SYSTEM); } else { g_pick_filter[0]=0; rebuild_pick_filter(); g_pick_sel=0; g_mode=3; } }
+                                else if(strncmp(g_input,"/model",6)==0){ char *arg=g_input+6; while(*arg==' ') arg++; if(*arg){ setenv("PUCI_MODEL",arg,1); char msg[160]; snprintf(msg,sizeof msg,"Model → %.120s",arg); ring_push_typed(&g_panes[g_focus].ring,msg,RL_SYSTEM); } else { models_init_static(); fetch_live_models(); g_pick_filter[0]=0; rebuild_pick_filter(); g_pick_sel=0; g_mode=3; } }
                                 else if(strcmp(g_input,"/sessions")==0 || strcmp(g_input,"/s")==0){ load_sessions(); g_pick_filter[0]=0; rebuild_pick_filter(); g_pick_sel=0; g_mode=2; g_show_sidebar=1; }
                                 else if(strcmp(g_input,"/new")==0){ Pane *pp=&g_panes[g_focus]; pp->ring.count=0; pp->ring.head=0; pp->scroll_off=0; ring_push_typed(&pp->ring,"— new session —", RL_SYSTEM); char sid[64]; snprintf(sid,sizeof sid,"tui-%ld",(long)time(NULL)); if(pp->sess) puci_cli_save_session(pp->sess,sid); }
                                 else if(strcmp(g_input,"/compact")==0){ Pane *pp=&g_panes[g_focus]; if(pp->sess){ size_t pr=0; puci_session_compact_context(pp->sess,&pr); char msg[96]; snprintf(msg,sizeof msg,"Compacted %zu bytes",pr); ring_push_typed(&pp->ring,msg,RL_SYSTEM); } }
@@ -869,7 +993,7 @@ int puci_tui_run(const puci_cli_params *params){
                     if(c=='q'){ running=0; break; }
                     else if(c=='\t'){ g_focus=(g_focus+1)%g_npane; }
                     else if(c=='s'){ load_sessions(); g_pick_filter[0]=0; rebuild_pick_filter(); g_pick_sel=0; g_mode=2; g_show_sidebar=1; }
-                    else if(c=='m'){ g_pick_filter[0]=0; rebuild_pick_filter(); g_pick_sel=0; g_mode=3; }
+                    else if(c=='m'){ models_init_static(); fetch_live_models(); g_pick_filter[0]=0; rebuild_pick_filter(); g_pick_sel=0; g_mode=3; }
                     else if(c=='\n' || c=='\r'){ g_input_mode=1; g_input_len=0; g_input[0]=0; g_input_curs=0; }
                     else if(c=='j'){ Pane *pp=&g_panes[g_focus]; if(pp->scroll_off>0){ pp->scroll_off-=1; if(pp->scroll_off<0) pp->scroll_off=0; }}
                     else if(c=='k'){ Pane *pp=&g_panes[g_focus]; pp->scroll_off+=1; }

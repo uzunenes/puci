@@ -43,3 +43,9 @@ bench/results-local/
 
 # Sessions / local data
 sessions/
+
+# Meson subprojects (wrap clones, not committed)
+subprojects/*
+!subprojects/*.wrap
+!subprojects/packagefiles/
+!subprojects/packagefiles/**

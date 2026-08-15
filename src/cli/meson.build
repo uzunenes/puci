@@ -38,11 +38,19 @@ if not termbox2_dep.found()
     termbox2_inc = include_directories('tui/vendor')
     termbox2_dep = declare_dependency(include_directories: termbox2_inc)
 endif
+curl_dep = dependency('libcurl', required: false)
+if curl_dep.found()
+    cli_deps += curl_dep
+    cli_c_args += '-DHAVE_CURL=1'
+endif
 
 tui_sources = files('tui/tui.c')
 if get_option('tui').enabled()
     cli_sources += tui_sources
     cli_deps += termbox2_dep
+    if curl_dep.found()
+        cli_deps += curl_dep
+    endif
 endif
 
 if get_option('cli')
