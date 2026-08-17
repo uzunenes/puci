@@ -606,8 +606,40 @@ static int fetch_models_into(char out[][128], int cap, int *err){
 #endif
 }
 
-/* Detached worker thread for the model fetch. Writes only its own private
- * buffers, then signals g_live_done. The main thread pumps the result. */
+/* Detached worker thread for the model fetch.
+ *
+ * Synchronization contract (single shared result buffer, no lock):
+ *
+ *   g_live          : non-atomic byte buffer; written ONLY by the producer
+ *                     thread. The main thread reads it only after it observes
+ *                     g_live_done == 1 (via the acquire load below), so there
+ *                     is never a data race on the buffer.
+ *   g_live_cnt      : _Atomic int; number of valid entries in g_live.
+ *   g_live_done     : _Atomic int; 1 once a fetch has finished publishing.
+ *   g_live_inflight : _Atomic int; 1 while a fetch may be in progress.
+ *
+ * Producer (happens-before):
+ *   1. Fully populate g_live[0..n-1].
+ *   2. PUBLISH g_live_cnt = n with a release store.
+ *   3. PUBLISH g_live_done = 1 with a release store.
+ *   The release stores order every preceding write (the buffer and the count)
+ *   before the completion flag in the happens-before relation.
+ *
+ * Consumer (pump_models_fetch):
+ *   1. ACCEPT g_live_done with an acquire load. If it reads 1, it
+ *      synchronizes-with the producer's release store, so the buffer and the
+ *      count writes are visible before this point.
+ *   2. Only then read g_live_cnt (acquire) and g_live[0..cnt-1].
+ *
+ * Ownership / liveness guards:
+ *   - A new fetch is launched only when g_live_inflight==0, and it re-arms
+ *     g_live_done=0 only after the previous result was pumped, so an older
+ *     generation can never overwrite a newer one and the result buffer is
+ *     never mutated while the UI is still reading it.
+ *   - The worker is detached and never touches g_live again after publishing
+ *     done; the buffer is a static, never freed, so teardown cannot free
+ *     storage while a worker thread may still access it.
+ */
 static char g_live[MAX_MODELS][128];
 static _Atomic int g_live_cnt = 0;
 static _Atomic int g_live_inflight = 0;
@@ -615,9 +647,11 @@ static _Atomic int g_live_done     = 0;
 static void *models_fetch_thread(void *arg){
     (void)arg;
     int e=0;
-    atomic_store(&g_live_cnt, fetch_models_into(g_live, MAX_MODELS, &e));
-    atomic_store(&g_live_done, 1);
-    atomic_store(&g_live_inflight, 0);
+    int n = fetch_models_into(g_live, MAX_MODELS, &e);
+    /* Producer publish: buffer then count then done, all release-ordered. */
+    atomic_store_explicit(&g_live_cnt, n, memory_order_release);
+    atomic_store_explicit(&g_live_done, 1, memory_order_release);
+    atomic_store_explicit(&g_live_inflight, 0, memory_order_relaxed);
     return NULL;
 }
 
@@ -651,9 +685,12 @@ static int g_mode;
 /* Called every frame from the renderer: if a background fetch finished,
  * install the fresh list into the picker globals. */
 static int pump_models_fetch(void){
-    if(!atomic_load(&g_live_done)) return 0;
-    if(g_live_cnt>0){
-        models_install(g_live, g_live_cnt);
+    /* Acquire: establishes happens-before with the producer's release store
+       of g_live_done, making g_live and g_live_cnt reads below safe. */
+    if(atomic_load_explicit(&g_live_done, memory_order_acquire)!=1) return 0;
+    int cnt = atomic_load_explicit(&g_live_cnt, memory_order_acquire);
+    if(cnt>0){
+        models_install(g_live, cnt);
         /* The async list replaced k_models; refresh the picker's filtered
            view so fetched entries become visible and the selection stays in
            range (Phase 5: async results update safely, selection on-screen). */
@@ -663,8 +700,8 @@ static int pump_models_fetch(void){
                 g_pick_sel = g_pick_filtered_count>0 ? g_pick_filtered_count-1 : 0;
         }
     }
-    g_live_cnt=0;
-    atomic_store(&g_live_done, 0);
+    atomic_store_explicit(&g_live_cnt, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_live_done, 0, memory_order_relaxed);
     /* Indicate whether anything changed so the caller can schedule a repaint. */
     return 1;
 }
