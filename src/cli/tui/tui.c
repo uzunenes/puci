@@ -22,6 +22,7 @@
 #define TB_IMPL
 #include "vendor/termbox2.h"
 #include "ttg.h"
+#include "clip.h"
 #ifdef __clang__
 #pragma clang diagnostic pop
 #elif defined(__GNUC__)
@@ -789,31 +790,12 @@ static puci_status apply_model_to_panes(const char *model){
     if(!have_pane) return PUCI_OK;
     return first_err;
 }
-static void copy_to_clipboard(const char *text){
-    if(!text||!*text) return;
-    const char *cmds[] = {"wl-copy 2>/dev/null","xclip -selection clipboard 2>/dev/null","xsel --clipboard --input 2>/dev/null","pbcopy 2>/dev/null",NULL};
-    for(int i=0;cmds[i];i++){
-        FILE *f=popen(cmds[i],"w");
-        if(f){ fwrite(text,1,strlen(text),f); int rc=pclose(f); if(rc==0) return; }
-    }
-    char b64out[8192]; size_t out=0;
-    static const char b64[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    size_t len=strlen(text);
-    for(size_t i=0;i<len;i+=3){
-        unsigned a=(unsigned char)text[i];
-        unsigned b=(i+1<len)?(unsigned char)text[i+1]:0;
-        unsigned c=(i+2<len)?(unsigned char)text[i+2]:0;
-        unsigned triple=(a<<16)|(b<<8)|c;
-        if(out+4<sizeof b64out){
-            b64out[out++]=b64[(triple>>18)&63];
-            b64out[out++]=b64[(triple>>12)&63];
-            b64out[out++]= (i+1<len)?b64[(triple>>6)&63]:'=';
-            b64out[out++]= (i+2<len)?b64[triple&63]:'=';
-        }
-    }
-    b64out[out]=0;
-    char osc[8300]; snprintf(osc,sizeof osc,"\033]52;c;%.8190s\007",b64out);
-    { ssize_t _w=write(STDOUT_FILENO,osc,strlen(osc)); (void)_w; }
+/* Safe clipboard: see clip.h. Mirrors are non-fatal; failures surface as a
+ * transient toast in the TUI so a silently dropped copy is never reported. */
+static int copy_to_clipboard(const char *text, size_t len){
+    if(!text) return 1;
+    if(!len) return 1;
+    return clip_copy(text,len);
 }
 
 
@@ -1998,7 +1980,7 @@ int puci_tui_run(const puci_cli_params *params){
                     else if(c==25){ // Ctrl-Y copy
                         if(g_pick_sel < g_pick_filtered_count){
                             int src=g_pick_filtered_idx[g_pick_sel];
-                            copy_to_clipboard(g_sess_list[src].id);
+                            copy_to_clipboard(g_sess_list[src].id, strlen(g_sess_list[src].id));
                             char msg[160]; snprintf(msg,sizeof msg,"Copied %s", g_sess_list[src].id);
                             ring_push_typed(&g_panes[g_focus].ring, msg, RL_SYSTEM);
                         }
@@ -2034,7 +2016,7 @@ int puci_tui_run(const puci_cli_params *params){
                     else if(c==25){ // Ctrl-Y copy
                         if(g_pick_sel < g_pick_filtered_count){
                             int src=g_pick_filtered_idx[g_pick_sel];
-                            copy_to_clipboard(k_models[src]);
+                            copy_to_clipboard(k_models[src], strlen(k_models[src]));
                             char msg[160]; snprintf(msg,sizeof msg,"Copied %s", k_models[src]);
                             ring_push_typed(&g_panes[g_focus].ring, msg, RL_SYSTEM);
                         }

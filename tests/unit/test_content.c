@@ -12,10 +12,12 @@
 #include "content.h"
 #include "md.h"
 #include "hl.h"
+#include "clip.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 static int g_fail = 0;
 
@@ -184,12 +186,45 @@ static void t_hl(void){
     CK(first_kind(sp,n,HL_TK_HEADING,&off,&len) && len==1);
 }
 
+/* Clipboard: verify the test sink captures exact bytes (no truncation, no
+ * reinterpretation), that CRLF/UTF-8 and binary NUL bytes survive, and that
+ * oversized payloads are refused rather than silently truncated. */
+static void t_clip(void){
+    char sink[256];
+    snprintf(sink,sizeof sink,"/tmp/puci_clip_test_%d.bin",(int)getpid());
+
+    /* ASCII + UTF-8 + embedded NUL, with a trailing CRLF */
+    static const char payload[] = "selam\n 你好 🙂\0crlf\r\n"; size_t plen=sizeof(payload)-1;
+    clip_set_test_sink(sink);
+    CK(clip_copy(payload,plen)==0);
+
+    FILE *f=fopen(sink,"rb"); CK(f!=NULL);
+    if(f){
+        char buf[256]; size_t got=fread(buf,1,sizeof buf,f); fclose(f);
+        CK(got==plen);
+        CK(memcmp(buf,payload,plen)==0);
+        CK(djb2((const unsigned char*)buf,got)==djb2((const unsigned char*)payload,plen));
+    }
+    remove(sink);
+
+    /* size policy: oversized payload reported 'too large' (2), never truncated.
+     * Clear the sink first so we exercise the real (OSC 52) size gate. */
+    clip_set_test_sink("");
+    size_t biglen = clip_osc52_max()+1;
+    char *big = malloc(biglen); CK(big!=NULL);
+    if(big){ memset(big,'x',biglen); CK(clip_copy(big,biglen)==2); free(big); }
+
+    /* refuse empty */
+    CK(clip_copy("",0)!=0);
+}
+
 int main(void){
     t_paste();
     t_compose();
     t_compose_crlf();
     t_md();
     t_hl();
+    t_clip();
     if(g_fail){ printf("%d FAILURE(S)\n", g_fail); return 1; }
     printf("test_content: all ok\n");
     return 0;
