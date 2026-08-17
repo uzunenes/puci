@@ -220,7 +220,7 @@ test('test_ttg', test_ttg)
 test_content = executable(
     'test_content',
     ['unit/test_content.c',
-     '../src/cli/tui/content.c', '../src/cli/tui/md.c'],
+     '../src/cli/tui/content.c', '../src/cli/tui/md.c', '../src/cli/tui/hl.c'],
     include_directories: [include_directories('../src/cli/tui')],
 )
 test('test_content', test_content)

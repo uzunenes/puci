@@ -11,6 +11,7 @@
  */
 #include "content.h"
 #include "md.h"
+#include "hl.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -144,11 +145,51 @@ static void t_md(void){
     CK(md_lang_from_filename("x.unknown")==HL_LANG_NONE);
 }
 
+/* Find the first span of a given kind in a line's token stream. */
+static int first_kind(const HlSpan *sp, int n, HlToken k, size_t *off, size_t *len){
+    for(int i=0;i<n;i++) if(sp[i].kind==k){ *off=sp[i].off; *len=sp[i].len; return 1; }
+    return 0;
+}
+
+static void t_hl(void){
+    HlSpan sp[HL_MAX_SPANS];
+    int n; size_t off=0, len=0;
+
+    /* Python: string + keyword detection */
+    n = hl_line(HL_LANG_PYTHON, "print(\"hi\")  # note", strlen("print(\"hi\")  # note"), sp, HL_MAX_SPANS);
+    CK(first_kind(sp,n,HL_TK_STRING,&off,&len));
+    CK(len>=4); /* "hi" plus quotes */
+    CK(first_kind(sp,n,HL_TK_COMMENT,&off,&len) && len==6);
+
+    /* C: integer literal -> NUMBER, keyword 'int' -> KEYWORD */
+    n = hl_line(HL_LANG_C, "int x = 42;", 11, sp, HL_MAX_SPANS);
+    CK(first_kind(sp,n,HL_TK_KEYWORD,&off,&len) && len==3);
+    CK(first_kind(sp,n,HL_TK_NUMBER,&off,&len) && len==2);
+
+    /* JSON: key/string/boolean */
+    n = hl_line(HL_LANG_JSON, "{\"ok\": true}", 12, sp, HL_MAX_SPANS);
+    CK(first_kind(sp,n,HL_TK_STRING,&off,&len));
+    CK(first_kind(sp,n,HL_TK_BOOL,&off,&len) && len==4);
+
+    /* diff whole-line classification */
+    n = hl_line(HL_LANG_DIFF, "+ added", 7, sp, HL_MAX_SPANS);
+    CK(n==1 && sp[0].kind==HL_TK_DIFF_ADD);
+    n = hl_line(HL_LANG_DIFF, "- removed", 9, sp, HL_MAX_SPANS);
+    CK(n==1 && sp[0].kind==HL_TK_DIFF_DEL);
+    n = hl_line(HL_LANG_DIFF, "@@ -1 +1 @@", 11, sp, HL_MAX_SPANS);
+    CK(n==1 && sp[0].kind==HL_TK_DIFF_HUNK);
+
+    /* markdown heading marker */
+    n = hl_line(HL_LANG_MARKDOWN, "# Title", 7, sp, HL_MAX_SPANS);
+    CK(first_kind(sp,n,HL_TK_HEADING,&off,&len) && len==1);
+}
+
 int main(void){
     t_paste();
     t_compose();
     t_compose_crlf();
     t_md();
+    t_hl();
     if(g_fail){ printf("%d FAILURE(S)\n", g_fail); return 1; }
     printf("test_content: all ok\n");
     return 0;
