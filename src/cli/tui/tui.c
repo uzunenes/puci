@@ -324,6 +324,13 @@ static int g_input_mode=0;
 /* Bracketed-paste state: while set, typed/pasted bytes are data, never
  * command keys (so a paste cannot quit, open a picker, or approve). */
 static int g_paste=0;
+/* Pasted payload captured while g_paste is set. We keep it OUT of the flat
+ * g_input authoring buffer so a large paste never truncates the typed text
+ * (Phase 1: no silent data loss). It is presented in the composer as a
+ * collapsed chip and sent to the provider byte-for-byte. */
+static char    *g_paste_buf=NULL;
+static size_t   g_paste_len=0;
+static size_t   g_paste_cap=0;
 static int g_rows=24, g_cols=80;
 static char g_current_model[256]="";
 
@@ -333,6 +340,59 @@ static char g_hist[HIST_MAX][2048];
 static int g_hist_count=0;
 static int g_hist_pos=0; // navigation index
 static char g_hist_tmp[2048];
+
+/* --- Paste capture helpers (Phase 1) -------------------------------------- */
+/* Hard cap for a single pasted draft so the send buffer and transcript stay
+ * bounded. Rejecting (rather than silently truncating) a paste keeps the
+ * "no silent data loss" guarantee. */
+#define PASTE_MAX  (4u*1024u*1024u) /* 4 MiB */
+static void paste_buf_clear(void){
+    free(g_paste_buf); g_paste_buf=NULL; g_paste_len=0; g_paste_cap=0;
+}
+/* Returns 0 on success, -1 if the paste would exceed PASTE_MAX (caller keeps
+ * whatever accumulated so far and reports 'paste too large'). */
+static int paste_buf_append(const char *data, size_t n){
+    if(!n) return 0;
+    if(g_paste_len+n > PASTE_MAX) return -1;
+    size_t need=g_paste_len+n;
+    if(need>g_paste_cap){
+        size_t nc=g_paste_cap? g_paste_cap : 256u;
+        while(nc<need) nc*=2;
+        char *nb=realloc(g_paste_buf,nc); if(!nb) return -1;
+        g_paste_buf=nb; g_paste_cap=nc;
+    }
+    memcpy(g_paste_buf+g_paste_len,data,n);
+    g_paste_len+=n;
+    return 0;
+}
+/* Collapsed composer chip describing a pending paste, e.g.
+ * "[pasted 8734 lines · 2.3 MiB]" or "[pasted 12 lines · 4.1 KiB]". */
+static void paste_buf_label(char *out, size_t cap){
+    if(g_paste_len==0){ if(cap) out[0]=0; return; }
+    size_t lines=1; for(size_t i=0;i<g_paste_len;i++) if(g_paste_buf[i]=='\n') lines++;
+    double kib=(double)g_paste_len/1024.0;
+    if(kib>=1024.0) snprintf(out,cap,"[pasted %zu lines · %.2f MiB]", lines, kib/1024.0);
+    else snprintf(out,cap,"[pasted %zu lines · %.1f KiB]", lines, kib);
+}
+/* Build the full draft payload = typed text + (optionally) a newline + the
+ * paste bytes, byte-for-byte, NUL-terminated. Returns an owned buffer or NULL
+ * on allocation failure. Caller must free. */
+static char *build_send_payload(void){
+    if(g_paste_len==0){
+        size_t tl=g_input_len;
+        char *s=malloc(tl? tl+1 : 1); if(!s) return NULL;
+        memcpy(s,g_input,tl); s[tl]=0; return s;
+    }
+    size_t tl=g_input_len;
+    size_t sep=(tl>0)?1:0;             /* '\n' inserted only when both parts */
+    size_t total=tl+sep+g_paste_len;
+    char *s=malloc(total+1); if(!s) return NULL;
+    size_t p=0;
+    if(tl>0){ memcpy(s+p,g_input,tl); p+=tl; }
+    if(sep){ s[p++]='\n'; }
+    memcpy(s+p,g_paste_buf,g_paste_len); p+=g_paste_len;
+    s[p]=0; return s;
+}
 
 static void history_load(void){
     char path[1024]; if(puci_cli_get_history_file(path,sizeof path)!=0) return;
@@ -1425,6 +1485,11 @@ void tui_render_frame(void){
         for(int rr=0; rr<comp_h; rr++)
             for(int xx=1; xx<comp_w-1; xx++) tb_set_cell(xx, ctop_in+rr, ' ', TB_DEFAULT, TB_DEFAULT);
         if(g_input_mode){
+            /* A pending paste occupies a collapsed chip row at the bottom of
+               the composer; the typed text wraps above it. */
+            int paste_rows = (int)(g_paste_len>0 ? 1u : 0u);
+            int text_h = comp_h - paste_rows;
+            if(text_h<1) text_h=1;
             /* wrap draft into visual rows, bottom-aligned */
             struct CLine { int off, len; } rows_s[16];
             int nrows=0; size_t pos=0;
@@ -1437,8 +1502,8 @@ void tui_render_frame(void){
                 pos+=adv; nrows++;
             }
             if(nrows==0){ rows_s[0].off=0; rows_s[0].len=0; nrows=1; }
-            int show_from = nrows<comp_h? 0 : nrows-comp_h;
-            int shown = nrows-show_from; if(shown>comp_h) shown=comp_h;
+            int show_from = nrows<text_h? 0 : nrows-text_h;
+            int shown = nrows-show_from; if(shown>text_h) shown=text_h;
             /* find the visual row that contains the cursor byte offset */
             int cstart=0;
             while(cstart<nrows){
@@ -1461,13 +1526,21 @@ void tui_render_frame(void){
             }
             int caret_row = ctop_in + (cstart-show_from);
             if(caret_row<ctop_in) caret_row=ctop_in;
-            if(caret_row>ctop_in+comp_h-1) caret_row=ctop_in+comp_h-1;
+            if(caret_row>ctop_in+text_h-1) caret_row=ctop_in+text_h-1;
             if(caret_col<comp_w-1) tb_set_cursor(caret_col, caret_row);
             for(int l=0;l<shown;l++){
                 int r=ctop_in+l;
                 char *ln=calloc((size_t)rows_s[show_from+l].len+1,1);
                 if(ln){ memcpy(ln, g_input+rows_s[show_from+l].off, (size_t)rows_s[show_from+l].len);
                     tb_print(3, r, g_theme.text, TB_DEFAULT, ln); free(ln); }
+            }
+            /* collapsed paste chip */
+            if(paste_rows>0){
+                int r=ctop_in+text_h;
+                for(int xx=1; xx<comp_w-1; xx++) tb_set_cell(xx,r,' ',TB_DEFAULT, g_theme.accent);
+                char lbl[96]; paste_buf_label(lbl,sizeof lbl);
+                for(int xx=1; xx<comp_w-1; xx++){} /* keep border clear */
+                tb_print(2, r, g_theme.text, g_theme.accent, lbl);
             }
         } else {
             tb_print(1, ctop_in, g_theme.muted, TB_DEFAULT, "Message \xE2\x80\xA6 (Enter to compose)");
@@ -1922,7 +1995,7 @@ int puci_tui_run(const puci_cli_params *params){
                        and consume them, toggling g_paste so a pasted block is
                        treated as data rather than as command keys (q/m/s/y). */
                     if(k+6 < n){
-                        if(memcmp(buf+k, "\x1b[200~", 6)==0){ g_paste=1; k+=5; continue; }
+                        if(memcmp(buf+k, "\x1b[200~", 6)==0){ g_paste=1; paste_buf_clear(); k+=5; continue; }
                         if(memcmp(buf+k, "\x1b[201~", 6)==0){ g_paste=0; k+=5; continue; }
                     }
                     char seq[8]={0}; int seq_len=0;
@@ -2033,9 +2106,12 @@ int puci_tui_run(const puci_cli_params *params){
                 if(g_input_mode){
                     if(c=='\r'){   /* Enter sends */
                         g_input[g_input_len]=0;
-                        if(g_input_len>0){
-                            history_save_line(g_input);
-                            if(g_input[0]=='/'){
+                        /* Slash commands only apply to a pure typed draft; a
+                           pending paste always sends as a plain message. */
+                        int is_slash=(g_paste_len==0 && g_input_len>0 && g_input[0]=='/');
+                        if(g_input_len>0 || g_paste_len>0){
+                            if(g_input_len>0) history_save_line(g_input);
+                            if(is_slash){
                                 if(strcmp(g_input,"/clear")==0){ Pane *pp=&g_panes[g_focus]; if(pp->sess) puci_session_cancel(pp->sess); pp->streaming=0; pp->pending_nl=0; puci_ttg_reset(&pp->ttg); pp->ring.count=0; pp->ring.head=0; pp->scroll_off=0; if(pp->sess) puci_session_clear(pp->sess); ring_push_typed(&pp->ring,"— cleared —", RL_SYSTEM); }
                                 else if(strcmp(g_input,"/help")==0 || strcmp(g_input,"/?")==0){ ring_push_typed(&g_panes[g_focus].ring,"/clear /help /model [name] /sessions /new /compact /doctor /plan", RL_SYSTEM); ring_push_typed(&g_panes[g_focus].ring,"Keys: Enter send  Ctrl+J newline  Esc cancel  ↑↓ history/scroll  s sessions  m model  g/G top/bottom  q or Ctrl+C quit", RL_SYSTEM); }
                                 else if(strncmp(g_input,"/model",6)==0 && (g_input[6]=='\0' || g_input[6]==' ')){ char *arg=g_input+6; while(*arg==' ') arg++; if(*arg){ setenv("PUCI_MODEL",arg,1); puci_status _mst=apply_model_to_panes(arg); if(_mst==PUCI_OK){ snprintf(g_current_model,sizeof g_current_model,"%.255s",arg); char msg[160]; snprintf(msg,sizeof msg,"Model → %.120s",arg); ring_push_typed(&g_panes[g_focus].ring,msg,RL_SYSTEM); } else { char _em[200]; snprintf(_em,sizeof _em,"Model %.120s NOT applied (err %s)", arg, puci_status_string(_mst)); ring_push_typed(&g_panes[g_focus].ring,_em,RL_ERROR); } } else { models_init_static(); picker_open(3); fetch_live_models(); if(g_mode==3) rebuild_pick_filter(); } }
@@ -2046,16 +2122,36 @@ int puci_tui_run(const puci_cli_params *params){
                                 else if(strcmp(g_input,"/plan")==0){ ring_push_typed(&g_panes[g_focus].ring,"plan mode: use --plan flag for now", RL_SYSTEM); }
                                 else { char msg[200]; snprintf(msg,sizeof msg,"Unknown: %s (try /help)", g_input); ring_push_typed(&g_panes[g_focus].ring,msg,RL_ERROR); }
                             } else if(g_panes[g_focus].sess){
-                                char u[2048]; snprintf(u,sizeof u,"❯ %s", g_input);
-                                ring_push_typed(&g_panes[g_focus].ring, u, RL_USER);
-                                g_panes[g_focus].scroll_off=0;
-                                g_panes[g_focus].streaming=0;
-                                g_panes[g_focus].follow=1;   /* pin to bottom for the new turn */
-                                g_panes[g_focus].unread=0;
-                                { puci_status _st = puci_session_begin_turn(g_panes[g_focus].sess,g_input); if(_st!=PUCI_OK){ char _em[160]; snprintf(_em,sizeof _em,"begin_turn failed: %s", puci_status_string(_st)); ring_push_typed(&g_panes[g_focus].ring,_em,RL_ERROR); } }
+                                /* Build the exact draft: typed text + paste. We
+                                   send byte-for-byte so the provider receives
+                                   what the user actually assembled, and the
+                                   transcript records the same. */
+                                char *pl=build_send_payload();
+                                if(!pl){
+                                    ring_push_typed(&g_panes[g_focus].ring,"OOM building message", RL_ERROR);
+                                } else {
+                                    /* Show the paste as a collapsed card when it is
+                                       multi-line; short pastes render inline. */
+                                    if(g_paste_len>0){
+                                        char lbl[96]; paste_buf_label(lbl,sizeof lbl);
+                                        char card[160]; snprintf(card,sizeof card,"❯ %s%s%s",
+                                            g_input, g_input_len>0?" ":"", lbl);
+                                        ring_push_typed(&g_panes[g_focus].ring, card, RL_USER);
+                                    } else {
+                                        char u[2048]; snprintf(u,sizeof u,"❯ %s", g_input);
+                                        ring_push_typed(&g_panes[g_focus].ring, u, RL_USER);
+                                    }
+                                    g_panes[g_focus].scroll_off=0;
+                                    g_panes[g_focus].streaming=0;
+                                    g_panes[g_focus].follow=1;   /* pin to bottom for the new turn */
+                                    g_panes[g_focus].unread=0;
+                                    { puci_status _st = puci_session_begin_turn(g_panes[g_focus].sess,pl); if(_st!=PUCI_OK){ char _em[160]; snprintf(_em,sizeof _em,"begin_turn failed: %s", puci_status_string(_st)); ring_push_typed(&g_panes[g_focus].ring,_em,RL_ERROR); } }
+                                    free(pl);
+                                }
                             }
                         }
                         g_input_len=0; g_input[0]=0; g_input_curs=0; g_input_mode=0;
+                        paste_buf_clear();
                     } else if(c=='\n'){ /* Ctrl+J: insert a newline (multiline) */
                         if(g_input_len+1 < sizeof g_input){
                             memmove(g_input+g_input_curs+1, g_input+g_input_curs, g_input_len - g_input_curs +1);
@@ -2069,10 +2165,12 @@ int puci_tui_run(const puci_cli_params *params){
                             g_input_len-=dl; g_input_curs-=dl;
                         }
                     } else if(c==21){ // Ctrl-U clear
-                        g_input_len=0; g_input_curs=0; g_input[0]=0;
-                    } else if(c==3){ // Ctrl-C: cancel the pending prompt
-                        g_input_len=0; g_input[0]=0; g_input_curs=0; g_input_mode=0;
-                    } else if(c>=32 && c!=127){ /* printable ASCII or UTF-8 lead byte */
+                            g_input_len=0; g_input_curs=0; g_input[0]=0;
+                            paste_buf_clear();
+                        } else if(c==3){ // Ctrl-C: cancel the pending prompt
+                            g_input_len=0; g_input[0]=0; g_input_curs=0; g_input_mode=0;
+                            paste_buf_clear();
+                        } else if(c>=32 && c!=127){ /* printable ASCII or UTF-8 lead byte */
                         int bl = (c>=0x80) ? utf8_seq_len(c) : 1;
                         if(c>=0x80 && bl>1){
                             /* Collect the full UTF-8 sequence. Continuation
@@ -2111,13 +2209,20 @@ int puci_tui_run(const puci_cli_params *params){
                         }
                     }
                 } else {
-                    /* While inside a bracketed paste, pasted bytes are data:
-                       buffer them into the input line instead of acting on
-                       them as command keys (q/m/s/... ) or navigation. */
+                    /* While inside a bracketed paste, pasted bytes are data: buffer them into
+                       the paste block instead of acting on them as command
+                       keys (q/m/s/... ) or navigation. Newlines are preserved
+                       (that is the point of a multi-line paste); a single CR
+                       from CRLF is stripped. A paste too large is refused
+                       rather than silently truncated. */
                     if(g_paste){
-                        if(c==8||c==127){ if(g_input_len>0){ g_input[--g_input_len]=0; g_input_curs=g_input_len; } }
-                        else if(c!='\n' && c!='\r' && c>=0x20){
-                            if(g_input_len+1 < sizeof g_input){ g_input[g_input_len++]=(char)c; g_input[g_input_len]=0; g_input_curs=g_input_len; }
+                        if(c==8||c==127){ if(g_paste_len>0) g_paste_len--; }
+                        else if(c==13){ /* CR of a CRLF pair: drop, keep LF */ }
+                        else if(c==10 || (c>=0x20)){
+                            if(paste_buf_append((const char*)&c,1)!=0){
+                                ring_push_typed(&g_panes[g_focus].ring,
+                                    "paste too large (refused before truncation)", RL_ERROR);
+                            }
                         }
                         if(!g_input_mode){ g_input_mode=1; g_hist_pos=g_hist_count; g_hist_tmp[0]=0; }
                         continue;
