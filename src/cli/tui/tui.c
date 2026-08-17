@@ -271,6 +271,9 @@ static char g_input[2048];
 static size_t g_input_len=0;
 static size_t g_input_curs=0;
 static int g_input_mode=0;
+/* Bracketed-paste state: while set, typed/pasted bytes are data, never
+ * command keys (so a paste cannot quit, open a picker, or approve). */
+static int g_paste=0;
 static int g_rows=24, g_cols=80;
 static char g_current_model[256]="";
 
@@ -1511,6 +1514,14 @@ int puci_tui_run(const puci_cli_params *params){
                 had_key=1;
                 // ESC sequence handling (fragment-safe: arrow may arrive split across reads)
                 if(c==27){
+                    /* Bracketed paste markers: "\x1b[200~" opens, "\x1b[201~"
+                       closes. Detect complete sequences present in this batch
+                       and consume them, toggling g_paste so a pasted block is
+                       treated as data rather than as command keys (q/m/s/y). */
+                    if(k+6 < n){
+                        if(memcmp(buf+k, "\x1b[200~", 6)==0){ g_paste=1; k+=5; continue; }
+                        if(memcmp(buf+k, "\x1b[201~", 6)==0){ g_paste=0; k+=5; continue; }
+                    }
                     char seq[8]={0}; int seq_len=0;
                     if(k+1 < n){ seq[seq_len++]=buf[++k]; }
                     else { struct pollfd _pf={STDIN_FILENO,POLLIN,0}; TRACE(TR_ESCWAIT,0); if(poll(&_pf,1,30)>0 && (_pf.revents&POLLIN)){ char _ch; if(read(STDIN_FILENO,&_ch,1)==1) seq[seq_len++]=_ch; } TRACE(TR_ESCWAIT,1); }
@@ -1690,6 +1701,17 @@ int puci_tui_run(const puci_cli_params *params){
                         }
                     }
                 } else {
+                    /* While inside a bracketed paste, pasted bytes are data:
+                       buffer them into the input line instead of acting on
+                       them as command keys (q/m/s/... ) or navigation. */
+                    if(g_paste){
+                        if(c==8||c==127){ if(g_input_len>0){ g_input[--g_input_len]=0; g_input_curs=g_input_len; } }
+                        else if(c!='\n' && c!='\r' && c>=0x20){
+                            if(g_input_len+1 < sizeof g_input){ g_input[g_input_len++]=(char)c; g_input[g_input_len]=0; g_input_curs=g_input_len; }
+                        }
+                        if(!g_input_mode){ g_input_mode=1; g_hist_pos=g_hist_count; g_hist_tmp[0]=0; }
+                        continue;
+                    }
                     if(c==3){ // Ctrl-C: cancel in-flight turn, else exit
                         Pane *pp=&g_panes[g_focus];
                         int cancelled=0;
