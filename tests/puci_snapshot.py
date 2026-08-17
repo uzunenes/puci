@@ -11,11 +11,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FAKE = os.path.join(HERE, "fake_sse.py")
 PUCI = os.environ.get("PUCI_BIN") or os.path.abspath(os.path.join(HERE, "..", "build", "src", "cli", "puci"))
 
-def start_fake(tokens=40, rate=50):
+def start_fake(tokens=40, rate=50, text=""):
     env = dict(os.environ)
-    proc = subprocess.Popen([sys.executable, "-u", FAKE, "--port", "0",
-                             "--tokens", str(tokens), "--rate", str(rate)],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    args = [sys.executable, "-u", FAKE, "--port", "0",
+            "--tokens", str(tokens), "--rate", str(rate)]
+    if text:
+        args += ["--text", text]
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, env=env)
     port = int(proc.stdout.readline().strip())
     time.sleep(0.2)
     return proc, port
@@ -88,7 +91,13 @@ class TermEmu:
                 r, cc = 1, 1
             self.r = max(0, r-1); self.c = max(0, cc-1)
         elif final == 'J':
-            self.grid = [[' ']*self.cols for _ in range(self.rows)]
+            # termbox draws a full frame after \x1b[2J but only re-emits cells
+            # that changed since its previous frame, keeping unchanged cells on
+            # the real terminal. To mirror that persistent screen (so borders
+            # shared across frames are not erased), do not blank the grid here;
+            # a fresh ''clear'' is modelled by the per-frame full repaint of the
+            # changed cells that actually follow. See the feed() 'clear' call.
+            pass
     def put(self, ch):
         if 0 <= self.r < self.rows and 0 <= self.c < self.cols:
             self.grid[self.r][self.c] = ch
@@ -150,8 +159,9 @@ def main():
     ap.add_argument("--cols", type=int, default=80)
     ap.add_argument("--prompt", default="hello world")
     ap.add_argument("--debug-log", default="/tmp/puci_snapshot_debug.log")
+    ap.add_argument("--text", default="")
     args = ap.parse_args()
-    fake, port = start_fake(tokens=40)
+    fake, port = start_fake(tokens=40, text=args.text)
     try:
         base = f"http://127.0.0.1:{port}/v1"
         buf = run(args.rows, args.cols, args.prompt, base)

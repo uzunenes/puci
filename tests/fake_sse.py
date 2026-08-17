@@ -19,6 +19,7 @@ U2063="\u2063"
 class Handler(BaseHTTPRequestHandler):
     tokens = 500
     rate = 50
+    msg = ""   # optional full readable message to stream word-by-word
     def do_GET(self):
         if "models" in self.path:
             body=json.dumps({"data":[{"id":"mock-model"},{"id":"deepseek/deepseek-chat"}]}).encode()
@@ -57,7 +58,16 @@ class Handler(BaseHTTPRequestHandler):
         interval = 1.0 / Handler.rate
         for i in range(Handler.tokens):
             mono_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
-            tok_text = f"{U2063}{mono_ns}{U2063}tok{i} "
+            if Handler.msg:
+                words = Handler.msg.split(" ")
+                if i < len(words):
+                    tok_text = f"{U2063}{mono_ns}{U2063}{words[i]} "
+                else:
+                    tok_text = ""
+                if tok_text == "" and i >= len(words):
+                    break
+            else:
+                tok_text = f"{U2063}{mono_ns}{U2063}tok{i} "
             if not send_chunk({"id":"1","choices":[{"index":0,"delta":{"content":tok_text},"finish_reason":None}]}):
                 break
             time.sleep(interval)
@@ -74,9 +84,11 @@ def main():
     ap.add_argument("--port", type=int, default=0)
     ap.add_argument("--tokens", type=int, default=500)
     ap.add_argument("--rate", type=int, default=50)
+    ap.add_argument("--text", type=str, default="")
     args=ap.parse_args()
     Handler.tokens=args.tokens
     Handler.rate=args.rate
+    Handler.msg=args.text
     srv=ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     port=srv.server_address[1]
     print(port, flush=True)

@@ -214,3 +214,20 @@ test_ttg = executable(
     include_directories: [include_directories('../src/cli/tui')],
 )
 test('test_ttg', test_ttg)
+
+# Semantic TUI-polish grid assertions (PTY render integrity). Guarded on
+# python3 being present; uses the shell-captured binary (PUCI_BIN) or the
+# in-tree build. These are heavier PTY tests, so keep them out of the default
+# suite and run under the explicit 'tui' suite.
+py3 = find_program('python3', required: false)
+if py3.found()
+    test(
+        'test_tui_polish',
+        py3,
+        args: [files('test_tui_polish.py')],
+        timeout: 180,
+        is_parallel: false,
+        suite: 'tui',
+        env: ['PUCI_BIN=' + meson.project_build_root() + '/src/cli/puci'],
+    )
+endif
