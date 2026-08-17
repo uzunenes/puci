@@ -23,6 +23,9 @@
 #include "vendor/termbox2.h"
 #include "ttg.h"
 #include "clip.h"
+#include "content.h"
+#include "md.h"
+#include "hl.h"
 #ifdef __clang__
 #pragma clang diagnostic pop
 #elif defined(__GNUC__)
@@ -274,6 +277,10 @@ typedef struct Pane {
     int unread;    // new visual lines that arrived after follow was disabled
     int  thinking;        // 1 while a reasoning phase is in progress
     int64_t think_start_ns; // mono nanoseconds when reasoning began (0 = none)
+    /* Code-fence state carried across streaming chunks so a fence opened in
+       one chunk and closed in a later one is recognized. */
+    int    in_fence;       // currently inside a ``` code block
+    char   fence_lang[CTX_LANG_MAX]; // normalized fence language tag (or "")
 } Pane;
 
 /* Every Ring lives embedded inside a Pane (g_panes[].ring); invalidate the
@@ -989,6 +996,84 @@ static void tb_print_styled(int x,int y, uintattr_t base_fg, uintattr_t base_bg,
     // fill remainder
     for(int c=col;c<x+max_w;c++) tb_set_cell(c,y,' ', base_fg, base_bg);
 }
+/* Syntax-highlighted printer: runs the semantic line lexer (hl_line) over
+ * `s` and emits each token span with a theme color. Falls back to plain
+ * base_fg if the language is NONE or the lexer yields only one TEXT span.
+ * Used only inside recognised code fences, where wrapping is already applied
+ * by the caller, so the whole (already width-clamped) `s` is consumed. */
+static void tb_print_hl(int x,int y,int max_w,HlLang lang,const char *s,uintattr_t base_fg,uintattr_t base_bg){
+    if(!s || max_w<=0) return;
+    HlSpan sp[HL_MAX_SPANS];
+    int n=hl_line(lang, s, strlen(s), sp, HL_MAX_SPANS);
+    if(n<=0){ tb_print_styled(x,y,base_fg,base_bg,s,max_w); return; }
+    int col=x;
+    for(int i=0;i<n && col<x+max_w;i++){
+        size_t off=sp[i].off, ln=sp[i].len;
+        if(off+ln > (size_t)strlen(s)) ln=(size_t)strlen(s)-off;
+        if((int)off>=max_w) break;
+        uintattr_t fg=base_fg;
+        switch(sp[i].kind){
+            case HL_TK_KEYWORD: fg=TB_CYAN|TB_BOLD; break;
+            case HL_TK_STRING:  fg=TB_GREEN; break;
+            case HL_TK_NUMBER:  fg=TB_MAGENTA; break;
+            case HL_TK_COMMENT: fg=TB_GREEN|TB_DIM; break;
+            case HL_TK_BOOL:    fg=TB_YELLOW; break;
+            case HL_TK_HEADING: fg=TB_YELLOW|TB_BOLD; break;
+            case HL_TK_DIFF_ADD:fg=TB_GREEN; break;
+            case HL_TK_DIFF_DEL:fg=TB_RED; break;
+            case HL_TK_DIFF_HUNK:fg=TB_CYAN; break;
+            case HL_TK_MD_LINK: fg=TB_BLUE|TB_UNDERLINE; break;
+            default: break;
+        }
+        const char *p=s+off;
+        while(ln>0 && col<x+max_w){
+            uint32_t cp; int bl=tb_utf8_char_to_unicode(&cp,p);
+            if(bl<=0){ bl=1; cp=(uint32_t)(unsigned char)p[0]; }
+            int w=utf8_seq_width((const unsigned char*)p);
+            if(col+w > x+max_w) break;
+            tb_set_cell(col,y,cp,fg,base_bg); col+=w;
+            p+=(size_t)bl; ln-= (size_t)bl;
+        }
+    }
+    /* the hl_line spans may not cover the tail (e.g. trailing space) */
+    size_t consumed=0;
+    for(int i=0;i<n;i++){ size_t e=sp[i].off+sp[i].len; if(e>consumed) consumed=e; }
+    if(consumed < strlen(s) && col<x+max_w){
+        const char *ch=s+consumed;
+        while(col<x+max_w && *ch){
+            uint32_t cp; int bl=tb_utf8_char_to_unicode(&cp,ch);
+            if(bl<=0){ bl=1; cp=(uint32_t)(unsigned char)ch[0]; }
+            int w=utf8_seq_width((const unsigned char*)ch);
+            if(col+w > x+max_w) break;
+            tb_set_cell(col,y,cp,base_fg,base_bg); col+=w; ch+=(size_t)bl;
+        }
+    }
+    for(int c=col;c<x+max_w && c<x+max_w;c++) tb_set_cell(c,y,' ',base_fg,base_bg);
+}
+/* Recognize a Markdown code-fence line. Returns:
+ *   -1 → not a fence
+ *    0 → a closing fence (``` with no language)
+ *    1 → an opening fence; *out_lang set to the normalized language */
+static int md_fence_detect(const char *line, HlLang *out_lang){
+    const char *p=line; while(*p==' ') p++;
+    int ticks=0; while(p[ticks]=='`') ticks++;
+    if(ticks<3) return -1;
+    const char *rest=p+ticks;
+    while(*rest==' ' || *rest=='\t') rest++;
+    /* everything after must be a single language token, else treat as fence
+       with an unknown/blank language (close or open with NONE) */
+    int non_space=0;
+    for(const char *q=rest;*q;q++) if(*q!=' ' && *q!='\t' && *q!='\r' && *q!='\n') { non_space++; break; }
+    if(!non_space) return 0; /* closing */;
+    /* opener: normalize the token after ``` (up to first space) */
+    char tag[CTX_LANG_MAX]; size_t ti=0;
+    while(*rest && *rest!=' ' && *rest!='\t' && ti+1<sizeof tag) tag[ti++]=(*rest++);
+    tag[ti]=0;
+    char alias[CTX_LANG_MAX];
+    HlLang lang=md_lang_normalize(tag, alias, sizeof alias);
+    if(out_lang) *out_lang=lang;
+    return 1;
+}
 static void tb_draw_box(int r,int c,int h,int w,const char *title,int focused){
     uintattr_t fg = focused ? TB_CYAN|TB_BOLD : TB_WHITE;
     uintattr_t bg = TB_DEFAULT;
@@ -1227,11 +1312,24 @@ static void tui_render_pane(Pane *p, int x, int y, int h, int w, int focused){
     int start_vis = total_vis - inner_h - p->scroll_off;
     if(start_vis<0) start_vis=0;
     int cur_vis=0, rendered=0;
+    /* Code-fence state carried across the contiguous assistant block so syntax
+       highlighting applies to all rows of a recognized fence. */
+    int blk_fence=0;
+    HlLang blk_lang=HL_LANG_NONE;
     for(int k=0;k<p->ring.count && rendered<inner_h;k++){
         int idx=(p->ring.head + k)%RING_LINES;
         const char *s=p->ring.lines[idx];
         rtype_t t=p->ring.types[idx];
         int wrapped = wrap_visual_count(s, inner_w);
+        /* Maintain code-fence state across the contiguous assistant block. */
+        if(t!=RL_ASSISTANT){ blk_fence=0; blk_lang=HL_LANG_NONE; }
+        else {
+            HlLang fl=HL_LANG_NONE;
+            int fr=md_fence_detect(s,&fl);
+            if(fr==0){ blk_fence=0; blk_lang=HL_LANG_NONE; }
+            else if(fr==1){ blk_fence=1; blk_lang=fl; }
+        }
+        int row_in_fence = blk_fence;
         int seg_off=0;
         for(int v=0; v<wrapped && rendered<inner_h; v++){
             if(cur_vis < start_vis){ cur_vis++;
@@ -1280,10 +1378,13 @@ static void tui_render_pane(Pane *p, int x, int y, int h, int w, int focused){
                     int consumed = x+1 + (int)uwidth(head);
                     int gap = 2;                                   /* separation before content */
                     int rem_cells = x+1+inner_w - consumed - gap;
-                    if(rem_cells>0 && seg[0]) tb_print_styled(consumed+gap, row, fg, TB_DEFAULT, seg, rem_cells);
-                    else if(rem_cells>0) tb_set_cell(consumed+gap, row, ' ', TB_DEFAULT, TB_DEFAULT);
+                    if(rem_cells>0 && seg[0]){
+                        if(row_in_fence) tb_print_hl(consumed+gap, row, rem_cells, blk_lang, seg, fg, TB_DEFAULT);
+                        else tb_print_styled(consumed+gap, row, fg, TB_DEFAULT, seg, rem_cells);
+                    } else if(rem_cells>0) tb_set_cell(consumed+gap, row, ' ', TB_DEFAULT, TB_DEFAULT);
                 } else {
-                    tb_print_styled(x+1,row,fg,TB_DEFAULT,seg,inner_w);
+                    if(row_in_fence) tb_print_hl(x+1,row,inner_w,blk_lang,seg,fg,TB_DEFAULT);
+                    else tb_print_styled(x+1,row,fg,TB_DEFAULT,seg,inner_w);
                 }
             } else if(t==RL_TOOL){
                 if(v==0){ char lab[24]; snprintf(lab,sizeof lab,"[tool] "); tb_print(x+1,row,fg,TB_DEFAULT,lab); tb_print_styled(x+1+7,row,fg,TB_DEFAULT,seg,inner_w-7); }
