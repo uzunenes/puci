@@ -215,6 +215,16 @@ test_ttg = executable(
 )
 test('test_ttg', test_ttg)
 
+# Owned content + Markdown parser are dependency-free (no termbox) so they link
+# standalone from the TUI source dir, mirroring the test_ttg pattern.
+test_content = executable(
+    'test_content',
+    ['unit/test_content.c',
+     '../src/cli/tui/content.c', '../src/cli/tui/md.c'],
+    include_directories: [include_directories('../src/cli/tui')],
+)
+test('test_content', test_content)
+
 # Semantic TUI-polish grid assertions (PTY render integrity). Guarded on
 # python3 being present; uses the shell-captured binary (PUCI_BIN) or the
 # in-tree build. These are heavier PTY tests, so keep them out of the default
