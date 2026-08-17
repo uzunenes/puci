@@ -109,8 +109,7 @@ UTF-8/display-width aware.)
   were validated by inspection and under ASan/UBSan.
 - Stress: `puci:stress/test_cancel_stress` (~100 s) passes; existing `meson
   test` all 20/20.
-- Idle CPU: ~1.6% via /proc sampling on a static 80x24 (harness pty drain
-  dominates; a static screen does not repaint).
+- Idle CPU: measured **0.00 %**/0 repaints/0 wakeups on the release build (defect 10, §6b). An earlier ~1.6 % figure was dominated by the harness pty drain; a static screen does not repaint.
 
 ## 6. PTY snapshots
 
@@ -118,12 +117,75 @@ UTF-8/display-width aware.)
 `hello world` turn). Each shows header, conversation with scrollbar, composer,
 and footer at that size.
 
+## 6b. Final visual-correctness polish pass (defect-by-defect root cause)
+
+Fix commits: `de53e36`, `c06e9e2`, `28b83d5`, `ddee86b`.
+
+| # | Defect | Root cause | Where (TUI/harness) | Resolution |
+|---|--------|-----------|---------------------|------------|
+| 1 | TTG sentinels leak into assistant content | instrumentation envelope (U+2063 + timestamp + U+2063) reached the ring | TUI | `ttg.c` strips the envelope at the stream boundary (commit `1be687f`); `test_ttg` covers every split position, multiple/malformed/incomplete envelopes, ordinary U+2063 |
+| 2 | Scrollbar corrupts message text | content wrapped at full width while the thumb column overlapped the last cell | TUI | gutter column reserved only when a pane is scrollable; content wraps strictly inside it; width cache invalidated on visibility change |
+| 3 | Composer draws onto the border row | message content emitted onto the bottom-border row | TUI | distinct top/content/bottom rows; 1–8 content rows when active; compact borderless mode below 5 rows |
+| 4 | "N new ↓" badge while already at bottom | follow state not tied to visual bottom | TUI | follow enables at turn start at bottom; scrolling up disables; returning re-enables + clears unread; resize/turn-completion never fabricate unread |
+| 5 | Raw [think] reasoning shown | REASONING alts rendered verbatim | TUI | raw reasoning hidden by default; compact "▸ Thought for Ns" notice instead; deltas no longer consume ring lines |
+| 6 | Role semantics incomplete | assistant heading repeated per token, prompt glyph duplicated | TUI | "PUCI · model" rendered once per subtitle block; YOU heading shown; prompt glyph dropped when YOU is present |
+| 7 | Transcript clutter | startup tutorial + "— done —" in history | TUI | removed from conversation; ready state is footer/status; model changes are one transient notice |
+| 8 | Footer truncated | single action string byte-truncated | TUI | width-adaptive whole-action lists (wide/medium/narrow/composer/approval) |
+| 9 | Missing/overwritten right border in snapshots | termbox repaints a full frame after `\x1b[2J` but re-emits only changed cells; the emulator blanked the grid on `\x1b[2J`, erasing unchanged border cells | **harness/snapshot emulator** | emulator now keeps unchanged cells across `\x1b[2J` (persistent screen); real grid was already correct |
+| 10 | Idle poll/wakeups | gauge timer forced periodic repaints | TUI | `poll(-1)` (indefinite block) when no deadline; active deadlines (streaming/session/model-fetch/test-hook) still wake on a bounded tick |
+| 11 | Model-fetch memory ordering | informal atomic note only | TUI | documented happens-before contract with explicit `memory_order_release`/`acquire` (commit `ddee86b`) |
+
+### Release-build idle measurement (defect 10)
+
+Release build, no sanitizer (`buildtype=release`, `b_sanitize=none`), 80x24, 30 s:
+
+| Metric | Value |
+|--------|-------|
+| process CPU (ps cputime delta) | 0.00 % |
+| full clear repaints (`\x1b[2J`) | 0 |
+| idle-window bytes emitted (after initial paint drained) | 0 |
+| select wakeups (events) | 0 |
+
+A static, freshly-painted screen repaints nothing and blocks on `poll(-1)`.
+The only periodic wakeups are intentional and bounded: the streaming/context-gauge
+`poll_to` while a turn is active, the far-base model-fetch tick, session deadline
+ticks, and the `PUCI_TUI_EXIT_AFTER_MS` **test hook** (250 ms, used only by tests).
+Production with no active deadline runs `poll(-1)` => 0 wakeups.
+
+### Memory-ordering deliverable (defect 11)
+
+TSan is not available (needs a TSan-instrumented libc/termbox over a pty), so the
+contract is documented and machine-checkable via explicit memory-order ops in
+`src/cli/tui/tui.c`:
+- Producer fully populates `g_live[]`, then publishes `g_live_cnt` and
+  `g_live_done` with `memory_order_release`.
+- Consumer `pump_models_fetch()` accepts `g_live_done` with
+  `memory_order_acquire`, establishing synchronizes-with, before reading the
+  buffer and count.
+- A new generation re-arms `done==0` only after the previous result was pumped,
+  so an older fetch never overwrites a newer one and the buffer is never
+  mutated while the UI reads it.
+- The buffer is static and never freed, so teardown cannot free storage while a
+  detached worker may still access it.
+- Running under ASan/UBSan: the whole suite (22 tests incl. the ~100 s stress and
+  `test_tui_polish`) is clean (0 sanitizer reports).
+
 ## 7. Keybindings
 
 `docs/KEYBINDINGS.md` matches the actual dispatch in `src/cli/tui/tui.c`.
 
-## 8. Commits
+## 8. Commits (production-readiness pass)
 
 - `fix(ui): production-readiness audit correctness fixes`
 - `test(tui): add PTY audit flows + make harness binary overridable`
+- `fix(tui): strip TTG instrumentation envelopes at the stream boundary`
 - (this doc/snapshots)
+
+## 8b. Commits (final visual-correctness & polish pass, in order)
+
+- `refactor(tui): explicit model-fetch memory-ordering contract` (`ddee86b`)
+- `fix(ui): strip TTG instrumentation envelopes ...` (`1be687f`, earlier)
+- `fix(ui): conversation renderer correctness and polish` (`de53e36`)
+- `test(ui): semantic grid assertions + persistent emulator + readable fake flow` (`c06e9e2`)
+- `docs(tui): regenerate snapshot acceptance artifacts` (`28b83d5`)
+- `docs(tui): audit memory ordering + idle metrics` (this commit)
