@@ -189,3 +189,50 @@ contract is documented and machine-checkable via explicit memory-order ops in
 - `test(ui): semantic grid assertions + persistent emulator + readable fake flow` (`c06e9e2`)
 - `docs(tui): regenerate snapshot acceptance artifacts` (`28b83d5`)
 - `docs(tui): audit memory ordering + idle metrics` (this commit)
+
+## 8c. Commits (owned-content + bounded Markdown/highlight + safe clipboard + paste)
+
+- `feat(tui): owned content model + bounded Markdown parser` (`adff700`)
+- `feat(tui): deterministic semantic syntax highlighter` (`3c48be5`)
+- `feat(tui): safe clipboard with refusable OSC 52 size policy` (`49a9596`)
+- `feat(tui): capture bracketed paste into its own collapsed block` (`c128200`)
+- `feat(tui): syntax-highlight code fences and Markdown in transcripts` (`0c8ef53`)
+
+### Paste + composer ownership
+
+A bracketed paste is captured byte-for-byte into an owned buffer (CRLF->LF,
+others preserved), presented in the composer as a collapsed
+`[pasted N lines · X KiB]` chip, and on Enter the exact draft (typed text +
+newline + paste bytes) is sent to `puci_session_begin_turn`. Pastes past the
+4 MiB budget are refused, never truncated. The module-level guarantee is
+asserted in `tests/unit/test_content.c` (`t_compose`): the full paste body
+appears in `ctx_composer_serialize`'s output with a matching hash. In-unit
+clipboard assertions cover exact capture incl. UTF-8 + embedded NUL + CRLF,
+oversized-refusal, and empty copy rejection.
+
+### Syntax highlighting
+
+`tb_print_hl` runs the semantic lexer over recognized Markdown code-fence rows
+and maps token classes to theme colors; `md_fence_lang` normalizes the fence
+tag across the contiguous assistant block. Bounded to HL_MAX_SPANS per row.
+Non-fence content uses the existing inline renderer (headings/bold/inline
+code/lists/quotes/links).
+
+## Retained boundaries (deliberate, not silent bugs)
+
+- **Raw Markdown is not re-owned per assistant message in the transcript.**
+  The Ring remains a wrapped display grid; `content.c`'s raw-ownership /
+  exact-serialization guarantee is exercised at the composer/send/copy layer
+  (the byte-exact provider payload) and documented in the module, but the
+  transcript does not store per-message `raw_source` objects. Copying the
+  *raw* assistant markdown (vs. the sent draft) and versioned per-message
+  persistence would require reworking the Ring into a sampled message model,
+  which is out of scope for this pass.
+- **Session save/load of user/paste content** continues to use the library
+  `puci_cli_save_session` serializer (provider messages), not the new content
+  model. Backward-compatible; semantic content-version tags are not yet used.
+- **Tool/file output**: streamed tool output renders as RL_TOOL records (as
+  before); dedicated file-PATH tap/copy affordances are not added.
+
+These boundaries keep the current fixed-size ring and the existing 23-test
+suite (incl. semantic grid assertions) stable and sanitizer-clean.

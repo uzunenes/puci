@@ -37,12 +37,19 @@ offset. Multiline text and pasted content stay as text.
 | `Enter` | Send the draft |
 | `Ctrl+J` | Insert a newline **without sending** |
 | `Esc` | Close the composer, keep the draft (unsent) |
-| `Ctrl+C` | Clear the pending draft and close the composer |
-| `Ctrl+U` | Clear the whole draft |
+| `Ctrl+C` | Clear the pending draft (and any pasted block) and close the composer |
+| `Ctrl+U` | Clear the whole draft (and any pasted block) |
 | `Backspace` / `Delete` | Delete the whole code-point *before* the cursor (never splits a UTF-8 sequence) |
 | `←` / `→` | Move cursor one UTF-8 code point |
 | `↑` / `↓` | Previous / next entry in prompt history (`~/.local/share/puci/history`) |
 | `Ctrl+Y` | Copy the selected session/model id to the clipboard (pickers) |
+
+Bracketed paste: a bracketed paste is captured byte-for-byte (CRLF collapsed
+to LF) into a collapsed block shown as `[pasted N lines · X KiB]` on its own
+composer row — it never floods the preview and never truncates the typed
+text. On `Enter` the exact draft (typed text + newline + paste bytes) is sent
+to the provider. A paste that exceeds the 4 MiB budget is refused and
+reported; it is never silently cut.
 
 Composer growth: it expands from 1 up to 8 visible rows and then scrolls its
 content; the draft survives opening/closing a picker (it is restored when the
