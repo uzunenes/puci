@@ -63,6 +63,9 @@
 /* ── PUCI_TRACE instrumentation ── */
 #include <stdint.h>
 #include <stdatomic.h>
+#if defined(__unix__) || defined(__APPLE__)
+#include <pthread.h>
+#endif
 #define TRACE_RING_CAP (1<<18) // 262k entries
 typedef enum {
     TR_POLL_RET=0, TR_PROCESS, TR_EVENT, TR_RENDER_BEG, TR_RENDER_END, TR_PRESENT, TR_PROCFS, TR_SAVE, TR_ESCWAIT
@@ -459,7 +462,28 @@ static size_t curl_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata
     m->len+=n; m->data[m->len]=0;
     return n;
 }
-static int fetch_live_models(void){
+/* Install a fetched model list into the picker globals (single-threaded,
+ * only called from the render/main thread). */
+static void models_install(char dst[][128], int cnt){
+    if(cnt<=0) return;
+    if((size_t)cnt > MAX_MODELS) cnt=MAX_MODELS;
+    for(int i=0;i<cnt;i++){
+        snprintf(g_model_buf[i], sizeof g_model_buf[i], "%.127s", dst[i]);
+        k_models[i]=g_model_buf[i];
+    }
+    k_model_count=cnt;
+    k_models[k_model_count]=NULL;
+}
+
+/* Perform the HTTP model fetch, writing up to `cap` model ids into `out`.
+ * Returns the number of ids found. Also updates `err` to 1 on any failure so
+ * callers can decide whether to surface an error. */
+static int fetch_models_into(char out[][128], int cap, int *err){
+    *err=0;
+    if(cap<=0) return 0;
+#if !HAVE_CURL
+    return 0;
+#else
     puci_provider_config *pc = puci_cli_provider("openai");
     const char *base = pc ? pc->base_url : NULL;
     const char *key = pc ? pc->api_key : NULL;
@@ -505,10 +529,9 @@ static int fetch_live_models(void){
     }
     const char *data_start=strstr(mem.data, "\"data\"");
     const char *p = data_start ? data_start : mem.data;
-    char tmp_buf[MAX_MODELS][128];
     int tmp_cnt=0;
     /* Collect every "id" string value robustly (whitespace, escapes). */
-    while(tmp_cnt<MAX_MODELS){
+    while(tmp_cnt<cap){
         p=strstr(p,"\"id\"");
         if(!p) break;
         const char *q=p+4;                       /* after the key's "id" */
@@ -520,9 +543,9 @@ static int fetch_live_models(void){
         char id[128];
         if(json_read_string(&vq, id, sizeof id)){
             int dup=0;
-            for(int i=0;i<tmp_cnt;i++) if(strcmp(tmp_buf[i],id)==0) dup=1;
+            for(int i=0;i<tmp_cnt;i++) if(strcmp(out[i],id)==0) dup=1;
             if(!dup){
-                snprintf(tmp_buf[tmp_cnt], sizeof tmp_buf[tmp_cnt], "%.127s", id);
+                snprintf(out[tmp_cnt], 128, "%.127s", id);
                 tmp_cnt++;
             }
             p=vq;
@@ -531,17 +554,59 @@ static int fetch_live_models(void){
         }
     }
     free(mem.data);
-    if(tmp_cnt>0){
-        for(int i=0;i<tmp_cnt;i++){
-            snprintf(g_model_buf[i], sizeof g_model_buf[i], "%.127s", tmp_buf[i]);
-            k_models[i]=g_model_buf[i];
-        }
-        k_model_count=tmp_cnt;
-        k_models[k_model_count]=NULL;
-        return 1;
-    }
-    return 0;
+    *err= (tmp_cnt==0 ? 0 : 1);
+    return tmp_cnt;
+#endif
 }
+
+/* Detached worker thread for the model fetch. Writes only its own private
+ * buffers, then signals g_live_done. The main thread pumps the result. */
+static char g_live[MAX_MODELS][128];
+static int  g_live_cnt = 0;
+static _Atomic int g_live_inflight = 0;
+static _Atomic int g_live_done     = 0;
+static void *models_fetch_thread(void *arg){
+    (void)arg;
+    int e=0;
+    g_live_cnt = fetch_models_into(g_live, MAX_MODELS, &e);
+    atomic_store(&g_live_done, 1);
+    atomic_store(&g_live_inflight, 0);
+    return NULL;
+}
+
+/* Launch an async model fetch. Returns immediately; result is merged via
+ * pump_models_fetch() on a later frame. Never blocks the event loop. */
+static void begin_models_fetch(void){
+    if(atomic_load(&g_live_inflight)) return;   /* already fetching */
+    atomic_store(&g_live_cnt, 0);
+    atomic_store(&g_live_done, 0);
+    atomic_store(&g_live_inflight, 1);
+    pthread_t th;
+    if(pthread_create(&th, NULL, models_fetch_thread, NULL)==0){
+        pthread_detach(th);
+    } else {
+        /* No threading available: fall back to synchronous so the picker
+           still gets populated (the freeze is a lesser evil than empty list). */
+        atomic_store(&g_live_done, 0);
+        atomic_store(&g_live_inflight, 0);
+        int e=0; int n=fetch_models_into(g_live, MAX_MODELS, &e);
+        if(n>0) models_install(g_live, n);
+    }
+}
+
+/* Called every frame from the renderer: if a background fetch finished,
+ * install the fresh list into the picker globals. */
+static void pump_models_fetch(void){
+    if(!atomic_load(&g_live_done)) return;
+    if(g_live_cnt>0) models_install(g_live, g_live_cnt);
+    g_live_cnt=0;
+    atomic_store(&g_live_done, 0);
+}
+
+/* Query entry point used by the picker. Launches a background fetch so keying
+ * 'm' never blocks the TUI (previously curl_easy_perform froze it up to 6s). */
+static int fetch_live_models(void){ begin_models_fetch(); return 0; }
+
 #else
 static int fetch_live_models(void){ return 0; }
 #endif
@@ -960,6 +1025,7 @@ static int wrap_visual_count(const char *s, int width){
 
 void tui_render_frame(void){
     TRACE(TR_RENDER_BEG,0);
+    pump_models_fetch();          /* merge a finished background model fetch */
     if(g_headless){
         // Headless simulation: still compute layout CPU but skip terminal draws
         int rows=g_rows, cols=g_cols;
