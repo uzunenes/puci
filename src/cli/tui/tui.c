@@ -352,6 +352,84 @@ static void models_init_static(void){
     k_models[k_model_count]=NULL;
 }
 
+/* --- minimal, robust JSON string-field extractor -----------------------
+ * Finds the first occurrence of `"key"` bound followed by ':' and reads the
+ * JSON string value, handling whitespace and standard \x escapes. Plain
+ * strstr/strchr parsing in this file mis-handled "id"/"model" (whitespace,
+ * escaped quotes, unrelated "id" fields), so a single correct helper is used
+ * everywhere instead. Returns 1 on success, 0 if not found/not a string. */
+static int json_str_field(const char *json, const char *key, char *out, size_t outcap){
+    if(!json || !key || !out || outcap==0) return 0;
+    size_t klen=strlen(key);
+    const char *p=json;
+    while(p && (p=strstr(p,"\""))){           /* every opening quote */
+        p++;                                  /* points after the quote */
+        if(p && strncmp(p, key, klen)==0 && p[klen]=='"'){
+            const char *q=p+klen+1;           /* after closing " of the key */
+            while(*q && (*q==' '||*q=='\t'||*q=='\n'||*q=='\r')) q++;
+            if(*q!=':'){ p=p+klen; continue; }
+            q++;
+            while(*q && (*q==' '||*q=='\t'||*q=='\n'||*q=='\r')) q++;
+            if(*q!='"'){ p=p+klen; continue; }
+            q++;
+            size_t w=0;
+            while(*q && *q!='"'){
+                char add;
+                if(*q=='\\'){
+                    q++;
+                    if(*q=='"'||*q=='\\'||*q=='/'||*q=='b') add=*q;
+                    else if(*q=='n') add='\n';
+                    else if(*q=='t') add='\t';
+                    else if(*q=='r') add='\r';
+                    else if(*q=='f') add='\f';
+                    else { /* unknown escape: emit the backslash and letter */
+                        q--; add=*q;
+                    }
+                    if(*q) q++;
+                } else {
+                    add=*q;
+                    q++;
+                }
+                if(w+1 < outcap){ out[w++]=add; }
+            }
+            out[w]=0;
+            return 1; /* found; empty value is still a valid match */
+        }
+    }
+    return 0;
+}
+
+/* Read a JSON string at *ctx (which must point at a '"'). On success writes
+ * the decoded string to out and advances *ctx past the closing quote.
+ * Returns 1 on success, 0 if this is not a string. */
+static int json_read_string(const char **ctx, char *out, size_t outcap){
+    const char *p=*ctx;
+    if(!p || *p!='"') return 0;
+    p++;
+    size_t w=0;
+    while(*p && *p!='"'){
+        char add;
+        if(*p=='\\' && p[1]){
+            p++;
+            if(*p=='"'||*p=='\\'||*p=='/'||*p=='b') add=*p;
+            else if(*p=='n') add='\n';
+            else if(*p=='t') add='\t';
+            else if(*p=='r') add='\r';
+            else if(*p=='f') add='\f';
+            else add='\\'; /* unknown escape: drop the backslash */
+            p++;
+        } else {
+            add=*p; p++;
+        }
+        if(w+1 < outcap) out[w++]=add;
+    }
+    if(*p!='"') return 0; /* unterminated */
+    p++;
+    out[w]=0;
+    *ctx=p;
+    return 1;
+}
+
 #if HAVE_CURL
 #define CURL_MAX_BUF (4u*1024u*1024u)
 struct MemBuf { char *data; size_t len; size_t cap; };
@@ -429,26 +507,28 @@ static int fetch_live_models(void){
     const char *p = data_start ? data_start : mem.data;
     char tmp_buf[MAX_MODELS][128];
     int tmp_cnt=0;
-    while((p=strstr(p,"\"id\"")) && tmp_cnt<MAX_MODELS){
-        p+=4;
-        while(*p && (*p==' '||*p=='\t'||*p=='\n'||*p=='\r'||*p==':')) p++;
-        if(*p!='"'){ continue; }
-        p++;
-        const char *q=strchr(p,'"');
-        if(!q) break;
-        size_t idlen=(size_t)(q-p);
-        if(idlen>0 && idlen < sizeof tmp_buf[0]){
-            if(memchr(p,' ', idlen) || memchr(p,'\n', idlen)){
-                p=q+1; continue;
-            }
-            char id[128]; memcpy(id, p, idlen); id[idlen]=0;
-            int dup=0; for(int i=0;i<tmp_cnt;i++) if(strcmp(tmp_buf[i],id)==0) dup=1;
+    /* Collect every "id" string value robustly (whitespace, escapes). */
+    while(tmp_cnt<MAX_MODELS){
+        p=strstr(p,"\"id\"");
+        if(!p) break;
+        const char *q=p+4;                       /* after the key's "id" */
+        while(*q && (*q==' '||*q=='\t'||*q=='\n'||*q=='\r')) q++;
+        if(*q!=':'){ p+=4; continue; }
+        q++;
+        while(*q && (*q==' '||*q=='\t'||*q=='\n'||*q=='\r')) q++;
+        const char *vq=q;
+        char id[128];
+        if(json_read_string(&vq, id, sizeof id)){
+            int dup=0;
+            for(int i=0;i<tmp_cnt;i++) if(strcmp(tmp_buf[i],id)==0) dup=1;
             if(!dup){
                 snprintf(tmp_buf[tmp_cnt], sizeof tmp_buf[tmp_cnt], "%.127s", id);
                 tmp_cnt++;
             }
+            p=vq;
+        } else {
+            p=q;
         }
-        p=q+1;
     }
     free(mem.data);
     if(tmp_cnt>0){
@@ -582,8 +662,8 @@ static void load_sessions(void){
         FILE *f=fopen(full,"r"); e->model[0]=0; e->preview[0]=0;
         if(f){
             char buf[4096]; size_t rd=fread(buf,1,sizeof buf-1,f); buf[rd]=0; fclose(f);
-            char *p=strstr(buf,"\"model\":\""); if(p){ p+=9; char *q=strchr(p,'"'); if(q){ size_t n=(size_t)(q-p); if(n>=sizeof e->model) n=sizeof e->model-1; memcpy(e->model,p,n); e->model[n]=0; }}
-            p=strstr(buf,"\"content\":\""); if(p){ p+=11; char *q=strchr(p,'"'); if(q){ size_t n=(size_t)(q-p); if(n>=sizeof e->preview) n=sizeof e->preview-1; memcpy(e->preview,p,n); e->preview[n]=0; }}
+            if(json_str_field(buf,"model", e->model, sizeof e->model)) { /* ok */ }
+            if(json_str_field(buf,"content", e->preview, sizeof e->preview)) { /* ok */ }
         }
         if(!e->model[0]) snprintf(e->model,sizeof e->model,"-");
         if(!e->preview[0]) snprintf(e->preview,sizeof e->preview,"(empty)");
