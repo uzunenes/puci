@@ -1202,8 +1202,8 @@ void tui_render_frame(void){
     int c_top=1, c_bot = rows-2-comp_h;
     if(c_bot < c_top+1) c_bot=c_top+1;
 
-    if(rows<6 || cols<24){
-        tb_print(1,1, g_theme.error, TB_DEFAULT, "Window too small - enlarge to at least 24x6");
+    if(rows<4 || cols<20){
+        tb_print(1,1, g_theme.error, TB_DEFAULT, "Window too small - enlarge to at least 20x4");
         tb_hide_cursor();
         TRACE(TR_RENDER_END,0);
         TRACE(TR_PRESENT,0);
