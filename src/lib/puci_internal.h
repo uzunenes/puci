@@ -139,6 +139,16 @@ struct puci_session {
 
     puci_approval_cb approve_cb;
     void *approve_userdata;
+    /* Approval mode: event (non-blocking) or legacy callback. In event mode a
+     * pending tool call never invokes approve_cb; it pauses the turn and emits
+     * PUCI_EVENT_APPROVAL_REQUEST for the host to resolve. */
+    puci_approval_mode approval_mode;
+    /* Monotonic counter used to mint unique, session-scoped approval ids. */
+    uint64_t approval_id_seq;
+    /* Per-session "allow always" grants, keyed by tool name. When non-NULL at
+     * dispatch time, only the named tool (this grows single-buffer) is allowed
+     * for the remainder of the session. Kept small (one remembered tool). */
+    char *approve_always_tool;
 
     char *system_prompt;
     puci_msg *messages;
@@ -231,6 +241,7 @@ typedef enum puci_turn_state {
     PUCI_TS_STREAMING,       /* SSE bytes flowing; curl still in flight */
     PUCI_TS_STREAM_COMPLETE, /* transfer done; finalise the assistant message */
     PUCI_TS_DISPATCHING_TOOLS,  /* pick the next tool call to run (non-blocking) */
+    PUCI_TS_AWAITING_APPROVAL,  /* a tool is paused awaiting host approval */
     PUCI_TS_RUNNING_TOOL,    /* an async tool invocation is in flight */
     PUCI_TS_RETRY_BACKOFF,   /* waiting out a retry deadline before retrying */
     PUCI_TS_TURN_DONE,       /* normal completion, waiting for teardown */
@@ -251,6 +262,14 @@ typedef struct puci_evnode {
     /* TOOL_CALL_END: owned call_id/content, plus is_error. */
     char *tr_call_id, *tr_content;
     int tr_is_error;
+    /* APPROVAL_REQUEST: owned tool/display/diff/args_json + id. */
+    char *ap_tool, *ap_display, *ap_diff, *ap_args;
+    uint64_t ap_id;
+    int ap_file_existed;
+    /* APPROVAL_RESOLVED: owned id + decision + cancelled flag. */
+    uint64_t ap_res_id;
+    int ap_res_decision;
+    int ap_res_cancelled;
       long long prompt_tokens, completion_tokens, total_tokens;
       const char *finish_reason;
       puci_status error_status;
@@ -305,6 +324,24 @@ struct puci_turn_run {
     /* Retry backoff deadline (monotonic ms), or -1 if none pending. */
     long long backoff_deadline_ms;
     int backoff_pending;
+
+    /* Pending tool approval (state == PUCI_TS_AWAITING_APPROVAL). Owns every
+     * string so the host's "show this diff" view and the later execution see
+     * an immutable snapshot. `tool_idx` points at the not-yet-dispatched
+     * entry; it is NOT advanced while awaiting, so resume() redsips the same
+     * slot. Freed at teardown (see turn_run_free). */
+    struct pending_approval {
+        uint64_t id;              /* stable, session-scoped */
+        char *tool;               /* owned tool name */
+        char *args_json;          /* owned raw args (borrowed from arena spl in the synch path: see dispatch) */
+        char *display;            /* owned display text */
+        char *diff;               /* owned unified diff */
+        int file_existed;
+        int decision;             /* puci_approval_decision, set by resolve */
+        int resolved;             /* 1 once puci_session_resolve_approval called */
+        int invalidated;          /* 1 when cancel/clear invalidated it */
+    } pending_approval;
+    int pending_approval_active;
 
     /* Cancellation token passed (by borrowed pointer) to the in-flight HTTP
      * request. It must outlive the request, so it lives here rather than on a
@@ -397,6 +434,11 @@ puci_status puci_agent_process(struct puci_session *sess,
                                const struct pollfd *fds, size_t count);
 int puci_agent_next_event(struct puci_session *sess, puci_event *out);
 int puci_agent_cancel_fd(struct puci_session *sess);
+/* Applies a host approval decision to the awaiting turn (see
+ * puci_session_resolve_approval). Emits PUCI_EVENT_APPROVAL_RESOLVED. */
+puci_status puci_agent_resolve_approval(struct puci_session *sess,
+                                        uint64_t id,
+                                        int decision);
 /* Current capacity (bytes) of the session's reusable event text buffer. Test
  * hook / internal accessor; not part of the public API. */
 size_t puci_session_event_text_cap(const struct puci_session *sess);

@@ -87,6 +87,12 @@ static void evnode_free(puci_session *sess, struct puci_evnode *n) {
     free(n->tc_args);
     free(n->tr_call_id);
     free(n->tr_content);
+    free(n->ap_tool);
+    free(n->ap_display);
+    free(n->ap_args);
+    if (n->ap_diff) {
+        puci_diff_free(n->ap_diff);
+    }
     free((char *)n->finish_reason);
     puci_alloc_free(&sess->alloc, n);
 }
@@ -253,6 +259,20 @@ static void qtool_end(puci_session *sess, const char *call_id,
     n->tr_call_id = dupstr(call_id);
     n->tr_content = dupstr(content);
     n->tr_is_error = is_error;
+    turn_run_eventq_push(sess, n);
+}
+
+/* Queue an APPROVAL_RESOLVED event (no owned payload beyond the id). */
+static void qapproval_resolved(puci_session *sess, uint64_t id, int decision,
+                               int cancelled) {
+    struct puci_evnode *n;
+    if (!queue_push_alloc(sess, &n)) {
+        return;
+    }
+    n->ev = PUCI_EVENT_APPROVAL_RESOLVED;
+    n->ap_res_id = id;
+    n->ap_res_decision = decision;
+    n->ap_res_cancelled = cancelled;
     turn_run_eventq_push(sess, n);
 }
 
@@ -625,6 +645,7 @@ static void run_free(puci_session *sess, struct puci_turn_run *run) {
     run->turn.ntool_calls = 0;
     run->turn.tool_calls_cap = 0;
     sess->run = NULL;
+    run->pending_approval_active = 0; /* approval request strings live in the event node, freed on drain */
     puci_alloc_free(&sess->alloc, run);
 }
 
@@ -1025,6 +1046,42 @@ static int tool_dispatch_finish(puci_session *sess, struct puci_turn_run *run,
  * drives it forward without blocking, see run_tool_step. Returns 1 if the
  * turn finished (cancelled/errored), 0 to continue: either straight to the
  * next call in the same process() pass, or after yielding into RUNNING_TOOL. */
+/* Event-mode approval: mints a fresh session-scoped id, records it as the
+ * pending approval for this run (decision is applied later by
+ * puci_session_resolve_approval), and queues a PUCI_EVENT_APPROVAL_REQUEST
+ * carrying owned copies of everything the host needs to render a prompt.
+ * `apreq->diff` ownership is transferred into the event node (the only owner);
+ * it is a null-noop if apreq->diff is NULL. Returns 1 on success, 0 on OOM.
+ * On OOM the event is not queued and diff ownership stays with the caller. */
+static int pending_approval_set(puci_session *sess, struct puci_turn_run *run,
+                                const puci_tool_call *pub,
+                                puci_approval_request *apreq) {
+    uint64_t id = ++sess->approval_id_seq;
+    if (id == 0) {
+        id = ++sess->approval_id_seq; /* wrap the counter */
+    }
+    struct puci_evnode *n;
+    if (!queue_push_alloc(sess, &n)) {
+        return 0;
+    }
+    run->pending_approval_active = 1;
+    run->pending_approval.id = id;
+    run->pending_approval.resolved = 0;
+    run->pending_approval.decision = PUCI_APPROVAL_DENY; /* default: deny */
+    run->pending_approval.invalidated = 0;
+
+    n->ev = PUCI_EVENT_APPROVAL_REQUEST;
+    n->ap_id = id;
+    n->ap_tool = dupstr(pub->name ? pub->name : "");
+    n->ap_display = dupstr(apreq->display ? apreq->display : "");
+    n->ap_args = dupstr(pub->args_json ? pub->args_json : "");
+    n->ap_file_existed = apreq->file_existed;
+    n->ap_diff = (char *)apreq->diff; /* ownership transferred to the event node */
+    apreq->diff = NULL;               /* caller must not free/destroy it now */
+    turn_run_eventq_push(sess, n);
+    return 1;
+}
+
 static int run_dispatch_tools(puci_session *sess, struct puci_turn_run *run) {
     puci_msg *am =
         sess->nmessages > 0 ? &sess->messages[sess->nmessages - 1] : NULL;
@@ -1060,12 +1117,58 @@ static int run_dispatch_tools(puci_session *sess, struct puci_turn_run *run) {
         pub.name = puci_strbuf_cstr(&slot->name);
         pub.id = slot->id ? slot->id : "";
         pub.args_json = puci_strbuf_cstr(&slot->args);
-        qtool_start(sess, pub.name, pub.id, pub.args_json);
+        /* A resumed execution (the host approved this exact index) must not
+           re-emit TOOL_CALL_START or re-trigger the gate for the same call. */
+        int resume_approved =
+            run->pending_approval_active && run->pending_approval.resolved;
+        if (!resume_approved) {
+            qtool_start(sess, pub.name, pub.id, pub.args_json);
+        }
 
         puci_tool *tool = NULL;
         puci_tools_lookup(sess->ctx, pub.name, &tool);
 
-        if (sess->approve_cb) {
+        /* Approval gate. A tool may be bypassed when the host granted
+         * "allow always" for this exact tool name earlier in the session. */
+        int allow_always =
+            sess->approve_always_tool &&
+            strcmp(sess->approve_always_tool, pub.name) == 0;
+        int need_approval =
+            !allow_always && !resume_approved &&
+            (sess->approve_cb || sess->approval_mode == PUCI_APPROVAL_MODE_EVENT);
+
+        if (need_approval) {
+            if (sess->approval_mode == PUCI_APPROVAL_MODE_EVENT) {
+                /* Non-blocking: snapshot the request (owned, immutable), emit
+                 * APPROVAL_REQUEST, and pause ONLY this turn. The tool does
+                 * not run and tool_idx is not advanced; puci_session_process
+                 * returns so other sessions/poll work continue. */
+                puci_arena ar;
+                puci_approval_request apreq;
+                puci_arena_init(&ar, &sess->alloc, 0);
+                build_approval_request(sess, &pub, &ar, &apreq,
+                                       &run->cancel_token);
+                if (sess->cancelled) {
+                    /* Cancellation wins over a pending approval (safety). */
+                    destroy_approval_request(&apreq);
+                    puci_arena_destroy(&ar);
+                    run->tool_cancelled = 1;
+                    run->pending_approval.invalidated = 1;
+                    break;
+                }
+                if (pending_approval_set(sess, run, &pub, &apreq)) {
+                    /* diff ownership was transferred into the snapshot */
+                    destroy_approval_request(&apreq);
+                    puci_arena_destroy(&ar);
+                    run->state = PUCI_TS_AWAITING_APPROVAL;
+                    return 0; /* yield; host must resolve_approval() then process() */
+                }
+                destroy_approval_request(&apreq);
+                puci_arena_destroy(&ar);
+                run->tool_cancelled = 1; /* couldn't snapshot: stop the turn */
+                break;
+            }
+            /* Legacy callback mode: decision is available immediately. */
             puci_arena ar;
             puci_approval_request apreq;
             puci_arena_init(&ar, &sess->alloc, 0);
@@ -1105,6 +1208,15 @@ static int run_dispatch_tools(puci_session *sess, struct puci_turn_run *run) {
                 run->tool_idx++;
                 continue;
             }
+            /* PUCI_APPROVAL_ALLOW falls through to execute the tool. */
+        } else if (allow_always) {
+            /* A previously granted "allow always" for this exact tool: run it. */
+        }
+        /* Consume a one-shot resume flag so the necessarily approved tool call
+           runs now and the NEXT tool (if any) goes through the gate again. */
+        if (resume_approved) {
+            run->pending_approval_active = 0;
+            run->pending_approval.resolved = 0;
         }
 
         if (sess->plan_mode) {
@@ -1248,6 +1360,40 @@ static int run_tool_step(puci_session *sess, struct puci_turn_run *run) {
 /* ------------------------------------------------------------------ */
 /* Public async API                                                    */
 /* ------------------------------------------------------------------ */
+
+puci_status puci_agent_resolve_approval(struct puci_session *sess, uint64_t id,
+                                        int decision) {
+    if (!sess) {
+        return PUCI_ERR_INVALID_ARG;
+    }
+    if (decision != PUCI_APPROVAL_DENY &&
+        decision != PUCI_APPROVAL_ALLOW_ONCE &&
+        decision != PUCI_APPROVAL_ALLOW_ALWAYS) {
+        return PUCI_ERR_INVALID_ARG;
+    }
+    struct puci_turn_run *run = sess->run;
+    if (!run || !run->pending_approval_active) {
+        return PUCI_ERR_OUT_OF_STATE; /* nothing awaiting (stale/cleared) */
+    }
+    if (run->pending_approval.resolved) {
+        return PUCI_ERR_OUT_OF_STATE; /* single-use id */
+    }
+    if (run->pending_approval.id != id) {
+        return PUCI_ERR_OUT_OF_STATE; /* id is session-scoped + single-use */
+    }
+    /* Cancellation wins over a concurrent allow (safety). */
+    if (sess->cancelled) {
+        run->pending_approval.invalidated = 1;
+        run->pending_approval.resolved = 1;
+        run->pending_approval.decision = PUCI_APPROVAL_DENY;
+        qapproval_resolved(sess, id, PUCI_APPROVAL_DENY, 1);
+        return PUCI_OK;
+    }
+    run->pending_approval.decision = decision;
+    run->pending_approval.resolved = 1;
+    qapproval_resolved(sess, id, decision, 0);
+    return PUCI_OK;
+}
 
 puci_status puci_agent_begin_turn(puci_session *sess, const char *message) {
     if (!sess || !message) {
@@ -1479,6 +1625,92 @@ puci_status puci_agent_process(puci_session *sess, const struct pollfd *fds,
             }
             break;
         }
+        case PUCI_TS_AWAITING_APPROVAL: {
+            /* The host must call puci_session_resolve_approval; until then
+               there is nothing to do and we must not spin. If resolved, apply
+               the decision and resume dispatching (which re-reads the same
+               tool at the preserved tool_idx). */
+            if (cancel_requested(sess)) {
+                run->pending_approval.invalidated = 1;
+                run->tool_cancelled = 1;
+                fin_cancelled(sess, run);
+                break;
+            }
+            if (!run->pending_approval_active || !run->pending_approval.resolved) {
+                goto yield;
+            }
+            if (run->pending_approval.invalidated) {
+                run->tool_cancelled = 1;
+                fin_cancelled(sess, run);
+                break;
+            }
+            if (run->pending_approval.decision == PUCI_APPROVAL_ALLOW_ALWAYS) {
+                /* Remember this exact tool name for the remainder of the
+                   session. The tool name comes from the preserved dispatch
+                   index (immutable turn args). */
+                puci_msg *am = sess->nmessages > 0
+                                   ? &sess->messages[sess->nmessages - 1]
+                                   : NULL;
+                size_t k = run->tool_idx;
+                if (am && k < am->ntool_calls &&
+                    am->tool_calls[k].name.len > 0) {
+                    const char *tn = puci_strbuf_cstr(&am->tool_calls[k].name);
+                    if (sess->approve_always_tool) {
+                        puci_alloc_free(&sess->alloc, sess->approve_always_tool);
+                    }
+                    sess->approve_always_tool =
+                        puci_alloc_strdup(&sess->alloc, tn);
+                }
+            }
+            if (run->pending_approval.decision == PUCI_APPROVAL_DENY) {
+                /* Deny: feed a blocked result back to the model, emit
+                   TE, advance and resume dispatch. */
+                puci_msg *am = sess->nmessages > 0
+                                   ? &sess->messages[sess->nmessages - 1]
+                                   : NULL;
+                size_t k = run->tool_idx;
+                const char *tool_id = "";
+                if (am && k < am->ntool_calls) {
+                    tool_id = am->tool_calls[k].id
+                                  ? am->tool_calls[k].id
+                                  : "";
+                    if (k < run->tool_contents_n) {
+                        char *content = NULL;
+                        if (sess->approval_feedback &&
+                            sess->approval_feedback[0]) {
+                            puci_strbuf eb;
+                            puci_strbuf_init(&eb, NULL);
+                            puci_strbuf_appendz(&eb, "{\"ok\":false,\"error\":");
+                            puci_strbuf_append_json_string(
+                                &eb, sess->approval_feedback);
+                            puci_strbuf_appendz(&eb, "}");
+                            content = strdup(puci_strbuf_cstr(&eb));
+                            puci_strbuf_destroy(&eb);
+                            puci_alloc_free(&sess->alloc,
+                                            sess->approval_feedback);
+                            sess->approval_feedback = NULL;
+                        } else {
+                            content = strdup(
+                                "{\"ok\":false,\"error\":\"blocked by approval "
+                                "policy\"}");
+                        }
+                        qtool_end(sess, tool_id, content, 1);
+                        run->tool_contents[k] = content;
+                        run->tool_idx++;
+                    }
+                }
+                run->pending_approval_active = 0;
+                run->pending_approval.resolved = 0;
+                run->state = PUCI_TS_DISPATCHING_TOOLS;
+                break;
+            }
+            /* ALLOW_ONCE / ALLOW_ALWAYS: resume dispatching the same index.
+               run_dispatch_tools sees resume_approved (resolved flag still
+               set) and runs the tool without re-approving or re-emitting a
+               TOOL_CALL_START for it. */
+            run->state = PUCI_TS_DISPATCHING_TOOLS;
+            break;
+        }
         case PUCI_TS_RETRY_BACKOFF: {
             if (run->backoff_pending && now_ms() >= run->backoff_deadline_ms) {
                 run->backoff_pending = 0;
@@ -1577,6 +1809,32 @@ int puci_agent_next_event(puci_session *sess, puci_event *out) {
           out->payload.tool_result.content = event_buf_add_text(sess, q->tr_content,
                                                                  q->tr_content ? strlen(q->tr_content) : 0);
           out->payload.tool_result.is_error = q->tr_is_error;
+          break;
+      case PUCI_EVENT_APPROVAL_REQUEST:
+          /* Copy every field of the owned snapshot into the reusable buffer
+             so the pointers outlive this node (valid until next event). The
+             host must copy what it needs (e.g. into a modal dialog) now. */
+          (void)event_buf_ensure(
+              sess, (q->ap_tool ? strlen(q->ap_tool) : 0) +
+                        (q->ap_display ? strlen(q->ap_display) : 0) +
+                        (q->ap_args ? strlen(q->ap_args) : 0) +
+                        (q->ap_diff ? strlen(q->ap_diff) : 0));
+          out->payload.approval.id = q->ap_id;
+          out->payload.approval.tool =
+              event_buf_add_text(sess, q->ap_tool,
+                                 q->ap_tool ? strlen(q->ap_tool) : 0);
+          out->payload.approval.display = event_buf_add_text(
+              sess, q->ap_display, q->ap_display ? strlen(q->ap_display) : 0);
+          out->payload.approval.args_json = event_buf_add_text(
+              sess, q->ap_args, q->ap_args ? strlen(q->ap_args) : 0);
+          out->payload.approval.diff = event_buf_add_text(
+              sess, q->ap_diff, q->ap_diff ? strlen(q->ap_diff) : 0);
+          out->payload.approval.file_existed = q->ap_file_existed;
+          break;
+      case PUCI_EVENT_APPROVAL_RESOLVED:
+          out->payload.approval_resolved.id = q->ap_res_id;
+          out->payload.approval_resolved.decision = q->ap_res_decision;
+          out->payload.approval_resolved.cancelled = q->ap_res_cancelled;
           break;
     default:
         break;

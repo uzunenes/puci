@@ -100,7 +100,37 @@ typedef enum puci_event_kind {
      *  Distinct from PUCI_EVENT_ERROR so consumers can tell user intent from a
      *  failure. The session remains usable for a subsequent turn. */
     PUCI_EVENT_TURN_CANCELLED,
+    /** A tool call is waiting for host approval (event approval mode only).
+     *  The owning session has paused ONLY this turn in
+     *  PUCI_TS_AWAITING_APPROVAL and is not running the tool. The host must
+     *  eventually call puci_session_resolve_approval with the id from the
+     *  payload; until then the request may be invalidated by cancel, clear or
+     *  destroy. The strings (tool/display/diff/args_json) are borrowed and
+     *  valid only until the next process()/next_event() on this session. */
+    PUCI_EVENT_APPROVAL_REQUEST,
+    /** A previously pending approval was resolved (any decision). Emitted when
+     *  the decision is applied so hosts can close their dialog. */
+    PUCI_EVENT_APPROVAL_RESOLVED,
 } puci_event_kind;
+
+/** Payload for PUCI_EVENT_APPROVAL_REQUEST. Each string is borrowed from the
+ *  session and valid only until the next process()/next_event() on the same
+ *  session. */
+typedef struct puci_event_approval {
+    uint64_t id;            /**< opaque approval id to resolve later */
+    const char *tool;       /**< tool name, e.g. "run_shell" */
+    const char *display;    /**< human-readable action description */
+    const char *diff;       /**< unified diff (NULL if none) */
+    const char *args_json;  /**< raw tool arguments */
+    int file_existed;       /**< nonzero when a write would replace a file */
+} puci_event_approval;
+
+/** Payload for PUCI_EVENT_APPROVAL_RESOLVED. */
+typedef struct puci_event_approval_resolved {
+    uint64_t id;                 /**< the approval that was resolved */
+    int decision;                /**< puci_approval_decision value applied */
+    int cancelled;               /**< nonzero if invalidated by cancel/clear */
+} puci_event_approval_resolved;
 
 typedef struct puci_event_tool_call {
     const char *id;        /**< Borrowed; valid until the next event/process. */
@@ -131,6 +161,8 @@ typedef union puci_event_payload {
     puci_event_tool_result tool_result;
     puci_event_turn_complete turn_complete;
     puci_event_error error;
+    puci_event_approval approval;
+    puci_event_approval_resolved approval_resolved;
 } puci_event_payload;
 
 /** Event emitted by the agent loop through next_event() or the event callback.

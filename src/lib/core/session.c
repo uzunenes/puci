@@ -206,6 +206,9 @@ puci_status puci_session_create(const puci_context *ctx,
     sess->event_userdata = opts->event_userdata;
     sess->approve_cb = opts->approve_cb;
     sess->approve_userdata = opts->approve_userdata;
+    sess->approval_mode = opts->approval_mode;
+    sess->approval_id_seq = 0;
+    sess->approve_always_tool = NULL;
     sess->max_tool_iterations =
         opts->max_tool_iterations ? opts->max_tool_iterations : 32;
     sess->plan_mode = opts->plan_mode ? 1 : 0;
@@ -304,6 +307,10 @@ void puci_session_destroy(puci_session *sess) {
     }
     if (sess->approval_feedback) {
         puci_alloc_free(&sess->alloc, sess->approval_feedback);
+    }
+    if (sess->approve_always_tool) {
+        puci_alloc_free(&sess->alloc, sess->approve_always_tool);
+        sess->approve_always_tool = NULL;
     }
     /* Close the cancel transport (eventfd or self-pipe). */
     if (sess->cancel_fd >= 0) {
@@ -663,6 +670,24 @@ puci_status puci_session_set_approval_feedback(puci_session *sess, const char *f
         }
     }
     return PUCI_OK;
+}
+
+puci_status puci_session_resolve_approval(puci_session *sess,
+                                          puci_approval_id id,
+                                          puci_approval_decision decision) {
+    if (!sess) {
+        return PUCI_ERR_INVALID_ARG;
+    }
+    if (decision != PUCI_APPROVAL_DENY &&
+        decision != PUCI_APPROVAL_ALLOW_ONCE &&
+        decision != PUCI_APPROVAL_ALLOW_ALWAYS) {
+        return PUCI_ERR_INVALID_ARG;
+    }
+    /* Reject re-entrant resolution from inside the event callback. */
+    if (sess->in_process) {
+        return PUCI_ERR_OUT_OF_STATE;
+    }
+    return puci_agent_resolve_approval(sess, id, (int)decision);
 }
 
 puci_status puci_session_set_plan_mode(puci_session *sess, int plan_mode) {

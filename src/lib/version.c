@@ -36,6 +36,10 @@ const char *puci_event_name(puci_event event) {
         return "reasoning_delta";
     case PUCI_EVENT_TURN_CANCELLED:
         return "turn_cancelled";
+    case PUCI_EVENT_APPROVAL_REQUEST:
+        return "approval_request";
+    case PUCI_EVENT_APPROVAL_RESOLVED:
+        return "approval_resolved";
     }
     return "unknown";
 }

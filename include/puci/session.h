@@ -40,6 +40,7 @@ typedef struct puci_session_options {
     size_t max_tool_iterations;     /**< cap on tool iterations per turn, 0 = default (32). A value of N permits up to N tool dispatch rounds; requesting tools on round N+1 aborts the turn with PUCI_ERR_LIMIT_EXCEEDED */
     puci_approval_cb approve_cb;    /**< tool approval policy hook, invoked before each tool runs (optional) */
     void *approve_userdata;         /**< passed to approve_cb */
+    puci_approval_mode approval_mode; /**< CALLBACK (default) or EVENT (non-blocking). In EVENT mode approve_cb is ignored and the turn pauses in PUCI_TS_AWAITING_APPROVAL until puci_session_resolve_approval is called. */
     int plan_mode;                  /**< 1 = plan/dry-run mode: mutating file tools simulate success without writing to disk */
     long tool_timeout_ms;           /**< timeout for individual tool calls in ms (0 = default 60000) */
 } puci_session_options;
@@ -233,6 +234,29 @@ puci_status puci_session_load_file(puci_session *sess, const char *filepath);
  *  When the approval callback returns PUCI_APPROVAL_DENY, this feedback is
  *  forwarded to the model in the tool-result payload. Cleared after use. */
 puci_status puci_session_set_approval_feedback(puci_session *sess, const char *feedback);
+
+/** Resolves a pending tool-approval request previously surfaced via
+ *  PUCI_EVENT_APPROVAL_REQUEST (event approval mode).
+ *
+ *  - The decision is recorded and the awaiting turn is woken; the tool is
+ *    executed on the next puci_session_process(), never reentrantly here.
+ *  - \c PUCI_APPROVAL_ALLOW_ONCE allows the single tool call. \c
+ *    PUCI_APPROVAL_ALLOW_ALWAYS allows only the named tool for the rest of the
+ *    session (never a global blanket grant).
+ *  - The id is single-use and session-scoped: the same id cannot be resolved
+ *    twice, an id from another session is rejected if it does not match this
+ *    session's pending request, and a stale id (after cancel/clear/destroy) is
+ *    rejected with PUCI_ERR_OUT_OF_STATE.
+ *
+ *  Returns PUCI_OK on success, PUCI_ERR_INVALID_ARG for a bad session/decision,
+ *  PUCI_ERR_OUT_OF_STATE when no approval is pending for the id (stale,
+ *  cancelled, cleared, already handled).
+ *
+ *  Safety: unresolved or invalidated requests never run their tool. The
+ *  decision is applied lazily by the next puci_session_process() call. */
+puci_status puci_session_resolve_approval(puci_session *sess,
+                                          puci_approval_id id,
+                                          puci_approval_decision decision);
 
 /** Sets whether the session is in plan / dry-run mode (1 = enabled, 0 = disabled). */
 puci_status puci_session_set_plan_mode(puci_session *sess, int plan_mode);
