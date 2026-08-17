@@ -69,9 +69,9 @@
 #endif
 #define TRACE_RING_CAP (1<<18) // 262k entries
 typedef enum {
-    TR_POLL_RET=0, TR_PROCESS, TR_EVENT, TR_RENDER_BEG, TR_RENDER_END, TR_PRESENT, TR_PROCFS, TR_SAVE, TR_ESCWAIT, TR_APPROVAL
+    TR_POLL_RET=0, TR_PROCESS, TR_EVENT, TR_RENDER_BEG, TR_RENDER_END, TR_PRESENT, TR_PROCFS, TR_SAVE, TR_ESCWAIT, TR_APPROVAL, TR_LAYOUT
 } trace_phase_t;
-static const char *trace_phase_name[] = {"POLL_RET","PROCESS","EVENT","RENDER_BEG","RENDER_END","PRESENT","PROCFS","SAVE","ESCWAIT","APPROVAL"};
+static const char *trace_phase_name[] = {"POLL_RET","PROCESS","EVENT","RENDER_BEG","RENDER_END","PRESENT","PROCFS","SAVE","ESCWAIT","APPROVAL","LAYOUT"};
 typedef struct { uint64_t mono_ns; uint64_t cpu_ns; uint32_t phase; uint32_t extra; } trec_t;
 static trec_t g_trace_ring[TRACE_RING_CAP];
 static _Atomic size_t g_trace_head=0;
@@ -115,7 +115,7 @@ static void trace_dump(void){
     if(!f) f=stderr;
     for(size_t i=start;i<total;i++){
         trec_t *r=&g_trace_ring[i % TRACE_RING_CAP];
-        const char *pn = r->phase < 9 ? trace_phase_name[r->phase] : "UNKNOWN";
+        const char *pn = r->phase <= TR_LAYOUT ? trace_phase_name[r->phase] : "UNKNOWN";
         fprintf(f,"{\"phase\":\"%s\",\"mono_ns\":%llu,\"cpu_ns\":%llu,\"extra\":%u,\"seq\":%zu}\n", pn, (unsigned long long)r->mono_ns, (unsigned long long)r->cpu_ns, r->extra, i);
     }
     if(f!=stderr) fclose(f);
@@ -259,7 +259,8 @@ typedef struct Pane {
     int streaming;
     int layout_dirty;
     int cached_total_vis;
-    int cached_inner_w; // to invalidate on resize
+    int cached_inner_w;    // content width (excluding scrollbar gutter)
+    int cached_scrollable; // whether the last layout had a scrollbar
     char stream_buf[STREAM_BUF];
     size_t stream_len;
     /* Streaming TTG-envelope filter state: carries a partial envelope across
@@ -268,6 +269,10 @@ typedef struct Pane {
     int scroll_off; // 0=bottom, >0 scrolled up (visual lines)
     int pending_nl;
     int need_wrap_recalc;
+    int follow;    // 1 = pinned to the bottom (new output auto-shown), 0 = scrolled up
+    int unread;    // new visual lines that arrived after follow was disabled
+    int  thinking;        // 1 while a reasoning phase is in progress
+    int64_t think_start_ns; // mono nanoseconds when reasoning began (0 = none)
 } Pane;
 
 /* Every Ring lives embedded inside a Pane (g_panes[].ring); invalidate the
@@ -1121,11 +1126,48 @@ static uintattr_t tui_status_color(void){
    indicator. Returns nothing; mutates only termbox cells. Semantic: block
    labels (YOU / PUCI / system dashes / tool / error) draw on the first
    visual row of each logical line. */
+/* Render one pane's ring into rect (x,y)-(x+w-1,y+h-1) with a visual scroll
+   indicator. Returns nothing; mutates only termbox cells. Semantic: block
+   labels (YOU / PUCI / system dashes / tool / error) draw on the first
+   visual row of each logical line.
+
+   Scrollbar contract: when the pane overflows its viewport a dedicated
+   right gutter column is reserved exclusively for the scrollbar track/thumb,
+   and content is wrapped to exclude that gutter so a wide char or word is
+   never overwritten by the scrollbar. The wrap cache is keyed on the content
+   width AND scrollbar visibility so toggling the track invalidates it. */
+static void layout_check(int x,int y,int w,int h,int rows,int cols,const char *what){
+    int bad = (x<0) || (y<0) || (w<1) || (h<1) || (x+w>cols) || (y+h>rows) ? 1 : 0;
+    if(bad){
+        TRACE(TR_LAYOUT, (uint32_t)(((uint32_t)x&0xFF) | (((uint32_t)y)&0xFF)<<8 |
+                                    (((uint32_t)w)&0xFF)<<16 | (((uint32_t)h)&0xFF)<<24));
+        (void)what;
+    }
+}
+
 static void tui_render_pane(Pane *p, int x, int y, int h, int w, int focused){
-    int inner_h = h-2; int inner_w = w-2;
-    if(inner_h<=0 || inner_w<=0) return;
+    int inner_h = h-2;
+    int full_w = w-2;                 /* content region between box borders */
+    if(inner_h<=0 || full_w<1) return;
+
+    /* Is the pane scrollable? That decides whether we reserve a gutter. */
+    int overflows;
+    if(!p->layout_dirty && p->cached_inner_w==full_w && p->cached_scrollable==0 && p->cached_total_vis>=0){
+        overflows = p->cached_total_vis > inner_h;
+    } else {
+        int tv=0;
+        for(int k=0;k<p->ring.count;k++){
+            int idx=(p->ring.head + k)%RING_LINES;
+            tv += wrap_visual_count(p->ring.lines[idx], full_w);
+        }
+        overflows = tv > inner_h;
+    }
+    int scrollable = overflows ? 1 : 0;
+    int inner_w = scrollable ? full_w-1 : full_w;  /* gutter reserved only when visible */
+    if(inner_w<1) inner_w=1;
+
     int total_vis;
-    if(!p->layout_dirty && p->cached_inner_w==inner_w && p->cached_total_vis>=0){
+    if(!p->layout_dirty && p->cached_inner_w==inner_w && p->cached_scrollable==scrollable && p->cached_total_vis>=0){
         total_vis=p->cached_total_vis;
     } else {
         total_vis=0;
@@ -1135,6 +1177,7 @@ static void tui_render_pane(Pane *p, int x, int y, int h, int w, int focused){
         }
         p->cached_total_vis=total_vis;
         p->cached_inner_w=inner_w;
+        p->cached_scrollable=scrollable;
         p->layout_dirty=0;
     }
     if(p->scroll_off > total_vis) p->scroll_off = total_vis;
@@ -1157,7 +1200,7 @@ static void tui_render_pane(Pane *p, int x, int y, int h, int w, int focused){
             int row = y+1+rendered;
             int rem=(int)(strlen(s)-seg_off);
             if(rem<=0){
-                for(int cc=x+1; cc<x+1+inner_w && cc<w+x; cc++) tb_set_cell(cc,row,' ',TB_DEFAULT,TB_DEFAULT);
+                for(int cc=x+1; cc<x+1+inner_w && cc<x+w-1; cc++) tb_set_cell(cc,row,' ',TB_DEFAULT,TB_DEFAULT);
                 rendered++; cur_vis++;
                 break;
             }
@@ -1177,6 +1220,29 @@ static void tui_render_pane(Pane *p, int x, int y, int h, int w, int focused){
                 else snprintf(lab,sizeof lab,"      ");
                 tb_print(x+1, row, fg, TB_DEFAULT, lab);
                 tb_print_styled(x+1+(int)strlen(lab)+0, row, fg, TB_DEFAULT, seg, inner_w);
+            } else if(v==0 && t==RL_ASSISTANT){
+                /* Assistant role heading, rendered exactly once per message:
+                   on the first visual row of the first logical line of an
+                   assistant block (contiguous RL_ASSISTANT entries). Wrapped
+                   rows and the rest of the message are unlabelled; the model
+                   name is omitted at narrow widths. */
+                int prev_idx = (k>0) ? (int)((size_t)(p->ring.head + (size_t)k - 1) % RING_LINES) : -1;
+                int first_of_block = (prev_idx<0) ? 1 : (p->ring.types[prev_idx] != RL_ASSISTANT);
+                if(first_of_block && inner_w >= 6){
+                    char head[96];
+                    const char *mn = g_current_model[0]?g_current_model:"model";
+                    int head_w = inner_w-24; if(head_w<0) head_w=0;
+                    if(inner_w >= 24) snprintf(head,sizeof head,"PUCI \xC2\xB7 %.*s", head_w, mn);
+                    else snprintf(head,sizeof head,"PUCI");
+                    tb_print(x+1, row, g_theme.assistant, TB_DEFAULT, head);
+                    int consumed = x+1 + (int)uwidth(head);
+                    int gap = 2;                                   /* separation before content */
+                    int rem_cells = x+1+inner_w - consumed - gap;
+                    if(rem_cells>0 && seg[0]) tb_print_styled(consumed+gap, row, fg, TB_DEFAULT, seg, rem_cells);
+                    else if(rem_cells>0) tb_set_cell(consumed+gap, row, ' ', TB_DEFAULT, TB_DEFAULT);
+                } else {
+                    tb_print_styled(x+1,row,fg,TB_DEFAULT,seg,inner_w);
+                }
             } else if(t==RL_TOOL){
                 if(v==0){ char lab[24]; snprintf(lab,sizeof lab,"[tool] "); tb_print(x+1,row,fg,TB_DEFAULT,lab); tb_print_styled(x+1+7,row,fg,TB_DEFAULT,seg,inner_w-7); }
                 else tb_print_styled(x+1,row,fg,TB_DEFAULT,seg,inner_w);
@@ -1186,9 +1252,9 @@ static void tui_render_pane(Pane *p, int x, int y, int h, int w, int focused){
             rendered++; cur_vis++;
         }
     }
-    /* Scroll indicator: a proportional scrollbar on the right edge plus a
-       "N new ↓" badge only when the user is scrolled up from the bottom. */
-    if(total_vis > 0){
+    /* Scrollbar: a track+thumb in the dedicated gutter column x+w-2, only
+       when the pane actually overflows. Content never reaches this cell. */
+    if(scrollable){
         int bar = inner_h;
         int den = (total_vis - inner_h) > 0 ? (total_vis - inner_h) : 1;
         int thumb = (bar * inner_h) / total_vis; if(thumb<1) thumb=1; if(thumb>bar) thumb=bar;
@@ -1196,13 +1262,24 @@ static void tui_render_pane(Pane *p, int x, int y, int h, int w, int focused){
         int pos = (top_off * (bar-thumb)) / den;
         if(pos<0) pos=0;
         if(pos>bar-thumb) pos=bar-thumb;
-        int thumb_x = x+w-3;
+        int gx = x+w-2; /* rightmost content column, reserved for the track */
         for(int rr=0; rr<bar; rr++)
-            tb_set_cell(thumb_x, y+1+rr, 0x2591, (rr>=pos && rr<pos+thumb)?g_theme.accent:g_theme.muted, TB_DEFAULT);
-        if(start_vis > 0){
-            char nb[32]; snprintf(nb,sizeof nb,"  %d new \xE2\x86\x93  ", start_vis);
-            tb_print(x+1, y, g_theme.warning, TB_DEFAULT, nb);
+            tb_set_cell(gx, y+1+rr, 0x2591, (rr>=pos && rr<pos+thumb)?g_theme.accent:g_theme.muted, TB_DEFAULT);
+    }
+    /* Quiet empty-state hint when there are no messages yet. */
+    if(p->ring.count==0 && inner_h>=3 && inner_w>=12){
+        int ey=y+1;
+        if(ey+2 <= y+inner_h){
+            tb_print(x+1, ey, g_theme.accent, TB_DEFAULT, "PUCI");
+            tb_print(x+1, ey+1, g_theme.muted,  TB_DEFAULT, "Type a message to begin.");
+            tb_print(x+1, ey+2, g_theme.muted,  TB_DEFAULT, "/help for commands");
         }
+    }
+    /* Unread / new-lines badge: only when follow is disabled (scrolled up)
+       and there are unseen lines stacked below the viewport. */
+    if(!p->follow && p->unread>0){
+        char nb[32]; snprintf(nb,sizeof nb,"  %d new \xE2\x86\x93  ", p->unread);
+        tb_print(x+1, y, g_theme.warning, TB_DEFAULT, nb);
     }
     (void)focused;
 }
@@ -1254,15 +1331,26 @@ void tui_render_frame(void){
         if(comp_h<1) comp_h=1;
         if(comp_h>8) comp_h=8;
     }
-    /* Keep the composer box inside the terminal (>= 1 row reserved for it). */
+    /* Composer rectangle is top border + comp_h visible rows + bottom border.
+       Bottom border sits on rows-2 (footer owns rows-1); the top border is
+       therefore at rows-3-comp_h and the conversation bottom border is one
+       row above it, so the two boxes never overlap. */
     {
-        int comp_top = rows-2-comp_h;
-        if(comp_top < 1){ comp_h = rows-2 > 0 ? rows-2 : 1; if(comp_h<1) comp_h=1; }
-        if(comp_h > rows-3) comp_h = rows-3>0?rows-3:1;
+        int max_rows = rows-4;               /* leave footer + border rows */
+        if(comp_h > max_rows) comp_h = max_rows>0?max_rows:0;
     }
-
-    int c_top=1, c_bot = rows-2-comp_h;
+    int cbh = comp_h + 2;                     /* full composer box height */
+    int c_top=1, c_bot = rows-4-comp_h;       /* conversation bottom border */
     if(c_bot < c_top+1) c_bot=c_top+1;
+    int comp_borderless = (rows < 5) ? 1 : 0; /* no room: compact borderless */
+    /* Boundary ownership: header(1) · conversation(c_top..c_bot) · composer
+       (c_bot+1 .. rows-2) · footer(rows-1). Validate each stays on-grid. */
+    layout_check(0, 0, cols, 1, rows, cols, "header");
+    layout_check(0, c_top, cols, c_bot-c_top+1, rows, cols, "conversation");
+    layout_check(0, rows-1, cols, 1, rows, cols, "footer");
+    if(!comp_borderless){
+        layout_check(0, c_bot+1, cols, cbh, rows, cols, "composer");
+    }
 
     if(rows<4 || cols<20){
         tb_print(1,1, g_theme.error, TB_DEFAULT, "Window too small - enlarge to at least 20x4");
@@ -1339,9 +1427,19 @@ void tui_render_frame(void){
 
     /* ---- Multiline composer ------------------------------------------- */
     {
-        int cbh = comp_h+1;
-        tb_draw_box(rows-2-comp_h, 0, cbh, comp_w, g_input_mode?"Input":"Composer", g_input_mode);
-        int ctop_in = rows-2-comp_h+1;
+        int cb_top = rows-3-comp_h;   /* composer top border row */
+        int ctop_in = cb_top+1;       /* first content row */
+        if(comp_borderless){
+            /* Compact borderless mode (very small height): draw the prompt on
+               a single plain row; never write onto a border cell. */
+            int rr = rows>1? rows-2 : 0;
+            if(rr>=0){ for(int xx=0;xx<cols;xx++) tb_set_cell(xx,rr,' ',TB_DEFAULT,TB_DEFAULT);
+                tb_print(1, rr, g_theme.muted, TB_DEFAULT,
+                         g_input_mode ? g_input : "Message \xE2\x80\xA6 (Enter to compose)"); }
+            tb_hide_cursor();
+            goto composer_done;
+        }
+        tb_draw_box(cb_top, 0, cbh, comp_w, g_input_mode?"Input":"Composer", g_input_mode);
         for(int rr=0; rr<comp_h; rr++)
             for(int xx=1; xx<comp_w-1; xx++) tb_set_cell(xx, ctop_in+rr, ' ', TB_DEFAULT, TB_DEFAULT);
         if(g_input_mode){
@@ -1394,14 +1492,42 @@ void tui_render_frame(void){
             tb_hide_cursor();
         }
     }
+composer_done:
+    ;
 
     /* ---- Footer ------------------------------------------------------- */
+    /* Width-adaptive action list: always show complete reference only when
+       they fit; never truncate a keybinding or a multi-byte label. */
     {
-        const char *foot;
-        if(g_input_mode) foot="[Enter] send  [Ctrl+J] newline  [Esc] cancel  [\xE2\x86\x90\xE2\x86\x92] cursor";
-        else foot="[Enter] prompt  [\xE2\x86\x91/\xE2\x86\x93] scroll  [s] sessions  [m] model  [Tab] pane  [q] quit";
+        const char *composer_active[] = {
+            "Enter send", "Ctrl+J newline", "Ctrl+C cancel", "Esc close", NULL };
+        const char *approval[] = {
+            "y allow", "A always", "n deny", "j/k scroll", NULL };
+        const char *wide[] = {
+            "Enter prompt", "\xE2\x86\x91\xE2\x86\x93 scroll", "s sessions",
+            "m model", "Tab pane", "q quit", NULL };
+        const char *medium[] = {
+            "Enter prompt", "\xE2\x86\x91/\xE2\x86\x93 scroll", "s sessions",
+            "m model", "q quit", NULL };
+        const char *narrow[] = {
+            "Enter prompt", "? help", "q quit", NULL };
+        const char **acts = NULL;
+        if(g_input_mode) acts = composer_active;
+        else if(g_approval_pending) acts = approval;
+        else if(g_split && g_npane>1 && cols>=80) acts = wide;
+        else if(cols>=64) acts = medium;
+        else acts = narrow;
+        char buf[512]; size_t b=0;
+        buf[0]=0;
+        for(int i=0; acts[i]; i++){
+            const char *sep=(i==0)?"":"   \xC2\xB7   ";
+            int need=(int)strlen(sep)+(int)strlen(acts[i]);
+            if(b>0 && (int)b + need > cols-1) break;
+            strcpy(buf+b, sep); b+=strlen(sep);
+            strcpy(buf+b, acts[i]); b+=strlen(acts[i]);
+        }
         for(int x=0;x<cols;x++) tb_set_cell(x,rows-1,' ',TB_DEFAULT,TB_DEFAULT);
-        tb_print(0,rows-1, g_theme.muted, TB_DEFAULT, foot);
+        tb_print(0,rows-1, g_theme.muted, TB_DEFAULT, buf);
     }
     if(g_approval_pending){
         int oh=14, ow=68;
@@ -1512,19 +1638,25 @@ int puci_tui_should_launch(int argc, char **argv){
 
 static void stream_append_segment(Pane *p, const char *s, size_t n){
     if(n==0) return;
+    int added_lines = 0;
     if(p->pending_nl > 0){
         /* (pending-1) blank separator lines, then the content on a fresh line.
            This preserves a\n\nb as "a", "", "b" instead of merging "b" onto
            the blank line. */
-        for(int i=0; i < p->pending_nl-1 && i < 64; i++){
+        int sep = p->pending_nl-1; if(sep>64) sep=64;
+        for(int i=0; i < sep; i++){
             ring_push_typed(&p->ring, "", RL_ASSISTANT);
         }
+        added_lines += sep;
         p->pending_nl = 0;
         ring_push_typed(&p->ring, "", RL_ASSISTANT);
+        added_lines += 1;
         ring_append_to_last(&p->ring, s, n);
     } else {
         ring_append_to_last(&p->ring, s, n);
     }
+    /* New output after follow is off is unseen: bank it for the badge. */
+    if(!p->follow && added_lines>0) p->unread += added_lines;
 }
 
 static void pane_stream_begin(Pane *p){
@@ -1611,8 +1743,10 @@ static void pane_stream_end(Pane *p){
         }
         /* Materialize trailing empty lines. */
         if(p->pending_nl > 0){
-            for(int i=0; i < p->pending_nl-1 && i < 64; i++){
+            int lim = p->pending_nl-1; if(lim>64) lim=64;
+            for(int i=0; i < lim; i++){
                 ring_push_typed(&p->ring, "", RL_ASSISTANT);
+                if(!p->follow) p->unread += 1;
             }
             p->pending_nl=0;
         }
@@ -1643,7 +1777,7 @@ int puci_tui_run(const puci_cli_params *params){
     sigaction(SIGTERM,&ter,NULL);
     sigaction(SIGHUP,&ter,NULL);
     g_npane=1; g_focus=0; g_mode=0;
-    for(int i=0;i<MAX_PANES;i++){ memset(&g_panes[i],0,sizeof g_panes[i]); snprintf(g_panes[i].title,sizeof g_panes[i].title,"Agent %c",'A'+i); snprintf(g_panes[i].session_id,sizeof g_panes[i].session_id,"tui-%ld-%d-%d",(long)time(NULL),i,++g_sess_seq); g_panes[i].scroll_off=0; g_panes[i].layout_dirty=1; g_panes[i].cached_inner_w=-1; g_panes[i].cached_total_vis=-1; }
+    for(int i=0;i<MAX_PANES;i++){ memset(&g_panes[i],0,sizeof g_panes[i]); snprintf(g_panes[i].title,sizeof g_panes[i].title,"Agent %c",'A'+i); snprintf(g_panes[i].session_id,sizeof g_panes[i].session_id,"tui-%ld-%d-%d",(long)time(NULL),i,++g_sess_seq); g_panes[i].scroll_off=0; g_panes[i].layout_dirty=1; g_panes[i].cached_inner_w=-1; g_panes[i].cached_total_vis=-1; g_panes[i].follow=1; g_panes[i].unread=0; }
     puci_context *ctx=NULL;
     if(puci_context_create(NULL,&ctx)!=PUCI_OK){ tui_teardown(); trace_dump(); fprintf(stderr,"ctx fail\n"); return 1; }
     puci_provider_config *pcfg_ptr = puci_cli_provider("openai");
@@ -1661,7 +1795,8 @@ int puci_tui_run(const puci_cli_params *params){
         puci_status _cs = puci_session_create(ctx,&sopts,&s);
         if(_cs==PUCI_OK){
             g_panes[i].sess=s;
-            ring_push_typed(&g_panes[i].ring,"— PUCI TUI v0.5 — Enter prompt, ↑↓ scroll, s sessions, m model, q quit —", RL_SYSTEM);
+            /* No startup keybinding tutorial in the transcript; initial help
+               lives in the footer / empty-state view instead. */
         } else {
             char _em[180]; snprintf(_em,sizeof _em,"⚠ session init failed: %s", puci_status_string(_cs));
             ring_push_typed(&g_panes[i].ring, _em, RL_ERROR);
@@ -1755,9 +1890,21 @@ int puci_tui_run(const puci_cli_params *params){
         } else if(session_to >= 0){
             poll_to = session_to < gauge_due ? session_to : gauge_due;
             if(poll_to<0) poll_to=1;
-        } else poll_to = gauge_due < 250 ? gauge_due : 250;
-        if(poll_to < 0) poll_to = 1;
-        if(poll_to < 1) poll_to = 1;
+        } else if(atomic_load(&g_live_inflight)){
+            /* A background model fetch is running but publishes no fd; poll
+               with a bounded tick so the finished result gets pumped. */
+            poll_to = gauge_due;
+            if(poll_to<1) poll_to=1;
+        } else if(exit_after_ms > 0){
+            /* Test hook only: needs a periodic wakeup to check the deadline. */
+            poll_to = 250;
+        } else {
+            /* Fully idle, no deadlines: block until an event (input, signal)
+               instead of busy-waking at 4 Hz. Zero wakeups while idle. */
+            poll_to = -1;
+        }
+        if(poll_to < -1) poll_to = -1;
+        if(poll_to == 0) poll_to = 1;
         int pr=poll(fds,(nfds_t)nf,poll_to);
         {
             int backlog=0;
@@ -1808,14 +1955,14 @@ int puci_tui_run(const puci_cli_params *params){
                     }
                     if(seq_len>=1 && seq[0]=='[' && seq_len>=2){
                         unsigned char code=(unsigned char)seq[1];
-                        if(code=='A'){ if(g_input_mode) history_prev(); else if(g_mode==2||g_mode==3){ if(g_pick_sel>0) g_pick_sel--; } else { Pane *pp=&g_panes[g_focus]; pp->scroll_off+=2; } }
-                        else if(code=='B'){ if(g_input_mode) history_next(); else if(g_mode==2||g_mode==3){ if(g_pick_sel < g_pick_filtered_count-1) g_pick_sel++; } else { Pane *pp=&g_panes[g_focus]; if(pp->scroll_off>0) pp->scroll_off-=2; } }
+                        if(code=='A'){ if(g_input_mode) history_prev(); else if(g_mode==2||g_mode==3){ if(g_pick_sel>0) g_pick_sel--; } else { Pane *pp=&g_panes[g_focus]; pp->scroll_off+=2; pp->follow=0; } }
+                        else if(code=='B'){ if(g_input_mode) history_next(); else if(g_mode==2||g_mode==3){ if(g_pick_sel < g_pick_filtered_count-1) g_pick_sel++; } else { Pane *pp=&g_panes[g_focus]; if(pp->scroll_off>0){ pp->scroll_off-=2; if(pp->scroll_off<=0){ pp->scroll_off=0; pp->follow=1; pp->unread=0; } } } }
                         else if(code=='C'){ if(g_input_mode && g_input_curs < g_input_len){ size_t el=utf8_seq_len((unsigned char)g_input[g_input_curs]); if(el+g_input_curs>g_input_len) el=g_input_len-g_input_curs; g_input_curs+=el; } }
                         else if(code=='D'){ if(g_input_mode && g_input_curs>0){ int dl=utf8_prev_len((const unsigned char*)g_input, g_input_curs); g_input_curs-=dl; } }
-                        else if(code=='5' && seq_len>=3 && seq[2]=='~'){ if(g_input_mode) history_prev(); else { Pane *pp=&g_panes[g_focus]; pp->scroll_off+=10; } }
-                        else if(code=='6' && seq_len>=3 && seq[2]=='~'){ if(g_input_mode) history_next(); else { Pane *pp=&g_panes[g_focus]; pp->scroll_off-=10; if(pp->scroll_off<0) pp->scroll_off=0; } }
-                        else if(code=='H'){ if(g_input_mode) g_input_curs=0; else { Pane *pp=&g_panes[g_focus]; pp->scroll_off=9999; } }
-                        else if(code=='F'){ if(g_input_mode) g_input_curs=g_input_len; else { Pane *pp=&g_panes[g_focus]; pp->scroll_off=0; } }
+                        else if(code=='5' && seq_len>=3 && seq[2]=='~'){ if(g_input_mode) history_prev(); else { Pane *pp=&g_panes[g_focus]; pp->scroll_off+=10; pp->follow=0; } }
+                        else if(code=='6' && seq_len>=3 && seq[2]=='~'){ if(g_input_mode) history_next(); else { Pane *pp=&g_panes[g_focus]; if(pp->scroll_off>0){ pp->scroll_off-=10; if(pp->scroll_off<0) pp->scroll_off=0; if(pp->scroll_off==0){ pp->follow=1; pp->unread=0; } } } }
+                        else if(code=='H'){ if(g_input_mode) g_input_curs=0; else { Pane *pp=&g_panes[g_focus]; pp->scroll_off=9999; pp->follow=0; } }
+                        else if(code=='F'){ if(g_input_mode) g_input_curs=g_input_len; else { Pane *pp=&g_panes[g_focus]; pp->scroll_off=0; pp->follow=1; pp->unread=0; } }
                     } else if(seq_len==0){
                         if(g_mode==2||g_mode==3){ g_mode=0; g_pick_filter[0]=0; g_show_sidebar=0; }
                         else if(g_input_mode){ g_input_len=0; g_input[0]=0; g_input_curs=0; g_input_mode=0; }
@@ -1921,6 +2068,8 @@ int puci_tui_run(const puci_cli_params *params){
                                 ring_push_typed(&g_panes[g_focus].ring, u, RL_USER);
                                 g_panes[g_focus].scroll_off=0;
                                 g_panes[g_focus].streaming=0;
+                                g_panes[g_focus].follow=1;   /* pin to bottom for the new turn */
+                                g_panes[g_focus].unread=0;
                                 { puci_status _st = puci_session_begin_turn(g_panes[g_focus].sess,g_input); if(_st!=PUCI_OK){ char _em[160]; snprintf(_em,sizeof _em,"begin_turn failed: %s", puci_status_string(_st)); ring_push_typed(&g_panes[g_focus].ring,_em,RL_ERROR); } }
                             }
                         }
@@ -2069,10 +2218,10 @@ int puci_tui_run(const puci_cli_params *params){
                     else if(c=='s'){ if(g_mode==2){ g_mode=0; g_pick_filter[0]=0; g_show_sidebar=0; } else { load_sessions(); picker_open(2); } }
                     else if(c=='m'){ models_init_static(); picker_open(3); fetch_live_models(); if(g_mode==3) rebuild_pick_filter(); }
                     else if(c=='\n' || c=='\r'){ g_input_mode=1; g_input_len=0; g_input[0]=0; g_input_curs=0; g_hist_pos=g_hist_count; g_hist_tmp[0]=0; }
-                    else if(c=='j'){ Pane *pp=&g_panes[g_focus]; if(pp->scroll_off>0){ pp->scroll_off-=1; if(pp->scroll_off<0) pp->scroll_off=0; }}
-                    else if(c=='k'){ Pane *pp=&g_panes[g_focus]; pp->scroll_off+=1; }
-                    else if(c=='g'){ Pane *pp=&g_panes[g_focus]; pp->scroll_off=9999; }
-                    else if(c=='G'){ Pane *pp=&g_panes[g_focus]; pp->scroll_off=0; }
+                    else if(c=='j'){ Pane *pp=&g_panes[g_focus]; if(pp->scroll_off>0){ pp->scroll_off-=1; if(pp->scroll_off<0) pp->scroll_off=0; if(pp->scroll_off==0){ pp->follow=1; pp->unread=0; } } }
+                    else if(c=='k'){ Pane *pp=&g_panes[g_focus]; pp->scroll_off+=1; pp->follow=0; }
+                    else if(c=='g'){ Pane *pp=&g_panes[g_focus]; pp->scroll_off=9999; pp->follow=0; }
+                    else if(c=='G'){ Pane *pp=&g_panes[g_focus]; pp->scroll_off=0; pp->follow=1; pp->unread=0; }
                     else if(c=='?'){
                         ring_push_typed(&g_panes[g_focus].ring,"Keys: Enter prompt  ↑↓/j k/PgUpDn scroll  s sessions  m model  TAB pane  q or Ctrl+C quit  g/G top/bottom", RL_SYSTEM);
                     }
@@ -2099,18 +2248,15 @@ int puci_tui_run(const puci_cli_params *params){
                 if(ev.kind==PUCI_EVENT_TOKEN_DELTA && ev.text){
                     pane_stream_append(&g_panes[i], ev.text, ev.text_len);
                 } else if(ev.kind==PUCI_EVENT_REASONING_DELTA && ev.text){
-                    // Coalesce all reasoning deltas into ONE "thinking" line instead
-                    // of flooding the 800-line ring with per-token entries.
-                    Ring *r=&g_panes[i].ring;
-                    const char *prefix="[think] ";
-                    const int pfxlen=8;
-                    int last = r->count>0 ? (r->head + r->count -1)%RING_LINES : -1;
-                    int is_think = last>=0 && strncmp(r->lines[last], prefix, pfxlen)==0 ? 1 : 0;
-                    if(is_think){
-                        ring_append_to_last(r, ev.text, ev.text_len);
-                    } else {
-                        char tmp[512]; snprintf(tmp,sizeof tmp,"%s%.*s", prefix, (int)(ev.text_len<480?ev.text_len:480), ev.text);
-                        ring_push_typed(r, tmp, RL_SYSTEM);
+                    /* Raw reasoning is hidden by default: it is not a normal
+                       assistant reply. We only record that a reasoning phase
+                       is happening so an opt-in "Thought for Ns" notice can be
+                       shown; the raw bytes never reach the Ring. */
+                    (void)ev.text;
+                    Pane *p=&g_panes[i];
+                    if(!p->thinking){
+                        p->thinking=1;
+                        p->think_start_ns=(int64_t)trace_now_mono_ns();
                     }
                 } else if(ev.kind==PUCI_EVENT_TOOL_CALL_START){
                     pane_stream_end(&g_panes[i]);
@@ -2124,15 +2270,29 @@ int puci_tui_run(const puci_cli_params *params){
                     ring_push_typed(&g_panes[i].ring, tmp, RL_TOOL);
                 } else if(ev.kind==PUCI_EVENT_TURN_COMPLETE){
                     pane_stream_end(&g_panes[i]);
-                    ring_push_typed(&g_panes[i].ring,"— done —", RL_SYSTEM);
+                    /* Compact, optional reasoning notice when a reasoning
+                       phase ran — one line, never the raw reasoning text. */
+                    if(g_panes[i].thinking){
+                        int64_t now=(int64_t)trace_now_mono_ns();
+                        int64_t ms = now - g_panes[i].think_start_ns;
+                        if(ms < 0) ms = 0;
+                        double s = (double)ms / 1e9;
+                        char rn[96];
+                        snprintf(rn,sizeof rn,"\xE2\x96\xB8 Thought for %.1fs", s);
+                        ring_push_typed(&g_panes[i].ring, rn, RL_SYSTEM);
+                        g_panes[i].thinking=0; g_panes[i].think_start_ns=0;
+                    }
+                    /* Completion is signalled by the header returning to
+                       Ready — no "— done —" clutter in the transcript. */
                     // autosave to stable per-pane file
                     {
                         const char *sid = g_panes[i].session_id[0]?g_panes[i].session_id:"tui-autosave";
                         TRACE(TR_SAVE,0); puci_cli_save_session(g_panes[i].sess, sid);
                     }
-                    g_panes[i].scroll_off=0;
+                    if(g_panes[i].follow){ g_panes[i].unread=0; g_panes[i].scroll_off=0; }
                 } else if(ev.kind==PUCI_EVENT_TURN_CANCELLED){
                     pane_stream_end(&g_panes[i]);
+                    g_panes[i].thinking=0; g_panes[i].think_start_ns=0;
                     ring_push_typed(&g_panes[i].ring,"— cancelled —", RL_ERROR);
                 } else if(ev.kind==PUCI_EVENT_APPROVAL_REQUEST){
                     /* Non-blocking: record the pending overlay; the main loop
