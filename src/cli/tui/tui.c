@@ -78,9 +78,28 @@ static void trace_init(void){
     const char *v=getenv("PUCI_TRACE");
     if(v && *v && strcmp(v,"0")!=0) g_trace_enabled=1;
     const char *f=getenv("PUCI_TRACE_FILE");
-    /* Copy the path into our own buffer: later setenv()/getenv() calls may
-     * clobber the pointer returned here, so never keep it across those. */
-    snprintf(g_trace_file_buf, sizeof g_trace_file_buf, "%s", (f && *f) ? f : "/tmp/puci_trace.ndjson");
+    if(f && *f){
+        snprintf(g_trace_file_buf, sizeof g_trace_file_buf, "%s", f);
+    } else {
+        /* Default to a per-user, per-process path so concurrent runs don't
+           clobber each other and a predictable /tmp path isn't a symlink/TOCTOU
+           target. Prefer the OS-backed state dir; fall back to /tmp with pid. */
+        const char *base=getenv("XDG_STATE_HOME");
+        char prefix[768];
+        if(base && *base){
+            snprintf(prefix,sizeof prefix,"%s/puci", base);
+            mkdir(prefix, 0700);
+        } else {
+            const char *home=getenv("HOME");
+            if(home && *home){
+                snprintf(prefix,sizeof prefix,"%s/.local/state/puci", home);
+                mkdir(prefix, 0700);
+            } else {
+                snprintf(prefix,sizeof prefix,"/tmp");
+            }
+        }
+        snprintf(g_trace_file_buf,sizeof g_trace_file_buf,"%s/puci_trace.%ld.ndjson", prefix, (long)getpid());
+    }
     g_trace_file = g_trace_file_buf;
 }
 static void trace_dump(void){
@@ -623,20 +642,20 @@ static puci_approval tui_approval_cb(const puci_approval_request *req, void *ud)
 }
 
 // Lightweight inline markdown: **bold**, *italic*, `code`, # heading, - list, > quote
-static void tb_print_styled(int x,int y, uintattr_t base_fg, uintattr_t base_bg, const char *s, int max_w) __attribute__((unused));
+static int utf8_seq_width(const unsigned char *s); /* defined below; used here */
+static void tb_print_styled(int x,int y, uintattr_t base_fg, uintattr_t base_bg, const char *s, int max_w);
 static void tb_print_styled(int x,int y, uintattr_t base_fg, uintattr_t base_bg, const char *s, int max_w){
     if(!s) return;
+    if(max_w<=0) return;
     int col=x;
     int bold=0, code=0;
     // heading detection at line start
     if(s[0]=='#' && (s[1]==' '||s[1]=='#')){
         base_fg = TB_YELLOW|TB_BOLD; // heading yellow
         int skip=0; while(s[skip]=='#') skip++; if(s[skip]==' ') skip++;
-        // skip markers for display but keep visual offset?
         s += skip;
     } else if(s[0]=='>' && s[1]==' '){
         base_fg = TB_CYAN;
-        // draw quote bar
         if(col < x+max_w){ tb_set_cell(col,y, 0x2502, TB_CYAN, base_bg); col++; }
         s+=2;
     } else if((s[0]=='-'||s[0]=='*') && s[1]==' '){
@@ -644,35 +663,39 @@ static void tb_print_styled(int x,int y, uintattr_t base_fg, uintattr_t base_bg,
         if(col < x+max_w){ tb_set_cell(col,y, 0x2022, base_fg, base_bg); col++; tb_set_cell(col,y,' ', base_fg, base_bg); col++; }
         s+=2;
     }
-    for(int i=0; s[i] && col < x+max_w; ){
-        if(!code && s[i]=='`'){
-            code=!code; i++; continue;
-        }
-        if(!code && s[i]=='*' && s[i+1]=='*'){
-            bold=!bold; i+=2; continue;
-        }
-        // link [text](url) -> underline text
-        if(!code && s[i]=='['){
-            char *end = strchr(s+i, ']');
-            char *par = end ? strchr(end, '(') : NULL;
-            char *par2 = par ? strchr(par, ')') : NULL;
+    /* Emit one UTF-8 code point into the cell buffer, advancing `col` by
+       its display width so multi-byte text never misaligns the cursor. */
+    while(*s && col < x+max_w){
+        if(!code && s[0]=='`'){ code=!code; s+=1; continue; }
+        if(!code && s[0]=='*' && s[1]=='*'){ bold=!bold; s+=2; continue; }
+        if(!code && s[0]=='['){
+            const char *end=strchr(s, ']');
+            const char *par=end?strchr(end,'('):NULL;
+            const char *par2=par?strchr(par,')'):NULL;
             if(end && par==end+1 && par2){
-                // render text inside [] underlined
-                for(int k=i+1;k<(int)(end-(s));k++){
-                    if(col>=x+max_w) break;
-                    tb_set_cell(col,y, (uint32_t)(unsigned char)s[k], base_fg|TB_UNDERLINE, base_bg); col++;
+                const char *t=s+1;
+                while(t<end && col<x+max_w){
+                    uint32_t cp; int bl2=tb_utf8_char_to_unicode(&cp,t);
+                    if(bl2<=0){ bl2=1; cp=(uint32_t)(unsigned char)t[0]; }
+                    int w2=utf8_seq_width((const unsigned char*)t);
+                    if(col+w2 > x+max_w) break;
+                    tb_set_cell(col,y,cp, base_fg|TB_UNDERLINE, base_bg);
+                    col+=w2; t+=(size_t)bl2;
                 }
-                i = (int)(par2 - s) +1;
+                s=par2+1;
                 continue;
             }
         }
-        uintattr_t fg = base_fg;
-        uintattr_t bg = base_bg;
-        if(bold) fg |= TB_BOLD;
-        if(code){ fg = TB_BLACK; bg = TB_WHITE; }
-        // utf8: for ascii, one cell; termbox handles utf8 via tb_print but we do per-char
-        tb_set_cell(col,y, (uint32_t)(unsigned char)s[i], fg, bg);
-        col++; i++;
+        uint32_t cp; int bl=tb_utf8_char_to_unicode(&cp, s);
+        if(bl<=0){ bl=1; cp=(uint32_t)(unsigned char)s[0]; }
+        int w=utf8_seq_width((const unsigned char*)s);
+        if(col+w > x+max_w) break;
+        uintattr_t fg=base_fg, bg=base_bg;
+        if(bold) fg|=TB_BOLD;
+        if(code){ fg=TB_BLACK; bg=TB_WHITE; }
+        /* Wide glyphs occupy two cells; termbox fills the trailing cell. */
+        tb_set_cell(col,y,cp, fg, bg);
+        col+=w; s+=(size_t)bl;
     }
     // fill remainder
     for(int c=col;c<x+max_w;c++) tb_set_cell(c,y,' ', base_fg, base_bg);
@@ -716,19 +739,140 @@ static void tb_draw_gauge(int r,int c,int w,long cur,long max,const char *label)
     tb_print(c+pos, r, TB_WHITE, TB_DEFAULT, info);
 }
 
-/* Word-wrap one logical line into visual lines */
+/* ---- UTF-8 width helpers ---------------------------------------------
+ * All width math in the TUI must go through these so multi-byte UTF-8
+ * (Turkish chars, emoji, combining marks) is measured in display columns,
+ * never in bytes via strlen() alone. */
+
+/* Display width of the first UTF-8 code point at s. Wide chars count 2;
+ * combining/zero-width count 0. Termbox's tb_wcwidth returns 0/1/2 (or -1
+ * clamped to 1) and tb_utf8_char_length gives the byte length. */
+static int uchar_width(const char *s){
+    static int warned=0;
+    (void)warned;
+    uint32_t cp=0;
+    int bl = tb_utf8_char_to_unicode(&cp, s);
+    if(bl<=0) return 1;
+    int w = tb_wcwidth(cp);
+    if(w<0)     return 1; /* control/unknown: treat as one cell */
+    if(w>2)     return 2; /* emoji sequences are folded to 2 columns */
+    return w;
+}
+
+/* Width (in display columns) of a whole UTF-8 string. */
+static int uwidth(const char *s){
+    if(!s) return 0;
+    int col=0;
+    while(*s){
+        int w=uchar_width(s);
+        s += tb_utf8_char_length(*s);
+        col += w;
+    }
+    return col;
+}
+
+/* Advance s forward by whole code points until the written width would
+ * exceed max_cols. Returns the number of BYTES consumed (so callers can
+ * slice s[start..start+ret] into a visual row of <= max_cols columns).
+ * Never splits a multi-byte sequence. */
+static size_t uwidth_advance(const char *s, int max_cols){
+    size_t nbytes=0;
+    int col=0;
+    while(*s && *s != '\n'){
+        int w=uchar_width(s);
+        if(col + w > max_cols) break;
+        col += w;
+        int bl=tb_utf8_char_length((char)*s);
+        s += bl; nbytes += (size_t)bl;
+    }
+    return nbytes;
+}
+
+/* Number of bytes in a UTF-8 sequence given its lead byte, or 1 for
+ * ASCII/continuation/lead bytes that are incomplete (validated by caller). */
+static int utf8_seq_len(unsigned char lead){
+    if(lead < 0x80) return 1;
+    if((lead & 0xE0) == 0xC0) return 2;
+    if((lead & 0xF0) == 0xE0) return 3;
+    if((lead & 0xF8) == 0xF0) return 4;
+    return 1; /* stale continuation byte (0x80..0xBF): skip it */
+}
+
+/* Validate a raw multi-byte sequence (no overlongs, no surrogates, up to
+ * U+10FFFF). Returns 1 when `len` bytes at `s` form a valid code point and
+ * all continuation bytes are well-formed. */
+static int utf8_valid(const unsigned char *s, size_t len){
+    if(len==1) return 1; /* ASCII */
+    if(len==2){
+        if(!(s[0]>=0xC2 && s[0]<=0xDF)) return 0;
+    } else if(len==3){
+        unsigned char a=s[0];
+        if(a==0xE0){ if(!(s[1]>=0xA0 && s[1]<=0xBF)) return 0; }
+        else if(a==0xED){ if(!(s[1]>=0x80 && s[1]<=0x9F)) return 0; }
+        else if(a>=0xE1 && a<=0xEF){ if(!(s[1]>=0x80 && s[1]<=0xBF)) return 0; }
+        else return 0;
+    } else if(len==4){
+        unsigned char a=s[0];
+        if(a==0xF0){ if(!(s[1]>=0x90 && s[1]<=0xBF)) return 0; }
+        else if(a>=0xF1 && a<=0xF3){ if(!(s[1]>=0x80 && s[1]<=0xBF)) return 0; }
+        else if(a==0xF4){ if(!(s[1]>=0x80 && s[1]<=0x8F)) return 0; }
+        else return 0;
+    } else return 0;
+    for(size_t i=1;i<len;i++) if((s[i]&0xC0)!=0x80) return 0;
+    return 1;
+}
+
+/* Display column width of the first code point at s (for cursor motion). */
+static int utf8_seq_width(const unsigned char *s){
+    uint32_t cp=0;
+    if(tb_utf8_char_to_unicode(&cp, (const char*)s)<=0) return 1;
+    int w=tb_wcwidth(cp);
+    if(w<=0) return 1;
+    if(w>2) return 2;
+    return w;
+}
+
+/* Byte length of the UTF-8 character that ENDS at index `end` (exclusive),
+ * i.e. where the previous character begins. Used for backspace-by-char. */
+static int utf8_prev_len(const unsigned char *s, size_t end){
+    if(end==0) return 1;
+    const unsigned char *p = s + end - 1;
+    int lead=1;
+    for(int i=0;i<3 && (size_t)i<end;i++){
+        if((p[-i]&0xC0)!=0x80){ lead = i+1; break; }
+    }
+    return lead;
+}
+
+/* Byte length of the next visual row starting at s (fits `width` columns,
+ * UTF-8 safe, prefers a trailing word boundary past the halfway mark).
+ * Never splits a multi-byte sequence; returns >=1 when *s != 0. */
+static size_t render_segment(const char *s, int width){
+    size_t cut = uwidth_advance(s, width);
+    if(cut==0) cut = 1;
+    const char *q=s;
+    size_t scan_col=0;
+    size_t space_bytes=0;
+    while(*q && *q!='\n'){
+        int w=uchar_width(q);
+        if((int)scan_col + w > width) break;
+        scan_col += (size_t)w;
+        if(*q==' '){ space_bytes = (size_t)(q - s) + 1; }
+        q += tb_utf8_char_length(*q);
+    }
+    if(space_bytes && space_bytes*2 > (size_t)width){ cut = space_bytes; }
+    return cut;
+}
+
+/* Visually wrap a logical line: walk UTF-8 code points up to `width`
+ * columns per visual row. Mirrors the render slicing in the render loop. */
 static int wrap_visual_count(const char *s, int width){
     if(width<=0) return 1;
     if(!s||!*s) return 1;
-    int n=0; int len=(int)strlen(s);
-    int pos=0;
+    int n=0; size_t pos=0; size_t len=strlen(s);
     while(pos < len){
-        if(len - pos <= width){ n++; break; }
-        int cut=width;
-        // try word boundary
-        int last_sp=-1;
-        for(int i=0;i<width;i++) if(s[pos+i]==' ') last_sp=i;
-        if(last_sp> width/2) cut=last_sp+1;
+        if(uwidth(s+pos) <= width){ n++; break; }
+        size_t cut = render_segment(s+pos, width);
         n++; pos+=cut;
     }
     return n;
@@ -811,13 +955,7 @@ void tui_render_frame(void){
             for(int w=0; w<wrapped && rendered<inner_h; w++){
                 if(cur_vis < start_vis){ cur_vis++; /* still advance seg_off */ 
                     int rem2=(int)strlen(s)-seg_off;
-                    int take2 = rem2 < inner_w ? rem2 : inner_w;
-                    if(rem2 > inner_w){
-                        int last_sp=-1;
-                        for(int j=0;j<take2;j++) if(s[seg_off+j]==' ') last_sp=j;
-                        if(last_sp> inner_w/2) take2=last_sp+1;
-                    }
-                    seg_off += take2;
+                    if(rem2>0){ int take2=(int)render_segment(s+seg_off, inner_w); if(take2<1||take2>rem2) take2=rem2; seg_off += take2; }
                     continue;
                 }
                 int rem=(int)(strlen(s)-seg_off);
@@ -833,12 +971,9 @@ void tui_render_frame(void){
                     rendered++; cur_vis++;
                     break;
                 }
-                int take = rem < inner_w ? rem : inner_w;
-                if(rem > inner_w){
-                    int last_sp=-1;
-                    for(int j=0;j<take;j++) if(s[seg_off+j]==' ') last_sp=j;
-                    if(last_sp> inner_w/2) take=last_sp+1;
-                }
+                int take;
+                if(uwidth(s+seg_off) <= inner_w){ take = rem; }
+                else { take = (int)render_segment(s+seg_off, inner_w); if(take<1||take>rem) take=rem; }
                 char seg[ RING_COLS ];
                 memcpy(seg, s+seg_off, (size_t)take); seg[take]=0;
                 seg_off += take;
@@ -850,7 +985,11 @@ void tui_render_frame(void){
                 else if(t==RL_ASSISTANT) fg=TB_WHITE;
                 // prefix for continuation lines
                 // remove leading spaces
-                tb_print(pc+1, pr+1+rendered, fg, TB_DEFAULT, seg);
+                if(t==RL_ASSISTANT || t==RL_TOOL){
+                    tb_print_styled(pc+1, pr+1+rendered, fg, TB_DEFAULT, seg, inner_w);
+                } else {
+                    tb_print(pc+1, pr+1+rendered, fg, TB_DEFAULT, seg);
+                }
                 rendered++; cur_vis++;
             }
         }
@@ -893,11 +1032,14 @@ void tui_render_frame(void){
         // clear line
         for(int x=0;x<cols;x++) tb_set_cell(x, rows-1, ' ', TB_BLACK, TB_WHITE);
         tb_print(0, rows-1, TB_BLACK, TB_WHITE, prompt);
-        // cursor
-        int cx = 2 + (int)g_input_curs;
-        if(cx>=cols) cx=cols-1;
-        if(cx<0) cx=0;
-        tb_set_cursor(cx, rows-1);
+        // cursor (display column, not byte offset, so multi-byte glyphs place
+                // the caret correctly)
+                char _curs_buf[256]; size_t _cl=g_input_curs; if(_cl>255) _cl=255;
+                memcpy(_curs_buf,g_input,_cl); _curs_buf[_cl]=0;
+                int cx = 2 + uwidth(_curs_buf);
+                if(cx<0) cx=0;
+                if(cx>=cols) cx=cols-1;
+                tb_set_cursor(cx, rows-1);
     } else {
         tb_hide_cursor();
     }
@@ -1237,8 +1379,8 @@ int puci_tui_run(const puci_cli_params *params){
                         unsigned char code=(unsigned char)seq[1];
                         if(code=='A'){ if(g_input_mode) history_prev(); else if(g_mode==2||g_mode==3){ if(g_pick_sel>0) g_pick_sel--; } else { Pane *pp=&g_panes[g_focus]; pp->scroll_off+=2; } }
                         else if(code=='B'){ if(g_input_mode) history_next(); else if(g_mode==2||g_mode==3){ if(g_pick_sel < g_pick_filtered_count-1) g_pick_sel++; } else { Pane *pp=&g_panes[g_focus]; if(pp->scroll_off>0) pp->scroll_off-=2; } }
-                        else if(code=='C'){ if(g_input_mode && g_input_curs < g_input_len) g_input_curs++; }
-                        else if(code=='D'){ if(g_input_mode && g_input_curs>0) g_input_curs--; }
+                        else if(code=='C'){ if(g_input_mode && g_input_curs < g_input_len){ size_t el=utf8_seq_len((unsigned char)g_input[g_input_curs]); if(el+g_input_curs>g_input_len) el=g_input_len-g_input_curs; g_input_curs+=el; } }
+                        else if(code=='D'){ if(g_input_mode && g_input_curs>0){ int dl=utf8_prev_len((const unsigned char*)g_input, g_input_curs); g_input_curs-=dl; } }
                         else if(code=='5' && seq_len>=3 && seq[2]=='~'){ if(g_input_mode) history_prev(); else { Pane *pp=&g_panes[g_focus]; pp->scroll_off+=10; } }
                         else if(code=='6' && seq_len>=3 && seq[2]=='~'){ if(g_input_mode) history_next(); else { Pane *pp=&g_panes[g_focus]; pp->scroll_off-=10; if(pp->scroll_off<0) pp->scroll_off=0; } }
                         else if(code=='H'){ if(g_input_mode) g_input_curs=0; else { Pane *pp=&g_panes[g_focus]; pp->scroll_off=9999; } }
@@ -1354,17 +1496,51 @@ int puci_tui_run(const puci_cli_params *params){
                         g_input_len=0; g_input[0]=0; g_input_curs=0; g_input_mode=0;
                     } else if(c==127 || c==8){
                         if(g_input_curs>0){
-                            memmove(g_input+g_input_curs-1, g_input+g_input_curs, g_input_len - g_input_curs +1);
-                            g_input_len--; g_input_curs--;
+                            int dl=utf8_prev_len((const unsigned char*)g_input, g_input_curs);
+                            if(dl<1) dl=1;
+                            memmove(g_input+g_input_curs-dl, g_input+g_input_curs, g_input_len - g_input_curs +1);
+                            g_input_len-=dl; g_input_curs-=dl;
                         }
                     } else if(c==21){ // Ctrl-U clear
                         g_input_len=0; g_input_curs=0; g_input[0]=0;
                     } else if(c==3){ // Ctrl-C: cancel the pending prompt
                         g_input_len=0; g_input[0]=0; g_input_curs=0; g_input_mode=0;
-                    } else if(c>=32 && c<127){
-                        if(g_input_len+1 < sizeof g_input){
-                            memmove(g_input+g_input_curs+1, g_input+g_input_curs, g_input_len - g_input_curs +1);
-                            g_input[g_input_curs++]= (char)c; g_input_len++;
+                    } else if(c>=32 && c!=127){ /* printable ASCII or UTF-8 lead byte */
+                        int bl = (c>=0x80) ? utf8_seq_len(c) : 1;
+                        if(c>=0x80 && bl>1){
+                            /* Collect the full UTF-8 sequence. Continuation
+                               bytes usually sit at k+1.. but may be split
+                               across reads; pull them from the batch or read
+                               the remainder directly from stdin. */
+                            unsigned char seq[4]; seq[0]=c;
+                            int have=1;
+                            int need=bl-1;
+                            while(have < bl && need>0){
+                                if(k+have < n){ seq[have]=buf[k+have]; have++; }
+                                else {
+                                    char tmp; ssize_t rr=read(STDIN_FILENO,&tmp,1);
+                                    if(rr==1){ seq[have]=(unsigned char)tmp; have++; }
+                                    else break;
+                                }
+                                need--;
+                            }
+                            if(have!=bl || !utf8_valid(seq,(size_t)bl)){
+                                /* Invalid: ignore the incomplete sequence. */
+                                k += (have>0)?have-1:0;
+                            } else {
+                                if((size_t)(g_input_len+bl) < sizeof g_input){
+                                    memmove(g_input+g_input_curs+bl, g_input+g_input_curs, g_input_len - g_input_curs +1);
+                                    memcpy(g_input+g_input_curs, seq, (size_t)bl);
+                                    g_input_curs += (size_t)bl; g_input_len += bl;
+                                }
+                                k += bl-1; /* skip continuation bytes */
+                            }
+                        } else {
+                            /* printable ASCII */
+                            if(g_input_len+1 < sizeof g_input){
+                                memmove(g_input+g_input_curs+1, g_input+g_input_curs, g_input_len - g_input_curs +1);
+                                g_input[g_input_curs++]=(char)c; g_input_len++;
+                            }
                         }
                     }
                 } else {
