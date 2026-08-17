@@ -612,6 +612,188 @@ static void test_second_session_streams(void) {
     stop_child(pidB);
 }
 
+/* Idle processing must be a safe no-op: process() returns PUCI_OK and never
+ * enqueues an invalid-state (or any) error event. This is the exact regression
+ * that flooded the TUI with "session 0: invalid operation state". */
+static void test_idle_process_no_error(void) {
+    puci_context *ctx = NULL;
+    CHECK(puci_context_create(NULL, &ctx) == PUCI_OK);
+    puci_session *sess = NULL;
+    make_session(ctx, "http://127.0.0.1:1/v1", &sess); /* never contacted while idle */
+    struct pollfd blank[16];
+    memset(blank, 0, sizeof(blank));
+    for (int i = 0; i < 50; i++) {
+        CHECK(puci_session_process(sess, blank, 0) == PUCI_OK);
+    }
+    puci_event ev;
+    CHECK(puci_session_next_event(sess, &ev) == 0); /* no error event */
+    puci_session_destroy(sess);
+    puci_context_destroy(ctx);
+}
+
+/* Park at the approval gate, then process() repeatedly: safe no-op, request
+ * emitted exactly once, no spin (next_timeout is not an instant 0). */
+static void test_awaiting_approval_noop(void) {
+    char url[128];
+    pid_t pid = spawn_server(2, url, sizeof(url));
+    CHECK(pid > 0);
+    puci_context *ctx = NULL;
+    CHECK(puci_context_create(NULL, &ctx) == PUCI_OK);
+    puci_tool_spec tsc = { .name = "approve_me",
+                           .description = "t",
+                           .input_schema = "{}"};
+    evrun a = {0};
+    CHECK(puci_tool_register(ctx, &tsc, approve_me_invoke, &a) == PUCI_OK);
+    puci_session *sess = NULL;
+    make_session(ctx, url, &sess);
+    CHECK(puci_session_begin_turn(sess, "call the tool") == PUCI_OK);
+    uint64_t rid = drive_to_request(sess, &a);
+    CHECK(rid != 0);
+
+    int requests = 0;
+    struct pollfd blank[16];
+    memset(blank, 0, sizeof(blank));
+    for (int i = 0; i < 100; i++) {
+        CHECK(puci_session_process(sess, blank, 0) == PUCI_OK);
+        puci_event ev;
+        while (puci_session_next_event(sess, &ev)) {
+            if (ev.kind == PUCI_EVENT_APPROVAL_REQUEST) {
+                requests++;
+            }
+        }
+    }
+    CHECK(requests == 0); /* approval request was seen once above and must not
+                             be re-emitted by repeated idle process() calls */
+
+    int tm = -99;
+    CHECK(puci_session_next_timeout_ms(sess, &tm) == PUCI_OK);
+    CHECK(tm != 0); /* no zero-timeout busy spin while parked */
+
+    do_one_turn(sess, &a, rid, PUCI_APPROVAL_DENY, 0);
+    CHECK(a.done);
+
+    puci_session_destroy(sess);
+    puci_context_destroy(ctx);
+    stop_child(pid);
+}
+
+/* A terminal turn must not be processed again as an active turn and must not
+ * re-enqueue error or terminal events on repeated process() calls. */
+static void test_repeated_terminal_no_error(void) {
+    char url[128];
+    pid_t pid = spawn_server(2, url, sizeof(url));
+    CHECK(pid > 0);
+    puci_context *ctx = NULL;
+    CHECK(puci_context_create(NULL, &ctx) == PUCI_OK);
+    puci_tool_spec tsc = { .name = "approve_me",
+                           .description = "t",
+                           .input_schema = "{}"};
+    evrun a = {0};
+    CHECK(puci_tool_register(ctx, &tsc, approve_me_invoke, &a) == PUCI_OK);
+    puci_session *sess = NULL;
+    make_session(ctx, url, &sess);
+    CHECK(puci_session_begin_turn(sess, "call the tool") == PUCI_OK);
+    uint64_t rid = drive_to_request(sess, &a);
+    CHECK(rid != 0);
+    do_one_turn(sess, &a, rid, PUCI_APPROVAL_DENY, 0);
+    CHECK(a.done); /* turn terminal */
+
+    int errs = 0, terms = 0;
+    for (int i = 0; i < 200; i++) {
+        CHECK(puci_session_process(sess, NULL, 0) == PUCI_OK);
+        puci_event ev;
+        while (puci_session_next_event(sess, &ev)) {
+            if (ev.kind == PUCI_EVENT_ERROR) {
+                errs++;
+            }
+            if (ev.kind == PUCI_EVENT_TURN_COMPLETE ||
+                ev.kind == PUCI_EVENT_TURN_CANCELLED) {
+                terms++;
+            }
+        }
+    }
+    CHECK(errs == 0);
+    CHECK(terms == 0);
+
+    puci_session_destroy(sess);
+    puci_context_destroy(ctx);
+    stop_child(pid);
+}
+
+/* Idle polling must never grow the event queue. */
+static void test_idle_no_growth(void) {
+    puci_context *ctx = NULL;
+    CHECK(puci_context_create(NULL, &ctx) == PUCI_OK);
+    puci_session *sess = NULL;
+    make_session(ctx, "http://127.0.0.1:1/v1", &sess);
+    struct pollfd blank[16];
+    memset(blank, 0, sizeof(blank));
+    long produced = 0;
+    for (int i = 0; i < 5000; i++) {
+        CHECK(puci_session_process(sess, blank, 0) == PUCI_OK);
+        puci_event ev;
+        while (puci_session_next_event(sess, &ev)) {
+            produced++;
+        }
+    }
+    CHECK(produced == 0);
+    puci_session_destroy(sess);
+    puci_context_destroy(ctx);
+}
+
+/* ALLOW_ALWAYS is explicitly scoped: it must auto-approve only the exact tool
+ * name already granted, keeping other (or repeated new) tool names behind the
+ * gate. We drive two turns: allow-always the tool, then begin a fresh turn; a
+ * new approval must be requested rather than silently auto-run as a different
+ * request. */
+static void test_allow_always_scope(void) {
+    char url[128];
+    pid_t pid = spawn_server(2, url, sizeof(url));
+    CHECK(pid > 0);
+    puci_context *ctx = NULL;
+    CHECK(puci_context_create(NULL, &ctx) == PUCI_OK);
+    puci_tool_spec tsc = { .name = "approve_me",
+                           .description = "t",
+                           .input_schema = "{}"};
+    evrun a = {0};
+    CHECK(puci_tool_register(ctx, &tsc, approve_me_invoke, &a) == PUCI_OK);
+    puci_session *sess = NULL;
+    make_session(ctx, url, &sess);
+    CHECK(puci_session_begin_turn(sess, "call the tool") == PUCI_OK);
+    uint64_t rid = drive_to_request(sess, &a);
+    CHECK(rid != 0);
+
+    /* ALLOW_ALWAYS for this exact tool. */
+    CHECK(puci_session_resolve_approval(sess, rid, PUCI_APPROVAL_ALLOW_ALWAYS) == PUCI_OK);
+    int requests = 0, terminals = 0;
+    for (int guard = 0; guard < 3000 && !terminals; guard++) {
+        int tm = -1;
+        CHECK(puci_session_next_timeout_ms(sess, &tm) == PUCI_OK);
+        struct pollfd fds[64];
+        size_t nf = 0;
+        CHECK(puci_session_get_fds(sess, fds, 64, &nf) == PUCI_OK);
+        int wait = tm < 0 ? 20 : tm;
+        if (wait < 1) wait = 1;
+        (void)poll(fds, (nfds_t)nf, wait);
+        CHECK(puci_session_process(sess, fds, nf) == PUCI_OK);
+        puci_event ev;
+        while (puci_session_next_event(sess, &ev)) {
+            if (ev.kind == PUCI_EVENT_APPROVAL_REQUEST) {
+                requests++;
+            }
+            if (ev.kind == PUCI_EVENT_TURN_COMPLETE) {
+                terminals++;
+            }
+        }
+    }
+    CHECK(a.called == 1); /* the allowed tool ran exactly once */
+    CHECK(requests == 0); /* second (tool) call auto-approved: scope held */
+
+    puci_session_destroy(sess);
+    puci_context_destroy(ctx);
+    stop_child(pid);
+}
+
 int main(void) {
     test_allow_once();
     test_deny();
@@ -620,5 +802,10 @@ int main(void) {
     test_cancel_wins();
     test_destroy_clears_pending();
     test_second_session_streams();
+    test_idle_process_no_error();
+    test_awaiting_approval_noop();
+    test_repeated_terminal_no_error();
+    test_idle_no_growth();
+    test_allow_always_scope();
     TEST_END();
 }
