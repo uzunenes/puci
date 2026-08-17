@@ -1349,7 +1349,7 @@ void tui_render_frame(void){
         if(oc >= cols-2) oc = cols>3 ? cols-3 : 0;
         int maxh = rows - or_ - 1; if(maxh<3) maxh=3; if(oh>maxh) oh=maxh;
         int maxw = cols - oc - 1; if(maxw<8) maxw=8; if(ow>maxw) ow=maxw;
-        for(int y=or_; y<or_+oh; y++) for(int x=oc; x<oc+ow; x++) tb_set_cell(x,y,' ', TB_WHITE, TB_BLUE);
+        for(int y=or_; y<or_+oh; y++) for(int x=oc; x<oc+ow; x++) tb_set_cell(x,y,' ', TB_WHITE, g_theme.surface);
         if(g_approval_feedback_mode){
             tb_draw_box(or_,oc,oh,ow,"Approval — deny with reason (Enter send, Esc cancel)",1);
         } else {
@@ -1365,7 +1365,7 @@ void tui_render_frame(void){
                     if(tok[0]=='+') fg = TB_GREEN|TB_BOLD;
                     else if(tok[0]=='-') fg = TB_RED|TB_BOLD;
                     char line[96]; snprintf(line,sizeof line,"%.*s", ow>2?ow-2:0, tok);
-                    tb_print(oc+1, yy, fg, TB_BLUE, line);
+                    tb_print(oc+1, yy, fg, g_theme.surface, line);
                 }
             }
             l++; tok=strtok_r(NULL,"\n",&save);
@@ -1382,7 +1382,7 @@ void tui_render_frame(void){
                 char hbuf[64];
                 if(g_hunk_max>1) snprintf(hbuf,sizeof hbuf,"%d/%d  j/k scroll", g_hunk_off+1, g_hunk_max);
                 else snprintf(hbuf,sizeof hbuf,"%d/%d", g_hunk_off+1, g_hunk_max);
-                tb_print(oc+1, fy, TB_CYAN, TB_BLUE, hbuf);
+                tb_print(oc+1, fy, TB_CYAN, g_theme.surface, hbuf);
             }
         }
     }
@@ -1394,7 +1394,7 @@ void tui_render_frame(void){
         if(oc >= cols-2) oc = cols>3 ? cols-3 : 0;
         int maxh = rows - or_ - 1; if(maxh<3) maxh=3; if(oh>maxh) oh=maxh;
         int maxw = cols - oc - 1; if(maxw<8) maxw=8; if(ow>maxw) ow=maxw;
-        for(int y=or_; y<or_+oh; y++) for(int x=oc; x<oc+ow; x++) tb_set_cell(x,y,' ', TB_WHITE, TB_BLUE);
+        for(int y=or_; y<or_+oh; y++) for(int x=oc; x<oc+ow; x++) tb_set_cell(x,y,' ', TB_WHITE, g_theme.surface);
         char mtitle[64]; if(g_pick_filter[0]) snprintf(mtitle,sizeof mtitle,"Model /%.30s", g_pick_filter); else snprintf(mtitle,sizeof mtitle,"Model — Enter select (Ctrl-Y copy)");
         tb_draw_box(or_,oc,oh,ow,mtitle,1);
         /* Viewport: keep the selection row visible, scroll to follow it. */
@@ -1408,12 +1408,12 @@ void tui_render_frame(void){
                     for(int x=oc+1;x<oc+ow-1;x++) tb_set_cell(x,yy,' ', TB_BLACK, TB_CYAN);
                     tb_print(oc+2, yy, TB_BLACK, TB_CYAN, k_models[src]);
                 } else {
-                    tb_print(oc+2, yy, TB_WHITE, TB_BLUE, k_models[src]);
+                    tb_print(oc+2, yy, TB_WHITE, g_theme.surface, k_models[src]);
                 }
             }
         }
-        if(g_pick_filtered_count==0) tb_print(oc+2,or_+1, TB_YELLOW, TB_BLUE, "(no match)");
-        tb_print(oc+2,or_+oh-1, TB_CYAN, TB_BLUE, "type filter  Ctrl-Y copy  Esc cancel");
+        if(g_pick_filtered_count==0) tb_print(oc+2,or_+1, g_theme.warning, g_theme.surface, "(no match)");
+        tb_print(oc+2,or_+oh-1, g_theme.accent, g_theme.surface, "type filter  Ctrl-Y copy  Esc cancel");
     }
     if(g_mode==2){
         // sessions picker overlay already via sidebar, but add help
