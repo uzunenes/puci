@@ -1555,8 +1555,14 @@ puci_status puci_agent_process(puci_session *sess, const struct pollfd *fds,
     if (!sess) {
         return PUCI_ERR_INVALID_ARG;
     }
+    /* Contract A: process() is legal in every non-destroyed session state and
+     * becomes a safe no-op when there is no active turn (the session is idle
+     * or the previous turn is already terminal). This lets a host drive all of
+     * its sessions from one unconditional poll() loop without checking state
+     * first - an idle/generating/awaiting/complete session can all be fed
+     * through process() every iteration without error. */
     if (!sess->run) {
-        return PUCI_ERR_OUT_OF_STATE;
+        return PUCI_OK;
     }
     if (sess->in_process || sess->run->in_process) {
         return PUCI_ERR_OUT_OF_STATE;
