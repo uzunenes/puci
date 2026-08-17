@@ -66,6 +66,14 @@ test_approval = executable(
 )
 test('test_approval', test_approval)
 
+test_approval_event = executable(
+    'test_approval_event',
+    'integration/test_approval_event.c',
+    include_directories: [internal_inc],
+    dependencies: puci_static_dep,
+)
+test('test_approval_event', test_approval_event, timeout: 120)
+
 test_session_api = executable(
     'test_session_api',
     'unit/test_session_api.c',
