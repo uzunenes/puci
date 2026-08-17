@@ -21,6 +21,7 @@
 #endif
 #define TB_IMPL
 #include "vendor/termbox2.h"
+#include "ttg.h"
 #ifdef __clang__
 #pragma clang diagnostic pop
 #elif defined(__GNUC__)
@@ -261,6 +262,9 @@ typedef struct Pane {
     int cached_inner_w; // to invalidate on resize
     char stream_buf[STREAM_BUF];
     size_t stream_len;
+    /* Streaming TTG-envelope filter state: carries a partial envelope across
+       chunks so it can never reach the Ring as visible content. */
+    puci_ttg_state ttg;
     int scroll_off; // 0=bottom, >0 scrolled up (visual lines)
     int pending_nl;
     int need_wrap_recalc;
@@ -1487,61 +1491,68 @@ static void stream_append_segment(Pane *p, const char *s, size_t n){
 }
 
 static void pane_stream_begin(Pane *p){
-    p->streaming=1; p->stream_len=0; p->stream_buf[0]=0; p->pending_nl=0;
+    p->streaming=1; p->stream_len=0; p->stream_buf[0]=0;
+    p->pending_nl=0; puci_ttg_reset(&p->ttg);
     ring_push_typed(&p->ring, "", RL_ASSISTANT);
+}
+
+/* Thin wrapper: strips TTG envelopes via the shared ttg module and keeps
+ * tracing the completed-envelope latency (TTG metric). */
+static size_t pane_ttg_filter(Pane *p, const char *txt, size_t len,
+                              char *out, size_t outcap, int *trace_hits){
+    char dig[64];
+    size_t o = puci_ttg_filter(&p->ttg, txt, len, out, outcap, dig, sizeof dig, trace_hits);
+    if(dig[0]){
+        uint64_t sent = strtoull(dig, NULL, 10);
+        if(sent > 0){
+            uint64_t now = trace_now_mono_ns();
+            int64_t ttg = (int64_t)(now - sent);
+            if(ttg >= 0 && ttg < 1000000000LL){
+                TRACE(TR_EVENT, (uint32_t)(10000 + ttg/1000000));
+            }
+        }
+    }
+    return o;
 }
 
 static void pane_stream_append(Pane *p, const char *txt, size_t len){
     if(!p->streaming){
         pane_stream_begin(p);
     }
-    // TTG sentinel detection: look for U+2063 (E2 81 A3) markers
-    const unsigned char *end = (const unsigned char *)txt + len;
-    const unsigned char *a = (const unsigned char *)txt;
-    /* Scan within bounds and only accept full 3-byte sentinels. */
-    while ((size_t)(end - a) >= 6) {
-        if (*a == 0xE2 && memcmp(a, "\xE2\x81\xA3", 3) == 0) {
-            const unsigned char *b = a + 3; /* start of digits */
-            /* Find the closing sentinel (E2 81 A3), fully validated. */
-            const unsigned char *c = b;
-            while ((size_t)(end - c) >= 6) {
-                if (*c == 0xE2 && memcmp(c, "\xE2\x81\xA3", 3) == 0) break;
-                c++;
+    if(len==0) return;
+    /* 1) Strip TTG envelopes at the stream boundary (never reaches Ring). */
+    char filt[STREAM_BUF + 2];
+    size_t flen;
+    int dev;
+    if(len <= STREAM_BUF){
+        flen = pane_ttg_filter(p, txt, len, filt, sizeof filt, &dev);
+    } else {
+        size_t off=0; flen=0;
+        while(off<len){
+            size_t sub = len-off; if(sub>STREAM_BUF) sub=STREAM_BUF;
+            char tmp[STREAM_BUF+2]; int th; char dig[256];
+            size_t t = puci_ttg_filter(&p->ttg, txt+off, sub, tmp, sizeof tmp, dig, sizeof dig, &th);
+            if(dig[0] && th>0){
+                uint64_t sent = strtoull(dig, NULL, 10);
+                if(sent>0){ uint64_t now=trace_now_mono_ns(); int64_t ttg=(int64_t)(now-sent);
+                    if(ttg>=0 && ttg<1000000000LL) TRACE(TR_EVENT,(uint32_t)(10000+ttg/1000000)); }
             }
-            if ((size_t)(end - c) >= 6 && (size_t)(c - a) < 64) {
-                /* Digits run from b (after first sentinel) to c (second sentinel). */
-                size_t dlen = (size_t)(c - b);
-                if (dlen > 0 && dlen < 24) {
-                    char num[24];
-                    memcpy(num, b, dlen); num[dlen] = 0;
-                    uint64_t sent = strtoull(num, NULL, 10);
-                    if (sent > 0) {
-                        uint64_t now = trace_now_mono_ns();
-                        int64_t ttg = (int64_t)(now - sent);
-                        if (ttg >= 0 && ttg < 1000000000LL) {
-                            TRACE(TR_EVENT, (uint32_t)(10000 + ttg / 1000000));
-                        }
-                    }
-                }
-                a = c + 3;
-                continue;
-            }
+            memcpy(filt+flen, tmp, t); flen += t;
+            off += sub;
         }
-        a++;
+        dev = flen;
     }
-    size_t add = len < STREAM_BUF - p->stream_len -1 ? len : STREAM_BUF - p->stream_len -1;
-    memcpy(p->stream_buf + p->stream_len, txt, add); p->stream_len+=add; p->stream_buf[p->stream_len]=0;
+    (void)dev;
+    /* 2) Feed the filtered bytes through newline/CR splitting into the ring. */
     size_t off=0;
-    while(off < len){
-        const char *nl = (const char*)memchr(txt+off, '\n', len-off);
-        size_t clen = nl ? (size_t)(nl - (txt+off)) : (len - off);
-        // filter \r inside the segment (handle \r\n)
+    while(off < flen){
+        const char *nl = (const char*)memchr(filt+off, '\n', flen-off);
+        size_t clen = nl ? (size_t)(nl - (filt+off)) : (flen - off);
+        /* filter \r inside the segment (handle \r\n) */
         char tmp[RING_COLS]; size_t w=0;
-        for(size_t k=0;k<clen && w<RING_COLS-1;k++) if(txt[off+k]!='\r') tmp[w++]=txt[off+k];
+        for(size_t k=0;k<clen && w<RING_COLS-1;k++) if(filt[off+k]!='\r') tmp[w++]=filt[off+k];
         if(w>0) stream_append_segment(p, tmp, w);
         if(nl){
-            // newline seen: record a pending line break (counted, so consecutive
-            // newlines yield consecutive blank logical lines).
             p->pending_nl += 1;
             off += clen + 1;
         } else {
@@ -1553,8 +1564,15 @@ static void pane_stream_append(Pane *p, const char *txt, size_t len){
 static void pane_stream_end(Pane *p){
     if(p->streaming){
         p->streaming=0;
-        /* Materialize trailing empty lines. P=1 trailing newline after content
-           closes the current line (no blank); each extra newline emits a blank. */
+        /* A TTG envelope that reached turn completion without its closing
+           marker is not real instrumentation: flush any genuinely-partial
+           content bytes (a lone <=3-byte marker is dropped). */
+        char rest[PUCI_TTG_CARRY_MAX + 8];
+        size_t n = puci_ttg_flush(&p->ttg, rest, sizeof rest);
+        if(n > 0){
+            pane_stream_append(p, rest, n);
+        }
+        /* Materialize trailing empty lines. */
         if(p->pending_nl > 0){
             for(int i=0; i < p->pending_nl-1 && i < 64; i++){
                 ring_push_typed(&p->ring, "", RL_ASSISTANT);
@@ -1777,7 +1795,7 @@ int puci_tui_run(const puci_cli_params *params){
                                 /* Never load a session over an in-flight turn: cancel
                                    it first so library state isn't corrupted. */
                                 if(pp->streaming) puci_session_cancel(pp->sess);
-                                pp->streaming=0; pp->pending_nl=0; pp->scroll_off=0;
+                                pp->streaming=0; pp->pending_nl=0; puci_ttg_reset(&pp->ttg); pp->scroll_off=0;
                                 char loaded[128]; if(puci_cli_load_session(pp->sess, id, loaded,sizeof loaded)==0){
                                     ring_push_typed(&pp->ring, "— resumed session —", RL_SYSTEM);
                                     char msg[160]; snprintf(msg,sizeof msg,"Loaded %s (%s)", id, g_sess_list[src].model);
@@ -1852,11 +1870,11 @@ int puci_tui_run(const puci_cli_params *params){
                         if(g_input_len>0){
                             history_save_line(g_input);
                             if(g_input[0]=='/'){
-                                if(strcmp(g_input,"/clear")==0){ Pane *pp=&g_panes[g_focus]; if(pp->sess) puci_session_cancel(pp->sess); pp->streaming=0; pp->pending_nl=0; pp->ring.count=0; pp->ring.head=0; pp->scroll_off=0; if(pp->sess) puci_session_clear(pp->sess); ring_push_typed(&pp->ring,"— cleared —", RL_SYSTEM); }
+                                if(strcmp(g_input,"/clear")==0){ Pane *pp=&g_panes[g_focus]; if(pp->sess) puci_session_cancel(pp->sess); pp->streaming=0; pp->pending_nl=0; puci_ttg_reset(&pp->ttg); pp->ring.count=0; pp->ring.head=0; pp->scroll_off=0; if(pp->sess) puci_session_clear(pp->sess); ring_push_typed(&pp->ring,"— cleared —", RL_SYSTEM); }
                                 else if(strcmp(g_input,"/help")==0 || strcmp(g_input,"/?")==0){ ring_push_typed(&g_panes[g_focus].ring,"/clear /help /model [name] /sessions /new /compact /doctor /plan", RL_SYSTEM); ring_push_typed(&g_panes[g_focus].ring,"Keys: Enter send  Ctrl+J newline  Esc cancel  ↑↓ history/scroll  s sessions  m model  g/G top/bottom  q or Ctrl+C quit", RL_SYSTEM); }
                                 else if(strncmp(g_input,"/model",6)==0 && (g_input[6]=='\0' || g_input[6]==' ')){ char *arg=g_input+6; while(*arg==' ') arg++; if(*arg){ setenv("PUCI_MODEL",arg,1); puci_status _mst=apply_model_to_panes(arg); if(_mst==PUCI_OK){ snprintf(g_current_model,sizeof g_current_model,"%.255s",arg); char msg[160]; snprintf(msg,sizeof msg,"Model → %.120s",arg); ring_push_typed(&g_panes[g_focus].ring,msg,RL_SYSTEM); } else { char _em[200]; snprintf(_em,sizeof _em,"Model %.120s NOT applied (err %s)", arg, puci_status_string(_mst)); ring_push_typed(&g_panes[g_focus].ring,_em,RL_ERROR); } } else { models_init_static(); picker_open(3); fetch_live_models(); if(g_mode==3) rebuild_pick_filter(); } }
                                 else if(strcmp(g_input,"/sessions")==0 || strcmp(g_input,"/s")==0){ load_sessions(); picker_open(2); }
-                                else if(strcmp(g_input,"/new")==0){ Pane *pp=&g_panes[g_focus]; if(pp->sess){ TRACE(TR_SAVE,1); puci_cli_save_session(pp->sess, pp->session_id); puci_session_cancel(pp->sess); puci_session_clear(pp->sess); } pp->streaming=0; pp->pending_nl=0; pp->ring.count=0; pp->ring.head=0; pp->scroll_off=0; snprintf(pp->session_id,sizeof pp->session_id,"tui-%ld-%d-%d",(long)time(NULL),g_focus,++g_sess_seq); ring_push_typed(&pp->ring,"— new session —", RL_SYSTEM); }
+                                else if(strcmp(g_input,"/new")==0){ Pane *pp=&g_panes[g_focus]; if(pp->sess){ TRACE(TR_SAVE,1); puci_cli_save_session(pp->sess, pp->session_id); puci_session_cancel(pp->sess); puci_session_clear(pp->sess); } pp->streaming=0; pp->pending_nl=0; puci_ttg_reset(&pp->ttg); pp->ring.count=0; pp->ring.head=0; pp->scroll_off=0; snprintf(pp->session_id,sizeof pp->session_id,"tui-%ld-%d-%d",(long)time(NULL),g_focus,++g_sess_seq); ring_push_typed(&pp->ring,"— new session —", RL_SYSTEM); }
                                 else if(strcmp(g_input,"/compact")==0){ Pane *pp=&g_panes[g_focus]; if(pp->sess){ size_t pr=0; puci_session_compact_context(pp->sess,&pr); char msg[96]; snprintf(msg,sizeof msg,"Compacted %zu bytes",pr); ring_push_typed(&pp->ring,msg,RL_SYSTEM); } }
                                 else if(strcmp(g_input,"/doctor")==0){ puci_provider_config *pc=puci_cli_provider("openai"); char msg[256]; snprintf(msg,sizeof msg,"model=%s base=%s", pc?pc->model:"?", pc?pc->base_url:"?"); ring_push_typed(&g_panes[g_focus].ring,msg,RL_SYSTEM); }
                                 else if(strcmp(g_input,"/plan")==0){ ring_push_typed(&g_panes[g_focus].ring,"plan mode: use --plan flag for now", RL_SYSTEM); }

@@ -205,3 +205,12 @@ test_two_agents = executable(
 test('test_two_agents', test_two_agents, timeout: 60)
 
 
+
+# TTG envelope filter is dependency-free (src/cli/tui/ttg.c) so it links
+# standalone; include both src/cli (for ttg.h) and the test source itself.
+test_ttg = executable(
+    'test_ttg',
+    ['unit/test_ttg.c', '../src/cli/tui/ttg.c'],
+    include_directories: [include_directories('../src/cli/tui')],
+)
+test('test_ttg', test_ttg)
