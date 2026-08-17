@@ -1,59 +1,64 @@
-# PUCI TUI — Featherweight Terminal UI (v0.5.0)
+# PUCI TUI — Conversation-First Terminal UI (v0.5)
 
-Single dual-mode `puci` binary, pure POSIX ANSI (no ncurses), <100 KB TUI heap.
+A single conversation-first screen with a reliable multiline composer,
+streaming render, predictable scrolling, event-driven (non-blocking)
+approvals, and simple session/model pickers. Built on termbox2
+(`vendor/termbox2.h`); implementation in `src/cli/tui/tui.c`.
 
 ## Invocation
 
 ```
-puci              → TUI if isatty(0)&&isatty(1), else REPL
-puci --tui        → force TUI
-puci --no-tui     → force REPL
-puci run "prompt" → headless (pipe-safe)
-PUCI_NO_TUI=1 puci → suppress
+puci              -> TUI if isatty(0) && isatty(1), else REPL
+puci --tui        -> force TUI
+puci --no-tui     -> force REPL
+puci run "prompt" -> headless (pipe-safe)
+PUCI_NO_TUI=1 puci -> suppress
 ```
 
 ## Architecture
 
-- `src/cli/tui/tui.c` (~700 LOC) + `tui.h` + `vendor/termbox2.h` — `tb_init/tb_present` double-buffer, `poll([STDIN,…session_fds])` master (250 ms idle).
-- Ring: `RING 800×4096` + `ring_append_to_last` stream coalescing → word-wrap at render (`wrap_visual_count`).
-- Markdown light: `tb_print_styled` inline `**bold**`, `` `code` ``, `# heading`, `- list`, `> quote`, `[text](url)` underline at render (no extra alloc).
-- History: `~/.local/share/puci/history` (200 lines), `↑/↓` navigates in input, `history_save_line` dedup.
-- Slash: `/clear /help /model [name] /sessions /new /compact /doctor /plan` handled inline, no network.
-- Dirty: key, `TOKEN_DELTA` coalesce, `TURN_COMPLETE`, `SIGWINCH`, 2 Hz gauge (500 ms). No 60 Hz flicker (`tb_present` dirty diff).
+- `poll()` master loop over `[STDIN, ... session_fds]`. The fd array is sized
+  dynamically from `puci_session_get_fds()` so a pane FD is never silently
+  dropped. A capped 250 ms idle timeout lets signals and new input arrive.
+- **Idle CPU**: rendering is only forced on a cheap 100 ms tick while
+  something is actually animating (streaming, an open dialog, or a pending
+  model fetch). A fully static idle screen does not repaint on a timer, so
+  idle CPU stays near zero.
+- **Ring**: `RING_LINES x RING_COLS` logical lines with a per-line role
+  (user/assistant/tool/system/error). `ring_append_to_last()` spills a full
+  line into new ring rows instead of silently dropping tail bytes.
+- **UTF-8**: the composer collects full code points (including sequences split
+  across stdin reads) and moves/backspaces by code point, so multi-byte text
+  is never cut. Rendering advances columns by display width via
+  `utf8_seq_width()` and only emits whole code points, so wrapping never
+  splits a character.
+- Consecutive blank lines are preserved (a pending-newline counter
+  materializes them). `wrap_visual_count("") == 1` matches the render slice,
+  so blank lines are never dropped and scroll math stays consistent.
 
 ## Views
 
-1. **Chat Flow (fixed)** — assistant stream coalesced into single logical line, word-wrapped to pane width, `↑/↓` scroll, `PgUp/Dn`, `g` top / `G` bottom, `%` indicator.
-2. **Swarm Grid (2×2)** — each pane = one `puci_session` on same host `poll()`. N=1 single pane, N>4 paginated.
-3. **Gauges** — `Context cur/budget` (`puci_session_context_bytes()`), `RSS/PSS` live 2 Hz.
-4. **Diff & Approval** — `puci_approval_cb` → `y`/`n` overlay, `j/k` hunk, `+` green/`-` red.
-5. **Session Picker (`s`)** — `opendir(~/.local/share/puci/sessions)` real list, `↑/↓` + `Enter` → `puci_cli_load_session`, title update, autosave on `TURN_COMPLETE`.
-6. **Model Picker (`m`)** — `↑/↓` + `Enter` over 12-model curated list (`deepseek-chat` cheap, `claude-3.5-sonnet`, `gpt-4o-mini`…), sets `PUCI_MODEL`.
+1. **Conversation (fixed, primary)** - one full-width pane.
+2. **Multiline composer** - grows 1 -> 8 rows, then scrolls.
+3. **Session picker (`s`)** - list + filter, Enter loads exactly one.
+4. **Model picker (`m`)** - static + async-fetched list; the background
+   fetch never blocks the loop.
+5. **Approval dialog** - event-driven `puci_session_resolve_approval()`
+   asynchronous; the main `poll()` keeps serving other FDs, resize, timers
+   and other sessions while the dialog is open.
 
-## Poll Ring
+Responsive: optional sidebar on wide terminals; layout clamps at small sizes
+with a clear "Window too small" screen below the supported minimum.
 
-```c
-for(;;){
-  fds[0]=STDIN; for each sess: get_fds(fds+n); timeout=min(session_to, gauge_due, 250);
-  poll(fds,n,timeout);
-  if(stdin POLLIN) handle_key(); // word-wise, cursor, ESC arrows
-  for each sess: process(); while(next_event){
-    TOKEN_DELTA → pane_stream_append (coalesce, not ring_push)
-    TOOL_* / TURN_COMPLETE → ring_push_typed + scroll_off=0
-  }
-  if(dirty) tui_render_frame();
-}
-```
+## Terminal lifecycle
 
-## Keys
+All exit paths (`q`, `Ctrl+C` with nothing running, EOF, `SIGTERM`, `SIGHUP`,
+and startup/fatal errors) run `tui_teardown()` -> `tb_shutdown()`, which
+restores the alternate screen, cursor visibility, and input/output modes.
+`SIGTERM`/`SIGHUP` are trapped to that clean path so a kill leaves the shell
+unbroken.
 
-`Enter` prompt/send (`/cmd` for slash), `Esc` cancel, `↑/↓` history (in input) or scroll (in pager) / picker, `PgUp/Dn`, `g`/`G` top/bottom, `←/→` cursor, `Ctrl-U` clear,
-`TAB` pane, `s` sessions picker, `m` model picker, `q` quit, `y/n` approval, `?` help.
+## Keybindings
 
-## Speed vs jcode
-
-PUCI TUI: single `poll([STDIN,…sess])` 250 ms idle, `tb_present` cell diff, <60 KB `RING` + 173 KB binary (termbox2 header-only, no tokio), 14 ms first-frame capable. jcode: `tokio` multi-thread + `ratatui` widget tree — same dirty ideas, 30× heavier binary.
-
-## Embed Guarantee
-
-`src/lib/` unchanged, no TUI dep. CLI only. Tested `isatty` fallback to REPL in CI.
+See `docs/KEYBINDINGS.md` for the full, implementation-matched reference
+(normal mode, composer, both pickers, approval dialog, and slash commands).
