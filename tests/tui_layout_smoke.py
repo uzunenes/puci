@@ -18,7 +18,7 @@ import os, sys, time, subprocess, pty, fcntl, termios, struct, select, signal
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FAKE = os.path.join(HERE, "fake_sse.py")
-PUCI = os.path.abspath(os.path.join(HERE, "..", "build", "src", "cli", "puci"))
+PUCI = os.environ.get("PUCI_BIN") or os.path.abspath(os.path.join(HERE, "..", "build", "src", "cli", "puci"))
 
 SIZES = [(60, 15), (80, 24), (120, 30), (200, 50)]
 ASSISTANT_MARKER = "tok"   # fake_sse emits "...tok0 tok1 ... "
