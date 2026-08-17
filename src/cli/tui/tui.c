@@ -144,8 +144,10 @@ static inline void trace_emit(uint32_t phase, uint32_t extra){
 #define STREAM_BUF 16384
 
 static volatile sig_atomic_t g_winch = 0;
+static volatile sig_atomic_t g_terminate = 0; /* SIGTERM/SIGHUP -> clean teardown */
 static struct sigaction g_old_winch;
 static void on_winch(int s){ (void)s; g_winch=1; }
+static void on_terminate(int s){ (void)s; g_terminate=1; }
 
 /* ── Semantic theme tokens ──────────────────────────────────────────
    All colour decisions go through this palette so overlay/header blue
@@ -603,13 +605,13 @@ static int fetch_models_into(char out[][128], int cap, int *err){
 /* Detached worker thread for the model fetch. Writes only its own private
  * buffers, then signals g_live_done. The main thread pumps the result. */
 static char g_live[MAX_MODELS][128];
-static int  g_live_cnt = 0;
+static _Atomic int g_live_cnt = 0;
 static _Atomic int g_live_inflight = 0;
 static _Atomic int g_live_done     = 0;
 static void *models_fetch_thread(void *arg){
     (void)arg;
     int e=0;
-    g_live_cnt = fetch_models_into(g_live, MAX_MODELS, &e);
+    atomic_store(&g_live_cnt, fetch_models_into(g_live, MAX_MODELS, &e));
     atomic_store(&g_live_done, 1);
     atomic_store(&g_live_inflight, 0);
     return NULL;
@@ -635,13 +637,32 @@ static void begin_models_fetch(void){
     }
 }
 
+/* Query entry point used by the picker. Launches a background fetch so keying
+ * 'm' never blocks the TUI (previously curl_easy_perform froze it up to 6s). */
+static void rebuild_pick_filter(void);   /* defined below; used by pump */
+static int g_pick_sel;                    /* tentative definitions (real defs below) */
+static int g_pick_filtered_count;
+static int g_mode;
+
 /* Called every frame from the renderer: if a background fetch finished,
  * install the fresh list into the picker globals. */
-static void pump_models_fetch(void){
-    if(!atomic_load(&g_live_done)) return;
-    if(g_live_cnt>0) models_install(g_live, g_live_cnt);
+static int pump_models_fetch(void){
+    if(!atomic_load(&g_live_done)) return 0;
+    if(g_live_cnt>0){
+        models_install(g_live, g_live_cnt);
+        /* The async list replaced k_models; refresh the picker's filtered
+           view so fetched entries become visible and the selection stays in
+           range (Phase 5: async results update safely, selection on-screen). */
+        if(g_mode==3){
+            rebuild_pick_filter();
+            if(g_pick_sel >= g_pick_filtered_count)
+                g_pick_sel = g_pick_filtered_count>0 ? g_pick_filtered_count-1 : 0;
+        }
+    }
     g_live_cnt=0;
     atomic_store(&g_live_done, 0);
+    /* Indicate whether anything changed so the caller can schedule a repaint. */
+    return 1;
 }
 
 /* Query entry point used by the picker. Launches a background fetch so keying
@@ -1558,6 +1579,14 @@ int puci_tui_run(const puci_cli_params *params){
     }
     if(!headless){ tb_set_input_mode(TB_INPUT_ESC); tb_set_output_mode(TB_OUTPUT_NORMAL); }
     struct sigaction sa; memset(&sa,0,sizeof sa); sa.sa_handler=on_winch; sigemptyset(&sa.sa_mask); sa.sa_flags=SA_RESTART; sigaction(SIGWINCH,&sa,&g_old_winch);
+    /* SIGTERM/SIGHUP must restore the terminal on exit rather than leaving the
+       shell in the alternate screen with a hidden cursor. We install a handler
+       that sets g_terminate; the event loop then runs the normal, synchronous
+       teardown (tb_shutdown restores alt-screen/cursor/input mode). */
+    static struct sigaction ter;
+    memset(&ter,0,sizeof ter); ter.sa_handler=on_terminate; sigemptyset(&ter.sa_mask); ter.sa_flags=SA_RESTART;
+    sigaction(SIGTERM,&ter,NULL);
+    sigaction(SIGHUP,&ter,NULL);
     g_npane=1; g_focus=0; g_mode=0;
     for(int i=0;i<MAX_PANES;i++){ memset(&g_panes[i],0,sizeof g_panes[i]); snprintf(g_panes[i].title,sizeof g_panes[i].title,"Agent %c",'A'+i); snprintf(g_panes[i].session_id,sizeof g_panes[i].session_id,"tui-%ld-%d-%d",(long)time(NULL),i,++g_sess_seq); g_panes[i].scroll_off=0; g_panes[i].layout_dirty=1; g_panes[i].cached_inner_w=-1; g_panes[i].cached_total_vis=-1; }
     puci_context *ctx=NULL;
@@ -1605,12 +1634,25 @@ int puci_tui_run(const puci_cli_params *params){
     int dirty=1;
     int running=1;
     while(running){
+        if(g_terminate){ running=0; break; } /* SIGTERM/SIGHUP: clean teardown */
         if(g_winch){ g_winch=0; get_winsize(&g_rows,&g_cols); dirty=1; for(int _di=0;_di<MAX_PANES;_di++){ g_panes[_di].layout_dirty=1; g_panes[_di].cached_inner_w=-1; } }
         if(exit_after_ms>0){ struct timespec now; clock_gettime(CLOCK_MONOTONIC,&now); long el=(now.tv_sec-tui_start.tv_sec)*1000 + (now.tv_nsec-tui_start.tv_nsec)/1000000; if(el>=exit_after_ms) running=0; }
         {
-            struct timespec ng; clock_gettime(CLOCK_MONOTONIC,&ng);
-            long ge = (ng.tv_sec-last_gauge.tv_sec)*1000 + (ng.tv_nsec-last_gauge.tv_nsec)/1000000;
-            if(ge >= 500){ dirty=1; last_gauge=ng; }
+            /* Pump a finished background model fetch. Only when it installs a
+               model change do we need to repaint. */
+            if(pump_models_fetch()) dirty=1;
+            /* Cheap-timeout repaint: force a frame only when there is live
+               streaming, a visible dialog, or pending work. Skip it entirely
+               for a fully static idle screen so we avoid a 2 Hz full redraw. */
+            {
+                int live=0;
+                for(int _t=0;_t<g_npane;_t++) if(g_panes[_t].streaming) live=1;
+                if(live || g_approval_pending || atomic_load(&g_live_done)){
+                    struct timespec ng; clock_gettime(CLOCK_MONOTONIC,&ng);
+                    long ge=(ng.tv_sec-last_gauge.tv_sec)*1000+(ng.tv_nsec-last_gauge.tv_nsec)/1000000;
+                    if(ge>=100){ dirty=1; last_gauge=ng; }
+                }
+            }
         }
         if(dirty){ tui_render_frame(); dirty=0; }
         /* Dynamically sized fd array: never silently drop a session fd
@@ -1669,9 +1711,18 @@ int puci_tui_run(const puci_cli_params *params){
         }
         if(pr<0){ free(fds); if(errno==EINTR) continue; else { struct timespec _ts={0,20000000L}; nanosleep(&_ts,NULL); continue; } }
         if(pr==0){
-            struct timespec ng3; clock_gettime(CLOCK_MONOTONIC,&ng3);
-            long ge2 = (ng3.tv_sec-last_gauge.tv_sec)*1000 + (ng3.tv_nsec-last_gauge.tv_nsec)/1000000;
-            if(ge2 >= 500) dirty=1;
+            /* A timeout is the idle case: only repaint on a cheap tick when
+               there is actually something animated, never on a static idle
+               screen (the previous gauge-driven 2 Hz redraw is gone). */
+            {
+                int live=0;
+                for(int _t=0;_t<g_npane;_t++) if(g_panes[_t].streaming) live=1;
+                if((live || g_approval_pending || atomic_load(&g_live_done))){
+                    struct timespec ng3; clock_gettime(CLOCK_MONOTONIC,&ng3);
+                    long ge2 = (ng3.tv_sec-last_gauge.tv_sec)*1000 + (ng3.tv_nsec-last_gauge.tv_nsec)/1000000;
+                    if(ge2 >= 100) dirty=1;
+                }
+            }
         }
         if(pr>0 && (fds[0].revents&(POLLIN|POLLHUP|POLLERR|POLLNVAL))){
             char buf[128]; ssize_t n=read(STDIN_FILENO,buf,sizeof buf);
@@ -1796,13 +1847,13 @@ int puci_tui_run(const puci_cli_params *params){
                     continue;
                 }
                 if(g_input_mode){
-                    if(c=='\n'||c=='\r'){
+                    if(c=='\r'){   /* Enter sends */
                         g_input[g_input_len]=0;
                         if(g_input_len>0){
                             history_save_line(g_input);
                             if(g_input[0]=='/'){
                                 if(strcmp(g_input,"/clear")==0){ Pane *pp=&g_panes[g_focus]; if(pp->sess) puci_session_cancel(pp->sess); pp->streaming=0; pp->pending_nl=0; pp->ring.count=0; pp->ring.head=0; pp->scroll_off=0; if(pp->sess) puci_session_clear(pp->sess); ring_push_typed(&pp->ring,"— cleared —", RL_SYSTEM); }
-                                else if(strcmp(g_input,"/help")==0 || strcmp(g_input,"/?")==0){ ring_push_typed(&g_panes[g_focus].ring,"/clear /help /model [name] /sessions /new /compact /doctor /plan", RL_SYSTEM); ring_push_typed(&g_panes[g_focus].ring,"Keys: Enter send  Esc cancel  ↑↓ history/scroll  s sessions  m model  g/G top/bottom", RL_SYSTEM); }
+                                else if(strcmp(g_input,"/help")==0 || strcmp(g_input,"/?")==0){ ring_push_typed(&g_panes[g_focus].ring,"/clear /help /model [name] /sessions /new /compact /doctor /plan", RL_SYSTEM); ring_push_typed(&g_panes[g_focus].ring,"Keys: Enter send  Ctrl+J newline  Esc cancel  ↑↓ history/scroll  s sessions  m model  g/G top/bottom  q or Ctrl+C quit", RL_SYSTEM); }
                                 else if(strncmp(g_input,"/model",6)==0 && (g_input[6]=='\0' || g_input[6]==' ')){ char *arg=g_input+6; while(*arg==' ') arg++; if(*arg){ setenv("PUCI_MODEL",arg,1); puci_status _mst=apply_model_to_panes(arg); if(_mst==PUCI_OK){ snprintf(g_current_model,sizeof g_current_model,"%.255s",arg); char msg[160]; snprintf(msg,sizeof msg,"Model → %.120s",arg); ring_push_typed(&g_panes[g_focus].ring,msg,RL_SYSTEM); } else { char _em[200]; snprintf(_em,sizeof _em,"Model %.120s NOT applied (err %s)", arg, puci_status_string(_mst)); ring_push_typed(&g_panes[g_focus].ring,_em,RL_ERROR); } } else { models_init_static(); picker_open(3); fetch_live_models(); if(g_mode==3) rebuild_pick_filter(); } }
                                 else if(strcmp(g_input,"/sessions")==0 || strcmp(g_input,"/s")==0){ load_sessions(); picker_open(2); }
                                 else if(strcmp(g_input,"/new")==0){ Pane *pp=&g_panes[g_focus]; if(pp->sess){ TRACE(TR_SAVE,1); puci_cli_save_session(pp->sess, pp->session_id); puci_session_cancel(pp->sess); puci_session_clear(pp->sess); } pp->streaming=0; pp->pending_nl=0; pp->ring.count=0; pp->ring.head=0; pp->scroll_off=0; snprintf(pp->session_id,sizeof pp->session_id,"tui-%ld-%d-%d",(long)time(NULL),g_focus,++g_sess_seq); ring_push_typed(&pp->ring,"— new session —", RL_SYSTEM); }
@@ -1819,6 +1870,11 @@ int puci_tui_run(const puci_cli_params *params){
                             }
                         }
                         g_input_len=0; g_input[0]=0; g_input_curs=0; g_input_mode=0;
+                    } else if(c=='\n'){ /* Ctrl+J: insert a newline (multiline) */
+                        if(g_input_len+1 < sizeof g_input){
+                            memmove(g_input+g_input_curs+1, g_input+g_input_curs, g_input_len - g_input_curs +1);
+                            g_input[g_input_curs++]='\n'; g_input_len++;
+                        }
                     } else if(c==127 || c==8){
                         if(g_input_curs>0){
                             int dl=utf8_prev_len((const unsigned char*)g_input, g_input_curs);
@@ -1963,7 +2019,7 @@ int puci_tui_run(const puci_cli_params *params){
                     else if(c=='g'){ Pane *pp=&g_panes[g_focus]; pp->scroll_off=9999; }
                     else if(c=='G'){ Pane *pp=&g_panes[g_focus]; pp->scroll_off=0; }
                     else if(c=='?'){
-                        ring_push_typed(&g_panes[g_focus].ring,"Keys: Enter prompt  ↑↓/PgUpDn scroll  s sessions  m model  TAB pane  q quit  g/G top/bottom", RL_SYSTEM);
+                        ring_push_typed(&g_panes[g_focus].ring,"Keys: Enter prompt  ↑↓/j k/PgUpDn scroll  s sessions  m model  TAB pane  q or Ctrl+C quit  g/G top/bottom", RL_SYSTEM);
                     }
                 }
             }
