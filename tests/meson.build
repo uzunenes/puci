@@ -226,6 +226,17 @@ test_content = executable(
 )
 test('test_content', test_content)
 
+# Owned semantic conversation model (conv.c) links standalone with md.c /
+# content helpers. Verifies raw-source ownership, code-part derivation +
+# exact copy, plain-text copy, multi-segment ordering, JSON round-trip.
+test_conv = executable(
+    'test_conv',
+    ['unit/test_conv.c',
+     '../src/cli/tui/conv.c', '../src/cli/tui/md.c'],
+    include_directories: [include_directories('../src/cli/tui')],
+)
+test('test_conv', test_conv)
+
 # Semantic TUI-polish grid assertions (PTY render integrity). Guarded on
 # python3 being present; uses the shell-captured binary (PUCI_BIN) or the
 # in-tree build. These are heavier PTY tests, so keep them out of the default

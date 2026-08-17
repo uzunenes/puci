@@ -44,7 +44,7 @@ if curl_dep.found()
     cli_c_args += '-DHAVE_CURL=1'
 endif
 
-tui_sources = files('tui/tui.c', 'tui/ttg.c', 'tui/content.c', 'tui/md.c', 'tui/hl.c', 'tui/clip.c')
+tui_sources = files('tui/tui.c', 'tui/ttg.c', 'tui/content.c', 'tui/md.c', 'tui/hl.c', 'tui/clip.c', 'tui/conv.c')
 if get_option('tui').enabled()
     cli_sources += tui_sources
     cli_deps += termbox2_dep
