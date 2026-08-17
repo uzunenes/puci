@@ -146,6 +146,34 @@ static inline void trace_emit(uint32_t phase, uint32_t extra){
 static volatile sig_atomic_t g_winch = 0;
 static struct sigaction g_old_winch;
 static void on_winch(int s){ (void)s; g_winch=1; }
+
+/* ── Semantic theme tokens ──────────────────────────────────────────
+   All colour decisions go through this palette so overlay/header blue
+   no longer dominates the screen. The terminal default background is used
+   everywhere except selected rows. */
+typedef struct {
+    uintattr_t bg;         /* default background (TB_DEFAULT) */
+    uintattr_t surface;    /* overlay/panel background */
+    uintattr_t border;     /* faint border */
+    uintattr_t focus;      /* focused border / accent */
+    uintattr_t text;       /* body text */
+    uintattr_t muted;      /* dimmed/secondary text */
+    uintattr_t accent;     /* primary accent */
+    uintattr_t success;    /* ok / ready */
+    uintattr_t warning;    /* pending / attention */
+    uintattr_t error;      /* failure */
+    uintattr_t user;       /* user message label */
+    uintattr_t assistant;  /* assistant label */
+    uintattr_t tool;       /* tool card */
+} theme_t;
+static const theme_t g_theme = {
+    TB_DEFAULT, TB_DEFAULT, TB_WHITE|TB_BOLD, TB_CYAN|TB_BOLD,
+    TB_WHITE, TB_BLACK|TB_BOLD, TB_CYAN, TB_GREEN,
+    TB_YELLOW, TB_RED|TB_BOLD, TB_CYAN|TB_BOLD, TB_WHITE|TB_BOLD, TB_YELLOW
+};
+
+static int g_show_debug=0;   /* enable RSS/PSS/trace metrics in header */
+
 static int g_headless=0;
 static int g_tb_ok=0; /* 1 once tb_init() succeeded; guards termbox calls */
 static void tui_teardown(void){
@@ -251,6 +279,7 @@ static Pane g_panes[MAX_PANES];
 static int g_npane=1;
 static int g_focus=0;
 static int g_show_sidebar=0;
+static int g_split=0;   /* 0=conversation-first single pane, 1=explicit split grid */
 /* Async approval state: the TUI never blocks inside a session callback.  A
  * PUCI_EVENT_APPROVAL_REQUEST pauses the owning turn and the TUI shows a
  * modal overlay; the user's y/n/key resolves it via the non-blocking
@@ -869,27 +898,6 @@ static void tb_draw_box(int r,int c,int h,int w,const char *title,int focused){
     for(int x=1;x<w-1;x++) tb_set_cell(c+x, r+h-1, 0x2500, fg, bg);
     tb_set_cell(c+w-1, r+h-1, 0x2518, fg, bg);
 }
-static void tb_draw_gauge(int r,int c,int w,long cur,long max,const char *label){
-    char bar[512];
-    if(w > g_cols) w = g_cols;           /* never draw wider than the terminal */
-    if(w > (int)sizeof bar - 1) w = (int)sizeof bar - 1;
-    char info[40]; snprintf(info,sizeof info," %ld/%ld",cur,max);
-    int infolen=(int)strlen(info);
-    int llen = label ? (int)strlen(label) : 0;
-    /* Budget: label + '[' + bar + ']' + trailing info must fit within w. */
-    int bar_w = w - llen - 2 - infolen;
-    if(bar_w < 1){ return; }             /* not enough room to render a bar */
-    int fill = max>0? (int)((cur*(long)bar_w)/max):0; if(fill<0) fill=0; if(fill>bar_w) fill=bar_w;
-    int pos=0;
-    if(label){ for(int i=0;label[i] && pos<(int)sizeof bar-1;i++) bar[pos++]=label[i]; }
-    if(pos<(int)sizeof bar-1) bar[pos++]='[';
-    for(int i=0;i<bar_w && pos<(int)sizeof bar-1;i++) bar[pos++]= i<fill ? '#' : '-';
-    if(pos<(int)sizeof bar-1) bar[pos++]=']';
-    bar[pos]=0;
-    tb_print(c, r, TB_WHITE, TB_DEFAULT, bar);
-    tb_print(c+pos, r, TB_WHITE, TB_DEFAULT, info);
-}
-
 /* ---- UTF-8 width helpers ---------------------------------------------
  * All width math in the TUI must go through these so multi-byte UTF-8
  * (Turkish chars, emoji, combining marks) is measured in display columns,
@@ -1029,171 +1037,309 @@ static int wrap_visual_count(const char *s, int width){
     return n;
 }
 
+/* ── Semantic helpers for the conversation-first layout ──────────── */
+
+/* Human-readable session status for the header, derived from data the TUI
+   already tracks (no new library queries). */
+static const char *tui_status_str(void){
+    for(int i=0;i<g_npane && i<MAX_PANES;i++){
+        if(i==g_focus && g_approval_pending && g_approval_pane==i) return "Approval";
+        if(g_panes[i].streaming) return "Generating";
+    }
+    return "Ready";
+}
+
+static uintattr_t tui_status_color(void){
+    for(int i=0;i<g_npane && i<MAX_PANES;i++) if(g_panes[i].streaming) return g_theme.warning;
+    if(g_approval_pending) return g_theme.warning;
+    return g_theme.success;
+}
+
+/* Render one pane's ring into rect (x,y)-(x+w-1,y+h-1) with a visual scroll
+   indicator. Returns nothing; mutates only termbox cells. Semantic: block
+   labels (YOU / PUCI / system dashes / tool / error) draw on the first
+   visual row of each logical line. */
+static void tui_render_pane(Pane *p, int x, int y, int h, int w, int focused){
+    int inner_h = h-2; int inner_w = w-2;
+    if(inner_h<=0 || inner_w<=0) return;
+    int total_vis;
+    if(!p->layout_dirty && p->cached_inner_w==inner_w && p->cached_total_vis>=0){
+        total_vis=p->cached_total_vis;
+    } else {
+        total_vis=0;
+        for(int k=0;k<p->ring.count;k++){
+            int idx=(p->ring.head + k)%RING_LINES;
+            total_vis += wrap_visual_count(p->ring.lines[idx], inner_w);
+        }
+        p->cached_total_vis=total_vis;
+        p->cached_inner_w=inner_w;
+        p->layout_dirty=0;
+    }
+    if(p->scroll_off > total_vis) p->scroll_off = total_vis;
+    if(p->scroll_off <0) p->scroll_off=0;
+    int start_vis = total_vis - inner_h - p->scroll_off;
+    if(start_vis<0) start_vis=0;
+    int cur_vis=0, rendered=0;
+    for(int k=0;k<p->ring.count && rendered<inner_h;k++){
+        int idx=(p->ring.head + k)%RING_LINES;
+        const char *s=p->ring.lines[idx];
+        rtype_t t=p->ring.types[idx];
+        int wrapped = wrap_visual_count(s, inner_w);
+        int seg_off=0;
+        for(int v=0; v<wrapped && rendered<inner_h; v++){
+            if(cur_vis < start_vis){ cur_vis++;
+                int rem2=(int)strlen(s)-seg_off;
+                if(rem2>0){ int take2=(int)render_segment(s+seg_off, inner_w); if(take2<1||take2>rem2) take2=rem2; seg_off+=take2; }
+                continue;
+            }
+            int row = y+1+rendered;
+            int rem=(int)(strlen(s)-seg_off);
+            if(rem<=0){
+                for(int cc=x+1; cc<x+1+inner_w && cc<w+x; cc++) tb_set_cell(cc,row,' ',TB_DEFAULT,TB_DEFAULT);
+                rendered++; cur_vis++;
+                break;
+            }
+            int take;
+            if(uwidth(s+seg_off) <= inner_w){ take=rem; }
+            else { take=(int)render_segment(s+seg_off, inner_w); if(take<1||take>rem) take=rem; }
+            char seg[RING_COLS]; memcpy(seg,s+seg_off,(size_t)take); seg[take]=0;
+            seg_off+=take;
+            uintattr_t fg=TB_WHITE;
+            if(t==RL_USER) fg=g_theme.user;
+            else if(t==RL_TOOL) fg=g_theme.tool;
+            else if(t==RL_ERROR) fg=g_theme.error;
+            if(v==0 && (t==RL_USER || t==RL_SYSTEM || t==RL_ERROR)){
+                char lab[24];
+                if(t==RL_USER) snprintf(lab,sizeof lab,"YOU  ");
+                else if(t==RL_ERROR) snprintf(lab,sizeof lab,"ERR  ");
+                else snprintf(lab,sizeof lab,"      ");
+                tb_print(x+1, row, fg, TB_DEFAULT, lab);
+                tb_print_styled(x+1+(int)strlen(lab)+0, row, fg, TB_DEFAULT, seg, inner_w);
+            } else if(t==RL_TOOL){
+                if(v==0){ char lab[24]; snprintf(lab,sizeof lab,"[tool] "); tb_print(x+1,row,fg,TB_DEFAULT,lab); tb_print_styled(x+1+7,row,fg,TB_DEFAULT,seg,inner_w-7); }
+                else tb_print_styled(x+1,row,fg,TB_DEFAULT,seg,inner_w);
+            } else {
+                tb_print_styled(x+1,row,fg,TB_DEFAULT,seg,inner_w);
+            }
+            rendered++; cur_vis++;
+        }
+    }
+    /* Scroll indicator: a proportional scrollbar on the right edge plus a
+       "N new ↓" badge only when the user is scrolled up from the bottom. */
+    if(total_vis > 0){
+        int bar = inner_h;
+        int den = (total_vis - inner_h) > 0 ? (total_vis - inner_h) : 1;
+        int thumb = (bar * inner_h) / total_vis; if(thumb<1) thumb=1; if(thumb>bar) thumb=bar;
+        int top_off = (start_vis < total_vis) ? start_vis : (total_vis-1);
+        int pos = (top_off * (bar-thumb)) / den;
+        if(pos<0) pos=0;
+        if(pos>bar-thumb) pos=bar-thumb;
+        int thumb_x = x+w-3;
+        for(int rr=0; rr<bar; rr++)
+            tb_set_cell(thumb_x, y+1+rr, 0x2591, (rr>=pos && rr<pos+thumb)?g_theme.accent:g_theme.muted, TB_DEFAULT);
+        if(start_vis > 0){
+            char nb[32]; snprintf(nb,sizeof nb,"  %d new \xE2\x86\x93  ", start_vis);
+            tb_print(x+1, y, g_theme.warning, TB_DEFAULT, nb);
+        }
+    }
+    (void)focused;
+}
+
 void tui_render_frame(void){
     TRACE(TR_RENDER_BEG,0);
     pump_models_fetch();          /* merge a finished background model fetch */
     if(g_headless){
-        // Headless simulation: still compute layout CPU but skip terminal draws
-        int rows=g_rows, cols=g_cols;
-        int usable_rows = rows-3; if(usable_rows<1) usable_rows=1;
-        int pane_h = usable_rows/2; if(pane_h<1) pane_h=1;
-        int pane_w = (cols-3)/2; if(pane_w<1) pane_w=1;
-        for(int i=0;i<g_npane && i<MAX_PANES;i++){
-            int inner_h = pane_h-2; int inner_w = pane_w-2; if(inner_h<=0||inner_w<=0) continue;
-            int total_vis;
-            if(!g_panes[i].layout_dirty && g_panes[i].cached_inner_w==inner_w && g_panes[i].cached_total_vis>=0) total_vis=g_panes[i].cached_total_vis;
-            else { total_vis=0; for(int k=0;k<g_panes[i].ring.count;k++){ int idx=(g_panes[i].ring.head + k)%RING_LINES; total_vis += wrap_visual_count(g_panes[i].ring.lines[idx], inner_w); } g_panes[i].cached_total_vis=total_vis; g_panes[i].cached_inner_w=inner_w; g_panes[i].layout_dirty=0; }
-            // simulate scan without tb draws
-            (void)total_vis;
-        }
+            // Headless simulation: mirror the conversation-first layout budget so
+            // wrapped-visual counts match what the real renderer would produce.
+            int cols=g_cols;
+            int inner_w = cols-1-2; if(inner_w<1) inner_w=1;       /* single pane, no sidebar */
+            int total_vis=0;
+            for(int k=0;k<g_panes[g_focus].ring.count;k++){
+                int idx=(g_panes[g_focus].ring.head + k)%RING_LINES;
+                total_vis += wrap_visual_count(g_panes[g_focus].ring.lines[idx], inner_w);
+            }
+            g_panes[g_focus].cached_total_vis=total_vis;
+            g_panes[g_focus].cached_inner_w=inner_w;
+            g_panes[g_focus].layout_dirty=0;
         TRACE(TR_RENDER_END,0); TRACE(TR_PRESENT,0); return;
     }
     int rows=g_rows, cols=g_cols;
     tb_clear();
-    long rss=read_rss_kb(); long pss=read_pss_kb();
     long ctx_cur=0, ctx_bud=131072;
-    if(g_npane>0 && g_panes[0].sess){ ctx_cur=(long)puci_session_context_bytes(g_panes[0].sess); ctx_bud=(long)puci_session_get_context_budget(g_panes[0].sess); }
-    char hdr[320];
-    snprintf(hdr,sizeof hdr," PUCI v0.5.0 — Swarm %d/%d — %ld kB (PSS %ld) — %ld/%ld ctx ", g_npane, MAX_PANES, rss, pss, ctx_cur, ctx_bud);
-    for(int x=0;x<cols;x++) tb_set_cell(x, 0, ' ', TB_WHITE|TB_BOLD, TB_BLUE);
-    tb_print(0, 0, TB_WHITE|TB_BOLD, TB_BLUE, hdr);
-    // model indicator top-right
-    {
-        const char *m = g_current_model[0]?g_current_model:getenv("PUCI_MODEL"); if(!m||!*m) m="deepseek/deepseek-chat";
-        char mod[64]; snprintf(mod,sizeof mod," %.61s ", m);
-        int ml=(int)strlen(mod);
-        int mx=cols-ml-1; if(mx>0) tb_print(mx,0, TB_WHITE, TB_BLUE, mod);
+    if(g_npane>0 && g_panes[g_focus].sess){
+        ctx_cur=(long)puci_session_context_bytes(g_panes[g_focus].sess);
+        ctx_bud=(long)puci_session_get_context_budget(g_panes[g_focus].sess);
     }
+    int pct = ctx_bud>0 ? (int)((ctx_cur*100)/ctx_bud) : 0;
+    if(pct<0) pct=0;
+    if(pct>100) pct=100;
 
-    int usable_rows = rows-3;
-    if(usable_rows<4) usable_rows=4;
-    int pane_h = usable_rows/2; if(pane_h<4) pane_h=4;
-    int pane_w = (cols-3)/2; if(pane_w<20) pane_w=20;
-
-    for(int i=0;i<g_npane && i<MAX_PANES;i++){
-        int pr = 1 + (i/2)*pane_h;
-        int pc = (i%2)*(pane_w+1);
-        if(g_show_sidebar && i>=2) continue;
-        int is_focus = (g_focus==i && g_mode==0);
-        tb_draw_box(pr, pc, pane_h, pane_w, g_panes[i].title, is_focus);
-        int inner_h = pane_h-2; int inner_w = pane_w-2;
-        if(inner_h<=0||inner_w<=0) continue;
-        int total_vis;
-        if(!g_panes[i].layout_dirty && g_panes[i].cached_inner_w==inner_w && g_panes[i].cached_total_vis>=0){
-            total_vis=g_panes[i].cached_total_vis;
-        } else {
-            total_vis=0;
-            for(int k=0;k<g_panes[i].ring.count;k++){
-                int idx=(g_panes[i].ring.head + k)%RING_LINES;
-                total_vis += wrap_visual_count(g_panes[i].ring.lines[idx], inner_w);
-            }
-            g_panes[i].cached_total_vis=total_vis;
-            g_panes[i].cached_inner_w=inner_w;
-            g_panes[i].layout_dirty=0;
-        }
-        // scroll_off is visual lines above bottom
-        if(g_panes[i].scroll_off > total_vis) g_panes[i].scroll_off = total_vis;
-        if(g_panes[i].scroll_off <0) g_panes[i].scroll_off=0;
-        int start_vis = total_vis - inner_h - g_panes[i].scroll_off;
-        if(start_vis<0) start_vis=0;
-        int cur_vis=0;
-        int rendered=0;
-        for(int k=0;k<g_panes[i].ring.count && rendered<inner_h;k++){
-            int idx=(g_panes[i].ring.head + k)%RING_LINES;
-            const char *s=g_panes[i].ring.lines[idx];
-            rtype_t t=g_panes[i].ring.types[idx];
-            int wrapped = wrap_visual_count(s, inner_w);
-            int seg_off=0;
-            for(int w=0; w<wrapped && rendered<inner_h; w++){
-                if(cur_vis < start_vis){ cur_vis++; /* still advance seg_off */ 
-                    int rem2=(int)strlen(s)-seg_off;
-                    if(rem2>0){ int take2=(int)render_segment(s+seg_off, inner_w); if(take2<1||take2>rem2) take2=rem2; seg_off += take2; }
-                    continue;
-                }
-                int rem=(int)(strlen(s)-seg_off);
-                if(rem<=0){
-                    /* Empty logical line: it still counts as one visual row
-                       (wrap_visual_count returns 1), so render a blank spacer
-                       row to keep scroll math consistent. */
-                    uint32_t fg=TB_WHITE;
-                    if(t==RL_USER) fg=TB_CYAN|TB_BOLD;
-                    else if(t==RL_TOOL) fg=TB_YELLOW;
-                    else if(t==RL_ERROR) fg=TB_RED|TB_BOLD;
-                    tb_print(pc+1, pr+1+rendered, fg, TB_DEFAULT, "");
-                    rendered++; cur_vis++;
-                    break;
-                }
-                int take;
-                if(uwidth(s+seg_off) <= inner_w){ take = rem; }
-                else { take = (int)render_segment(s+seg_off, inner_w); if(take<1||take>rem) take=rem; }
-                char seg[ RING_COLS ];
-                memcpy(seg, s+seg_off, (size_t)take); seg[take]=0;
-                seg_off += take;
-                // trim trailing spaces for visual
-                uint32_t fg=TB_WHITE;
-                if(t==RL_USER) fg=TB_CYAN|TB_BOLD;
-                else if(t==RL_TOOL) fg=TB_YELLOW;
-                else if(t==RL_ERROR) fg=TB_RED|TB_BOLD;
-                else if(t==RL_ASSISTANT) fg=TB_WHITE;
-                // prefix for continuation lines
-                // remove leading spaces
-                if(t==RL_ASSISTANT || t==RL_TOOL){
-                    tb_print_styled(pc+1, pr+1+rendered, fg, TB_DEFAULT, seg, inner_w);
-                } else {
-                    tb_print(pc+1, pr+1+rendered, fg, TB_DEFAULT, seg);
-                }
-                rendered++; cur_vis++;
-            }
-        }
-        // scroll indicator
-        if(total_vis > inner_h){
-            char ind[16]; snprintf(ind,sizeof ind," %d%% ", (int)((start_vis*100)/ (total_vis - inner_h +1)));
-            tb_print(pc+pane_w-6, pr, TB_WHITE, TB_BLUE, ind);
-        }
-    }
+    /* ---- Responsive sidebar width + multiline composer height -------- */
+    int sidebar_w = 0;
     if(g_show_sidebar || g_mode==2){
-        int sr=1, sc= cols-26, sh= usable_rows, sw=25;
-        if(sc<0) sc=0;
-        if(sw>cols) sw=cols;
-        char stitle[64]; if(g_mode==2 && g_pick_filter[0]) snprintf(stitle,sizeof stitle,"Sessions /%.18s", g_pick_filter); else snprintf(stitle,sizeof stitle,"Sessions (%d/%d) s", g_pick_filtered_count, g_sess_count);
-        tb_draw_box(sr,sc,sh,sw,stitle, g_mode==2);
-        int cnt = (g_mode==2? g_pick_filtered_count : g_sess_count);
-        /* Viewport: keep the highlighted row visible in the sidebar. */
-        int svis = sh-2; if(svis<1) svis=1;
-        int stop = g_pick_sel - (svis-1); if(stop<0) stop=0;
-        for(int i=stop;i<cnt && i<stop+svis;i++){
-            uint32_t fg = (i==g_pick_sel && g_mode==2)? TB_BLACK:TB_WHITE;
-            uint32_t bg = (i==g_pick_sel && g_mode==2)? TB_CYAN:TB_DEFAULT;
-            int src = (g_mode==2? g_pick_filtered_idx[i] : i);
-            char ln[64]; snprintf(ln,sizeof ln,"%.12s %.10s", g_sess_list[src].id, g_sess_list[src].model);
-            // highlight
-            for(int x=sc+1;x<sc+sw-1;x++) tb_set_cell(x,sr+1+(i-stop),' ',fg,bg);
+        if(cols>=84) sidebar_w=30;
+        else if(cols>=60) sidebar_w=24;
+        else sidebar_w = (cols-4)>0?(cols-4):0;
+    }
+    int comp_w = cols-sidebar_w; if(comp_w<8) comp_w=8;
+    int comp_avail = comp_w-4; if(comp_avail<1) comp_avail=1;
+
+    int comp_h = 1;
+    if(g_input_mode){
+        int vis=comp_avail;
+        int need = vis>0 ? (int)(uwidth(g_input)/vis) : 0;
+        comp_h = need+1;
+        if(comp_h<1) comp_h=1;
+        if(comp_h>8) comp_h=8;
+    }
+    /* Keep the composer box inside the terminal (>= 1 row reserved for it). */
+    {
+        int comp_top = rows-2-comp_h;
+        if(comp_top < 1){ comp_h = rows-2 > 0 ? rows-2 : 1; if(comp_h<1) comp_h=1; }
+        if(comp_h > rows-3) comp_h = rows-3>0?rows-3:1;
+    }
+
+    int c_top=1, c_bot = rows-2-comp_h;
+    if(c_bot < c_top+1) c_bot=c_top+1;
+
+    if(rows<6 || cols<24){
+        tb_print(1,1, g_theme.error, TB_DEFAULT, "Window too small - enlarge to at least 24x6");
+        tb_hide_cursor();
+        TRACE(TR_RENDER_END,0);
+        TRACE(TR_PRESENT,0);
+        tb_present();
+        return;
+    }
+
+    const char *model = g_current_model[0]?g_current_model:getenv("PUCI_MODEL");
+    if(!model || !model[0]) model="deepseek/deepseek-chat";
+    const char *st = tui_status_str();
+    uintattr_t sc = tui_status_color();
+
+    /* ---- Header ------------------------------------------------------- */
+    {
+        char right[96];
+        snprintf(right,sizeof right,"  \xE2\x97\x8F %s \xC2\xB7 Context %d%%", st, pct);
+        int rw=(int)strlen(right);
+        int lw = cols-1-rw; if(lw<16) lw=16;
+        char left[320];
+        if(g_show_debug){
+            long rss=read_rss_kb(); long pss=read_pss_kb();
+            snprintf(left,sizeof left," PUCI \xC2\xB7 %.*s \xC2\xB7 %s  (ctx %ldkB/%ldkB RSS %ld PSS %ld)",
+                     lw>=0?(int)lw-16:0, g_panes[g_focus].title, model,
+                     ctx_cur/1024, ctx_bud/1024, rss/1024, pss/1024);
+        } else {
+            snprintf(left,sizeof left," PUCI \xC2\xB7 %.*s \xC2\xB7 %s",
+                     lw>=0?(int)lw-8:0, g_panes[g_focus].title, model);
+        }
+        for(int x=0;x<cols;x++) tb_set_cell(x,0,' ',TB_DEFAULT,TB_DEFAULT);
+        tb_print(0,0, g_theme.text, TB_DEFAULT, left);
+        tb_print(cols-1-(int)strlen(right), 0, sc, TB_DEFAULT, (const char*)right);
+    }
+
+    /* ---- Conversation: one focused pane fills available width -------- */
+    if(g_split && g_npane>1 && sidebar_w==0){
+        int per = cols/2; if(per<20) per=20; if(per>cols) per=cols;
+        for(int i=0;i<g_npane && i<MAX_PANES;i++){
+            int px=(i%2)*per;
+            int pw=(i%2? cols-px: per); if(pw<1) pw=1;
+            int ph=c_bot-c_top+1;
+            tb_draw_box(c_top,px,ph,pw, g_panes[i].title, g_focus==i);
+            tui_render_pane(&g_panes[i], px, c_top, ph, pw, g_focus==i);
+        }
+    } else {
+        int cv_w = cols-sidebar_w; if(cv_w<1) cv_w=1;
+        tb_draw_box(c_top,0, c_bot-c_top+1, cv_w, g_panes[g_focus].title, 1);
+        tui_render_pane(&g_panes[g_focus], 0, c_top, c_bot-c_top+1, cv_w, 1);
+    }
+
+    /* ---- Session sidebar / drawer ------------------------------------ */
+    if(sidebar_w>0){
+        int sr=c_top, sc=cols-sidebar_w, sh=c_bot-c_top+1, sw=sidebar_w;
+        char stitle[72];
+        if(g_mode==2 && g_pick_filter[0]) snprintf(stitle,sizeof stitle,"Sessions /%.40s", g_pick_filter);
+        else snprintf(stitle,sizeof stitle,"Sessions (%d) s", g_sess_count);
+        tb_draw_box(sr,sc,sh,sw, stitle, g_mode==2);
+        int cnt=(g_mode==2? g_pick_filtered_count : g_sess_count);
+        int svis=sh-2; if(svis<1) svis=1;
+        int stop=g_pick_sel-(svis-1); if(stop<0) stop=0;
+        for(int i=stop; i<cnt && i<stop+svis; i++){
+            uint32_t fg=(i==g_pick_sel && g_mode==2)? TB_BLACK:TB_WHITE;
+            uint32_t bg=(i==g_pick_sel && g_mode==2)? TB_CYAN:TB_DEFAULT;
+            int src=(g_mode==2? g_pick_filtered_idx[i] : i);
+            for(int x=sc+1;x<sc+sw-1;x++) tb_set_cell(x, sr+1+(i-stop),' ',fg,bg);
+            char ln[88]; snprintf(ln,sizeof ln,"%.12s %.10s", g_sess_list[src].id, g_sess_list[src].model);
             tb_print(sc+2, sr+1+(i-stop), fg, bg, ln);
         }
-        if(cnt==0) tb_print(sc+2,sr+1, TB_YELLOW, TB_DEFAULT, g_pick_filter[0]?"(no match)":"(no sessions)");
-        if(g_mode==2) tb_print(sc+2,sr+sh-1, TB_CYAN, TB_DEFAULT, "type filter  Ctrl-Y copy  Enter load");
+        if(cnt==0) tb_print(sc+2,sr+1, g_theme.warning, TB_DEFAULT, g_pick_filter[0]?"(no match)":"(no sessions)");
+        if(g_mode==2) tb_print(sc+2, sr+sh-1, g_theme.accent, TB_DEFAULT, "type filter  Enter load");
     }
-    tb_draw_gauge(rows-2, 0, cols, ctx_cur, ctx_bud, "Context");
-    const char *footer_normal="[Enter] prompt  [↑/↓] scroll  [PgUp/Dn]  [s] sessions  [m] model  [TAB] pane  [q] quit";
-    const char *footer_input="[Enter] send  [Esc] cancel  [←→] cursor  [m] model in picker";
-    const char *foot = g_input_mode ? footer_input : footer_normal;
-    tb_print(0, rows-1, TB_WHITE, TB_DEFAULT, foot);
-    // input line overlay
-    if(g_input_mode){
-        char prompt[2600]; snprintf(prompt,sizeof prompt,"❯ %s", g_input);
-        // clear line
-        for(int x=0;x<cols;x++) tb_set_cell(x, rows-1, ' ', TB_BLACK, TB_WHITE);
-        tb_print(0, rows-1, TB_BLACK, TB_WHITE, prompt);
-        // cursor (display column, not byte offset, so multi-byte glyphs place
-                // the caret correctly)
-                char _curs_buf[256]; size_t _cl=g_input_curs; if(_cl>255) _cl=255;
-                memcpy(_curs_buf,g_input,_cl); _curs_buf[_cl]=0;
-                int cx = 2 + uwidth(_curs_buf);
-                if(cx<0) cx=0;
-                if(cx>=cols) cx=cols-1;
-                tb_set_cursor(cx, rows-1);
-    } else {
-        tb_hide_cursor();
+
+    /* ---- Multiline composer ------------------------------------------- */
+    {
+        int cbh = comp_h+1;
+        tb_draw_box(rows-2-comp_h, 0, cbh, comp_w, g_input_mode?"Input":"Composer", g_input_mode);
+        int ctop_in = rows-2-comp_h+1;
+        for(int rr=0; rr<comp_h; rr++)
+            for(int xx=1; xx<comp_w-1; xx++) tb_set_cell(xx, ctop_in+rr, ' ', TB_DEFAULT, TB_DEFAULT);
+        if(g_input_mode){
+            /* wrap draft into visual rows, bottom-aligned */
+            struct CLine { int off, len; } rows_s[16];
+            int nrows=0; size_t pos=0;
+            while(pos<g_input_len && nrows<16){
+                rows_s[nrows].off=(int)pos;
+                size_t adv=uwidth_advance(g_input+pos, comp_avail);
+                if(adv==0) adv=1;
+                if(pos+adv>g_input_len) adv=g_input_len-pos;
+                rows_s[nrows].len=(int)adv;
+                pos+=adv; nrows++;
+            }
+            if(nrows==0){ rows_s[0].off=0; rows_s[0].len=0; nrows=1; }
+            int show_from = nrows<comp_h? 0 : nrows-comp_h;
+            int shown = nrows-show_from; if(shown>comp_h) shown=comp_h;
+            /* find the visual row that contains the cursor byte offset */
+            int cstart=0;
+            while(cstart<nrows){
+                int r0=rows_s[cstart].off;
+                int r1=(cstart+1<nrows)? rows_s[cstart+1].off : (int)g_input_len;
+                if((int)g_input_curs>=r0 && (int)g_input_curs<=r1) break;
+                cstart++;
+            }
+            if(cstart>=nrows) cstart=nrows-1;
+            int cr_start = (int)g_input_curs - rows_s[cstart].off;
+            if(cr_start<0) cr_start=0;
+            if(cr_start>(int)rows_s[cstart].len) cr_start=(int)rows_s[cstart].len;
+            /* column = 3 (prompt) + display width of the text within this
+               wrapped row that precedes the cursor */
+            int caret_col = 3;
+            {
+                char *pfx=calloc((size_t)cr_start+1,1);
+                if(pfx){ memcpy(pfx, g_input+rows_s[cstart].off, (size_t)cr_start);
+                    caret_col += (int)uwidth(pfx); free(pfx); }
+            }
+            int caret_row = ctop_in + (cstart-show_from);
+            if(caret_row<ctop_in) caret_row=ctop_in;
+            if(caret_row>ctop_in+comp_h-1) caret_row=ctop_in+comp_h-1;
+            if(caret_col<comp_w-1) tb_set_cursor(caret_col, caret_row);
+            for(int l=0;l<shown;l++){
+                int r=ctop_in+l;
+                char *ln=calloc((size_t)rows_s[show_from+l].len+1,1);
+                if(ln){ memcpy(ln, g_input+rows_s[show_from+l].off, (size_t)rows_s[show_from+l].len);
+                    tb_print(3, r, g_theme.text, TB_DEFAULT, ln); free(ln); }
+            }
+        } else {
+            tb_print(1, ctop_in, g_theme.muted, TB_DEFAULT, "Message \xE2\x80\xA6 (Enter to compose)");
+            tb_hide_cursor();
+        }
+    }
+
+    /* ---- Footer ------------------------------------------------------- */
+    {
+        const char *foot;
+        if(g_input_mode) foot="[Enter] send  [Ctrl+J] newline  [Esc] cancel  [\xE2\x86\x90\xE2\x86\x92] cursor";
+        else foot="[Enter] prompt  [\xE2\x86\x91/\xE2\x86\x93] scroll  [s] sessions  [m] model  [Tab] pane  [q] quit";
+        for(int x=0;x<cols;x++) tb_set_cell(x,rows-1,' ',TB_DEFAULT,TB_DEFAULT);
+        tb_print(0,rows-1, g_theme.muted, TB_DEFAULT, foot);
     }
     if(g_approval_pending){
         int oh=14, ow=68;
