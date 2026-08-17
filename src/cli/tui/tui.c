@@ -68,9 +68,9 @@
 #endif
 #define TRACE_RING_CAP (1<<18) // 262k entries
 typedef enum {
-    TR_POLL_RET=0, TR_PROCESS, TR_EVENT, TR_RENDER_BEG, TR_RENDER_END, TR_PRESENT, TR_PROCFS, TR_SAVE, TR_ESCWAIT
+    TR_POLL_RET=0, TR_PROCESS, TR_EVENT, TR_RENDER_BEG, TR_RENDER_END, TR_PRESENT, TR_PROCFS, TR_SAVE, TR_ESCWAIT, TR_APPROVAL
 } trace_phase_t;
-static const char *trace_phase_name[] = {"POLL_RET","PROCESS","EVENT","RENDER_BEG","RENDER_END","PRESENT","PROCFS","SAVE","ESCWAIT"};
+static const char *trace_phase_name[] = {"POLL_RET","PROCESS","EVENT","RENDER_BEG","RENDER_END","PRESENT","PROCFS","SAVE","ESCWAIT","APPROVAL"};
 typedef struct { uint64_t mono_ns; uint64_t cpu_ns; uint32_t phase; uint32_t extra; } trec_t;
 static trec_t g_trace_ring[TRACE_RING_CAP];
 static _Atomic size_t g_trace_head=0;
@@ -251,11 +251,20 @@ static Pane g_panes[MAX_PANES];
 static int g_npane=1;
 static int g_focus=0;
 static int g_show_sidebar=0;
+/* Async approval state: the TUI never blocks inside a session callback.  A
+ * PUCI_EVENT_APPROVAL_REQUEST pauses the owning turn and the TUI shows a
+ * modal overlay; the user's y/n/key resolves it via the non-blocking
+ * puci_session_resolve_approval() so the main poll() loop keeps running
+ * (other panes stream, resize/timers/toasts work). */
 static int g_approval_pending=0;
 static char g_approval_diff[262144];
-static int g_approval_result=0;
 static int g_hunk_off=0;
 static int g_hunk_max=0;
+static uint64_t g_approval_id=0;
+static int g_approval_pane=-1;      /* g_panes[] index awaiting the decision */
+static int g_approval_feedback_mode=0; /* 1 = reading a denial reason */
+static char g_approval_feedback[512];  /* reason passed to set_approval_feedback */
+static size_t g_approval_feedback_len=0;
 /* Copy a string (truncated to cap-pos-1) into buf at pos; returns new pos. */
 static size_t app_append(char *buf, size_t cap, size_t pos, const char *part){
     if(!part || pos>=cap) return pos;
@@ -743,50 +752,44 @@ static void load_sessions(void){
     for(int i=0;i<g_sess_count;i++) g_sess_list[i]=tmp_list[i];
 }
 
-static puci_approval tui_approval_cb(const puci_approval_request *req, void *ud){
-    (void)ud;
-    if(!req) return PUCI_APPROVAL_DENY;
-    /* Show the *real* change first. A unified diff (write_file over an existing
-     * file) is the ground truth the user must approve; display/args are only a
-     * fallback when there is no diff to show. */
+/* Build the overlay diff text from an approval event.  Returns 1 on success.
+ * Purely prepares display state; it never blocks the caller. */
+static int tui_open_approval(int pane_idx, const puci_event_approval *req){
+    if(!req) return 0;
+    /* Show the *real* change first. A unified diff is the ground truth the
+     * user must approve; display/args are only a fallback when there is no
+     * diff to show. */
     size_t pos=0;
     const char *head = req->tool ? req->tool : "tool";
     size_t hl=strlen(head); if(pos+hl+1 < sizeof g_approval_diff){ memcpy(g_approval_diff+pos, head, hl); pos+=hl; g_approval_diff[pos++]='\n'; }
     pos = app_append(g_approval_diff, sizeof g_approval_diff, pos, req->diff);
     if(!req->diff) pos = app_append(g_approval_diff, sizeof g_approval_diff, pos, req->display?req->display:req->args_json);
     g_approval_diff[pos]=0;
+    /* Explicit marker when a long diff is truncated by the fixed buffer, so
+       the user is never silently approving a partial change.  Only append if
+       there is headroom; otherwise overwrite the tail in place. */
+    if(req->diff){
+        size_t l = strlen(req->diff);
+        size_t avail = sizeof g_approval_diff - 1;
+        if(l > avail){
+            static const char mark[] = "\n[+ .. truncated ..]\n";
+            size_t mark_len = sizeof mark - 1;
+            size_t keep = avail > mark_len ? avail - mark_len : 0;
+            memcpy(g_approval_diff + keep, mark, mark_len);
+            pos = keep + mark_len;
+            g_approval_diff[pos]=0;
+        }
+    }
     /* upper bound for the j/k scroll region = number of lines */
     g_hunk_max=1;
     for(size_t i=0;i<pos;i++) if(g_approval_diff[i]=='\n') g_hunk_max++;
     if(g_hunk_max<1) g_hunk_max=1;
-    g_approval_pending=1; g_hunk_off=0;
-    int cancel_fd = req->cancel?req->cancel->fd:-1;
+    g_hunk_off=0; g_approval_pending=1; g_approval_pane=pane_idx;
+    g_approval_id=req->id; g_approval_feedback_mode=0;
+    g_approval_feedback[0]=0; g_approval_feedback_len=0;
     extern void tui_render_frame(void);
-    int need_redraw=1;
-    while(g_approval_pending){
-        if(req->cancel && req->cancel->flag && *req->cancel->flag) { g_approval_pending=0; return PUCI_APPROVAL_DENY; }
-        /* Render once up front and only re-render when something changes, so an
-           idle approval prompt doesn't repaint the whole screen every poll. */
-        if(need_redraw){ tui_render_frame(); need_redraw=0; }
-        struct pollfd pf[2]; int nf=1;
-        pf[0].fd=STDIN_FILENO; pf[0].events=POLLIN;
-        if(cancel_fd>=0){ pf[1].fd=cancel_fd; pf[1].events=POLLIN; nf=2; }
-        int pr=poll(pf,(nfds_t)nf,300);
-        if(pr<0){ if(errno==EINTR) continue; else { struct timespec _ts={0,50000000L}; nanosleep(&_ts,NULL); continue; } }
-        if(pr==0){ need_redraw=1; continue; }
-        if(nf==2 && (pf[1].revents&POLLIN)) { g_approval_pending=0; return PUCI_APPROVAL_DENY; }
-        if(pf[0].revents&POLLIN){
-            char c; ssize_t n=read(STDIN_FILENO,&c,1);
-            if(n==1){
-                if(c=='y'||c=='Y'){ g_approval_result=1; g_approval_pending=0; return PUCI_APPROVAL_ALLOW; }
-                if(c=='n'||c=='N'||c=='q'||c==27){ g_approval_result=-1; g_approval_pending=0; return PUCI_APPROVAL_DENY; }
-                if(c=='j'){ if(g_hunk_off < g_hunk_max-1) g_hunk_off++; need_redraw=1; }
-                if(c=='k' && g_hunk_off>0){ g_hunk_off--; need_redraw=1; }
-            }
-        }
-        if(g_winch){ g_winch=0; get_winsize(&g_rows,&g_cols); need_redraw=1; }
-    }
-    return g_approval_result==1?PUCI_APPROVAL_ALLOW:PUCI_APPROVAL_DENY;
+    tui_render_frame();
+    return 1;
 }
 
 // Lightweight inline markdown: **bold**, *italic*, `code`, # heading, - list, > quote
@@ -1201,12 +1204,17 @@ void tui_render_frame(void){
         int maxh = rows - or_ - 1; if(maxh<3) maxh=3; if(oh>maxh) oh=maxh;
         int maxw = cols - oc - 1; if(maxw<8) maxw=8; if(ow>maxw) ow=maxw;
         for(int y=or_; y<or_+oh; y++) for(int x=oc; x<oc+ow; x++) tb_set_cell(x,y,' ', TB_WHITE, TB_BLUE);
-        tb_draw_box(or_,oc,oh,ow,"Approval — y=allow n=deny j/k scroll",1);
+        if(g_approval_feedback_mode){
+            tb_draw_box(or_,oc,oh,ow,"Approval — deny with reason (Enter send, Esc cancel)",1);
+        } else {
+            tb_draw_box(or_,oc,oh,ow,"Approval — y allow  A always  n deny  d reason  j/k scroll  q deny",1);
+        }
         char *copy=strdup(g_approval_diff); if(!copy){ /* allocation failure: skip overlay */ } else { char *save=NULL; char *tok=strtok_r(copy,"\n",&save); int l=0;
+        int rows_avail = oh-3; if(rows_avail<1) rows_avail=1;
         while(tok){
-            if(l>=g_hunk_off && l < g_hunk_off+oh-2){
+            if(l>=g_hunk_off && l < g_hunk_off+rows_avail){
                 int yy = or_+1+(l-g_hunk_off);
-                if(yy >= or_+1 && yy < or_+oh-1){
+                if(yy >= or_+1 && yy < or_+oh-2){
                     uint32_t fg = TB_WHITE;
                     if(tok[0]=='+') fg = TB_GREEN|TB_BOLD;
                     else if(tok[0]=='-') fg = TB_RED|TB_BOLD;
@@ -1217,6 +1225,20 @@ void tui_render_frame(void){
             l++; tok=strtok_r(NULL,"\n",&save);
         }
         free(copy); }
+        /* footer line: feedback prompt or scroll hint */
+        int fy = or_+oh-2;
+        if(fy >= or_+1 && fy < or_+oh-1){
+            if(g_approval_feedback_mode){
+                char fbuf[540];
+                snprintf(fbuf,sizeof fbuf,"reason> %.510s", g_approval_feedback);
+                tb_print(oc+1, fy, TB_BLACK, TB_YELLOW, fbuf);
+            } else {
+                char hbuf[64];
+                if(g_hunk_max>1) snprintf(hbuf,sizeof hbuf,"%d/%d  j/k scroll", g_hunk_off+1, g_hunk_max);
+                else snprintf(hbuf,sizeof hbuf,"%d/%d", g_hunk_off+1, g_hunk_max);
+                tb_print(oc+1, fy, TB_CYAN, TB_BLUE, hbuf);
+            }
+        }
     }
     if(g_mode==3){
         int oh=16, ow=54;
@@ -1404,7 +1426,7 @@ int puci_tui_run(const puci_cli_params *params){
         sopts.system_prompt = plan_mode
             ? "You are puci, a fast C coding agent. Produce a concise implementation plan; do not edit files unless asked."
             : "You are puci, a fast C coding agent. Be concise and helpful.";
-        sopts.approve_cb=tui_approval_cb; sopts.approve_userdata=NULL;
+        sopts.approval_mode=PUCI_APPROVAL_MODE_EVENT;
         puci_session *s=NULL;
         puci_status _cs = puci_session_create(ctx,&sopts,&s);
         if(_cs==PUCI_OK){
@@ -1425,7 +1447,7 @@ int puci_tui_run(const puci_cli_params *params){
     load_sessions(); history_load(); models_init_static();
     // test hooks
     { const char *tf=getenv("PUCI_TUI_FILL_RING"); if(tf && *tf){ int n=atoi(tf); if(n>0){ for(int i=0;i<n;i++){ char ln[128]; snprintf(ln,sizeof ln,"prefill line %d Lorem ipsum dolor sit amet consectetur", i); ring_push_typed(&g_panes[0].ring, ln, RL_SYSTEM); } g_panes[0].layout_dirty=1; } } }
-    { const char *pn=getenv("PUCI_TUI_PANES"); if(pn && *pn){ int v=atoi(pn); if(v>=1 && v<=MAX_PANES){ g_npane=v; for(int i=1;i<g_npane;i++){ if(!g_panes[i].sess){ puci_session_options sopts={0}; sopts.provider=pcfg; sopts.system_prompt="test"; sopts.approve_cb=tui_approval_cb; if(puci_session_create(ctx,&sopts,&g_panes[i].sess)==PUCI_OK){ ring_push_typed(&g_panes[i].ring,"— test pane —", RL_SYSTEM); } } } } } }
+    { const char *pn=getenv("PUCI_TUI_PANES"); if(pn && *pn){ int v=atoi(pn); if(v>=1 && v<=MAX_PANES){ g_npane=v; for(int i=1;i<g_npane;i++){ if(!g_panes[i].sess){ puci_session_options sopts={0}; sopts.provider=pcfg; sopts.system_prompt="test"; sopts.approval_mode=PUCI_APPROVAL_MODE_EVENT; if(puci_session_create(ctx,&sopts,&g_panes[i].sess)==PUCI_OK){ ring_push_typed(&g_panes[i].ring,"— test pane —", RL_SYSTEM); } } } } } }
     get_winsize(&g_rows,&g_cols);
     if(cli_prompt){
         snprintf(g_input, sizeof g_input, "%.*s", (int)(sizeof g_input -1), cli_prompt);
@@ -1712,6 +1734,73 @@ int puci_tui_run(const puci_cli_params *params){
                         if(!g_input_mode){ g_input_mode=1; g_hist_pos=g_hist_count; g_hist_tmp[0]=0; }
                         continue;
                     }
+                    if(g_approval_pending){
+                        /* Modal approval overlay: all keys are scoped to the
+                           decision. q/ESC deny (cancel semantics), y allow
+                           once, A allow always, n deny, d deny-with-reason,
+                           j/k scroll. The decision is resolved asynchronously
+                           so the main poll() loop is never blocked. */
+                        if(c==3){ /* Ctrl-C: cancel -> deny wins */
+                            if(g_approval_pane>=0 && g_panes[g_approval_pane].sess){
+                                TRACE(TR_APPROVAL,2);
+                                puci_session_resolve_approval(g_panes[g_approval_pane].sess, g_approval_id, PUCI_APPROVAL_DENY);
+                            }
+                            g_approval_pending=0; g_approval_pane=-1;
+                        }
+                        else if(c==27){ /* ESC: deny (safety default) */
+                            if(g_approval_pane>=0 && g_panes[g_approval_pane].sess){
+                                TRACE(TR_APPROVAL,3);
+                                puci_session_resolve_approval(g_panes[g_approval_pane].sess, g_approval_id, PUCI_APPROVAL_DENY);
+                            }
+                            g_approval_pending=0; g_approval_pane=-1;
+                        }
+                        else if(g_approval_feedback_mode){
+                            /* Collecting a denial reason (safe printable
+                               text only; no command keys accepted). */
+                            if(c=='\n'||c=='\r'){
+                                g_approval_feedback[g_approval_feedback_len]=0;
+                                if(g_approval_pane>=0 && g_panes[g_approval_pane].sess){
+                                    if(g_approval_feedback[0]) puci_session_set_approval_feedback(g_panes[g_approval_pane].sess, g_approval_feedback);
+                                    TRACE(TR_APPROVAL,4);
+                                    puci_session_resolve_approval(g_panes[g_approval_pane].sess, g_approval_id, PUCI_APPROVAL_DENY);
+                                }
+                                g_approval_pending=0; g_approval_pane=-1;
+                            } else if(c==8||c==127){
+                                if(g_approval_feedback_len>0) g_approval_feedback[--g_approval_feedback_len]=0;
+                            } else if(c==27){
+                                g_approval_feedback_mode=0; g_approval_feedback_len=0; g_approval_feedback[0]=0;
+                            } else if(c>=32 && c<127){
+                                if(g_approval_feedback_len+1 < sizeof g_approval_feedback){ g_approval_feedback[g_approval_feedback_len++]=(char)c; }
+                            }
+                        }
+                        else if(c=='y'||c=='Y'){ /* allow once */
+                            if(g_approval_pane>=0 && g_panes[g_approval_pane].sess){
+                                TRACE(TR_APPROVAL,5);
+                                puci_session_resolve_approval(g_panes[g_approval_pane].sess, g_approval_id, PUCI_APPROVAL_ALLOW_ONCE);
+                            }
+                            g_approval_pending=0; g_approval_pane=-1;
+                        }
+                        else if(c=='a'||c=='A'){ /* allow always for this tool */
+                            if(g_approval_pane>=0 && g_panes[g_approval_pane].sess){
+                                TRACE(TR_APPROVAL,6);
+                                puci_session_resolve_approval(g_panes[g_approval_pane].sess, g_approval_id, PUCI_APPROVAL_ALLOW_ALWAYS);
+                            }
+                            g_approval_pending=0; g_approval_pane=-1;
+                        }
+                        else if(c=='n'||c=='N'||c=='q'){ /* deny (default policy) */
+                            if(g_approval_pane>=0 && g_panes[g_approval_pane].sess){
+                                TRACE(TR_APPROVAL,7);
+                                puci_session_resolve_approval(g_panes[g_approval_pane].sess, g_approval_id, PUCI_APPROVAL_DENY);
+                            }
+                            g_approval_pending=0; g_approval_pane=-1;
+                        }
+                        else if(c=='d'||c=='D'){ /* deny with a reason */
+                            g_approval_feedback_mode=1; g_approval_feedback_len=0; g_approval_feedback[0]=0;
+                        }
+                        else if(c=='j'){ if(g_hunk_off < g_hunk_max-1) g_hunk_off++; }
+                        else if(c=='k'){ if(g_hunk_off>0) g_hunk_off--; }
+                        continue;
+                    }
                     if(c==3){ // Ctrl-C: cancel in-flight turn, else exit
                         Pane *pp=&g_panes[g_focus];
                         int cancelled=0;
@@ -1729,10 +1818,6 @@ int puci_tui_run(const puci_cli_params *params){
                     else if(c=='G'){ Pane *pp=&g_panes[g_focus]; pp->scroll_off=0; }
                     else if(c=='?'){
                         ring_push_typed(&g_panes[g_focus].ring,"Keys: Enter prompt  ↑↓/PgUpDn scroll  s sessions  m model  TAB pane  q quit  g/G top/bottom", RL_SYSTEM);
-                    }
-                    if(g_approval_pending){
-                        if(c=='y'||c=='Y'){ g_approval_result=1; g_approval_pending=0; }
-                        else if(c=='n'||c=='N'){ g_approval_result=-1; g_approval_pending=0; }
                     }
                 }
             }
@@ -1792,6 +1877,26 @@ int puci_tui_run(const puci_cli_params *params){
                 } else if(ev.kind==PUCI_EVENT_TURN_CANCELLED){
                     pane_stream_end(&g_panes[i]);
                     ring_push_typed(&g_panes[i].ring,"— cancelled —", RL_ERROR);
+                } else if(ev.kind==PUCI_EVENT_APPROVAL_REQUEST){
+                    /* Non-blocking: record the pending overlay; the main loop
+                       keeps running (other panes stream, resize, timers). */
+                    if(g_approval_pending){
+                        /* Safety: a stale dialog's allow must never fire a
+                           tool. Invalidate it explicitly, then show the new. */
+                        if(g_approval_pane>=0 && g_panes[g_approval_pane].sess){
+                            TRACE(TR_APPROVAL,1);
+                            puci_session_resolve_approval(g_panes[g_approval_pane].sess,
+                                                          g_approval_id,
+                                                          PUCI_APPROVAL_DENY);
+                        }
+                        g_approval_pending=0;
+                    }
+                    tui_open_approval(i, &ev.payload.approval);
+                    ring_push_typed(&g_panes[i].ring, "🔐 tool awaiting approval — y allow · A always · n deny", RL_SYSTEM);
+                } else if(ev.kind==PUCI_EVENT_APPROVAL_RESOLVED){
+                    if(g_approval_pending && g_approval_id==ev.payload.approval_resolved.id){
+                        g_approval_pending=0; g_approval_pane=-1;
+                    }
                 } else if(ev.kind==PUCI_EVENT_ERROR && ev.text){
                     pane_stream_end(&g_panes[i]);
                     char tmp[512]; snprintf(tmp,sizeof tmp,"⚠ %.*s",(int)ev.text_len, ev.text);
