@@ -302,7 +302,7 @@ static uint64_t drive_to_request(puci_session *sess, evrun *a) {
 /* Resolve the approval and keep pumping until the turn reaches a terminal
  * event, applying per-scenario verdicts to `a`. */
 static void do_one_turn(puci_session *sess, evrun *a, uint64_t rid,
-                        int decision, int provide_feedback) {
+                        puci_approval_decision decision, int provide_feedback) {
     if (provide_feedback) {
         CHECK(puci_session_set_approval_feedback(sess, "user declined") == PUCI_OK);
     }
