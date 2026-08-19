@@ -1914,7 +1914,12 @@ int puci_tui_run(const puci_cli_params *params){
     const char *cli_prompt = params ? params->prompt : NULL;
     int plan_mode = params ? params->plan_mode : 0;
     int headless=0;
-    if(tb_init()!=0){
+    /* PUCI_TUI_TTY lets tests/harnesses point termbox at an explicit tty path
+       (e.g. a pty slave) instead of the default /dev/tty, which is absent on
+       headless CI runners. */
+    const char *tty_path = getenv("PUCI_TUI_TTY");
+    int tb_rc = tty_path ? tb_init_file(tty_path) : tb_init();
+    if(tb_rc!=0){
         if(getenv("PUCI_TUI_FORCE")){
             headless=1; g_headless=1;
             fprintf(stderr,"[tui] headless trace mode (tb_init failed)\n");

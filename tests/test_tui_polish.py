@@ -49,9 +49,17 @@ def run_tui(rows, cols, base_url, run_ms=3200):
     env["PUCI_MODEL"] = "mock-model"
     env["PUCI_TUI_FORCE"] = "1"
     env["PUCI_TUI_EXIT_AFTER_MS"] = str(run_ms)
+    # CI runners often have TERM=dumb or unset; termbox2 needs a real terminfo entry.
+    env["TERM"] = "xterm-256color"
 
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+    # Point termbox at the pty slave directly so tb_init does not need /dev/tty,
+    # which is absent on headless CI runners.
+    try:
+        env["PUCI_TUI_TTY"] = os.ttyname(slave)
+    except OSError:
+        pass
 
     def _setsid_ctty():
         os.setsid()
@@ -104,12 +112,15 @@ def ck(label, cond, detail=""):
 
 
 def main():
+    debug = os.environ.get("PUCI_TUI_DEBUG")
     fake, port = start_fake()
     try:
         base = f"http://127.0.0.1:{port}/v1"
         for (cols, rows) in SIZES:
             out = run_tui(rows, cols, base)
             tag = f"{rows}x{cols}"
+            if debug:
+                print(f"[debug] {tag}: {len(out)} bytes; head={out[:160]!r}", file=sys.stderr)
 
             ck(f"{tag} no-ttg", "\u2063" not in out, "U+2063 sentinel leaked")
             ck(f"{tag} no-timestamp", not re.search(r"[0-9]{9,}", out),
