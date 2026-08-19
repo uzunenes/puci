@@ -78,9 +78,7 @@ jobs:
       - name: Configure with sanitizers
         env:
           CC: clang
-          CFLAGS: "-fsanitize=address,undefined -fno-omit-frame-pointer -g"
-          LDFLAGS: "-fsanitize=address,undefined"
-        run: meson setup build-san --werror -Db_sanitize=address,undefined
+        run: meson setup build-san --werror -Db_sanitize=address,undefined -Db_lundef=false
 
       - name: Compile
         run: ninja -C build-san
