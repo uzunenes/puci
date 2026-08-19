@@ -13,7 +13,7 @@ jobs:
   build-and-test:
     name: Build & test (${{ matrix.cc }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -24,12 +24,14 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
+          for i in 1 2 3; do
+            sudo apt-get update && break || sleep 10
+          done
           sudo apt-get install -y \
             libcurl4-openssl-dev \
             python3-pip \
             ninja-build
-          pipx install meson || pip3 install --user meson
+          pip3 install --user meson
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Configure (${{ matrix.cc }})
@@ -46,19 +48,21 @@ jobs:
   sanitizer:
     name: Sanitizers (ASan + UBSan)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
+          for i in 1 2 3; do
+            sudo apt-get update && break || sleep 10
+          done
           sudo apt-get install -y \
             libcurl4-openssl-dev \
             python3-pip \
             ninja-build
-          pipx install meson || pip3 install --user meson
+          pip3 install --user meson
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Configure with sanitizers
@@ -80,7 +84,7 @@ jobs:
   bench:
     name: Swarm density benchmark
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     continue-on-error: true
 
     steps:
@@ -88,12 +92,14 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
+          for i in 1 2 3; do
+            sudo apt-get update && break || sleep 10
+          done
           sudo apt-get install -y \
             libcurl4-openssl-dev \
             python3-pip \
             ninja-build
-          pipx install meson || pip3 install --user meson
+          pip3 install --user meson
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Configure benchmark build
