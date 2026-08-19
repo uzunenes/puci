@@ -22,16 +22,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Cache pip (meson)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-meson-${{ runner.os }}
+
       - name: Install dependencies
         run: |
-          for i in 1 2 3; do
-            sudo apt-get update && break || sleep 10
+          for i in 1 2 3 4 5; do
+            sudo apt-get update && break || { echo "apt retry $i"; sleep 15; }
           done
-          sudo apt-get install -y \
+          sudo apt-get install -y --no-install-recommends \
             libcurl4-openssl-dev \
-            python3-pip \
             ninja-build
-          pip3 install --user meson
+          pip3 install --user --upgrade meson
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Configure (${{ matrix.cc }})
@@ -53,16 +58,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Cache pip (meson)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-meson-${{ runner.os }}
+
       - name: Install dependencies
         run: |
-          for i in 1 2 3; do
-            sudo apt-get update && break || sleep 10
+          for i in 1 2 3 4 5; do
+            sudo apt-get update && break || { echo "apt retry $i"; sleep 15; }
           done
-          sudo apt-get install -y \
+          sudo apt-get install -y --no-install-recommends \
             libcurl4-openssl-dev \
-            python3-pip \
             ninja-build
-          pip3 install --user meson
+          pip3 install --user --upgrade meson
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Configure with sanitizers
@@ -90,16 +100,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Cache pip (meson)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-meson-${{ runner.os }}
+
       - name: Install dependencies
         run: |
-          for i in 1 2 3; do
-            sudo apt-get update && break || sleep 10
+          for i in 1 2 3 4 5; do
+            sudo apt-get update && break || { echo "apt retry $i"; sleep 15; }
           done
-          sudo apt-get install -y \
+          sudo apt-get install -y --no-install-recommends \
             libcurl4-openssl-dev \
-            python3-pip \
             ninja-build
-          pip3 install --user meson
+          pip3 install --user --upgrade meson
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Configure benchmark build
