@@ -1,4 +1,4 @@
-# PUCI vs Competitors — Technical Comparison (v0.4.0)
+# PUCI vs Competitors — Technical Comparison (v0.5.0)
 
 > **Methodology & Honesty:** PUCI numbers are measured on this repo (`bench/bench_swarm`, `bench/bench_session_growth`, `/proc/smaps_rollup` PSS). Competitor numbers are **order-of-magnitude estimates** from public profiling, docs, and isolated local runs — not controlled lab benchmarks. They are marked `~` (estimated) or `measured` where we ran them. Reproduce PUCI numbers via commands below; competitor numbers vary by version/model/plugins.
 
@@ -13,13 +13,13 @@
 | **Process supervision** | `fork+execvp` (no `system()`), `setpgid`/`killpg`, non-blocking pipe drain, `SIGTERM→SIGKILL` 2s grace, `waitpid` reaping, bounded `CAPTURE_CAP` 1 MB | `subprocess` (Python) | `child_process` (Node) | VSCode `Terminal` | Varies |
 | **Safety** | Path guards (`.git/build*/puci-good` via `realpath`), atomic `tmp→fsync→rename`, credential redaction, `plan_mode` | Minimal | Minimal | VSCode sandbox | Varies |
 | **Ecosystem** | **MCP stdio JSON-RPC 2.0** (4 KB buffered), OpenAI-compatible + Anthropic (`anthropic-version: 2023-06-01`), Ollama/vLLM/OpenRouter | MCP (py) | MCP (js) | MCP (js) | Often custom |
-| **Context management** | **3-tier budget** (head+tail preserve, verbose TOOL truncation, dedup, pre-flight auto-compact, `PUCI_CONTEXT_BUDGET`) — v0.4.0 | Sliding window + repo map | Repo map + summarization | VSCode context | Usually none |
+| **Context management** | **3-tier budget** (head+tail preserve, verbose TOOL truncation, dedup, pre-flight auto-compact, `PUCI_CONTEXT_BUDGET`) — v0.5.0 | Sliding window + repo map | Repo map + summarization | VSCode context | Usually none |
 | **ABI stability** | **ABI v2** stable, `pkg-config`, dual-compiler `-Wconversion -Werror`, ASan/UBSan + Valgrind `definite,indirect` 0 leaks | Semver (py) | Semver (npm) | VSCode API | Varies |
 
 ## Reproduction (PUCI)
 
 ```sh
-meson setup build && ninja -C build && meson test -C build          # 18 tests, 0 leaks
+meson setup build && ninja -C build && meson test -C build          # 24 tests, 0 leaks
 meson setup build-bench -Dbench=true && ./build-bench/bench/bench_swarm 1000  # 685 turns/s, 106 MB
 ./build-bench/bench/bench_session_growth 16384                        # per-msg PSS delta
 ```
@@ -32,8 +32,8 @@ meson setup build-bench -Dbench=true && ./build-bench/bench/bench_swarm 1000  # 
 
 ## Limitations vs Competitors (honest)
 
-- **Repo intelligence:** No tree-sitter AST / vector index yet (Aider/Claude have mature repo-map). Planned v0.4.1.
+- **Repo intelligence:** No tree-sitter AST / vector index yet (Aider/Claude have mature repo-map). Planned post-1.0.
 - **MCP:** stdio only; no SSE/HTTP transport yet.
 - **Windows:** Linux primary; macOS kqueue path partial; Windows IOCP not shipped.
 
-*Last updated: 2026-08-15, PUCI v0.4.0, ABI 2.*
+*Last updated: 2026-08-19, PUCI v0.5.0, ABI 2.*

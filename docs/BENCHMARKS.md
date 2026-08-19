@@ -1,4 +1,4 @@
-# PUCI Benchmarks — 1000-Agent Swarm Density (v0.3.0)
+# PUCI Benchmarks — 1000-Agent Swarm Density (v0.5.0)
 
 ## Summary
 
@@ -47,7 +47,7 @@ ninja -C build-examples examples/bench_swarm
 
 *Python/Node estimates are order-of-magnitude from public profiling; PUCI numbers are measured above.*
 
-## Hardening Notes (v0.3.0)
+## Hardening Notes (v0.5.0)
 
 - SSE parser caps at 8 MB (`PUCI_ERR_LIMIT_EXCEEDED`).
 - MCP stdio uses 4 KB buffered reader (vs byte-at-a-time).

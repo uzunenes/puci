@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build & test (${{ matrix.cc }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libcurl4-openssl-dev \
+            python3-pip \
+            ninja-build
+          pipx install meson || pip3 install --user meson
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Configure (${{ matrix.cc }})
+        env:
+          CC: ${{ matrix.cc }}
+        run: meson setup build --werror
+
+      - name: Compile (${{ matrix.cc }})
+        run: ninja -C build
+
+      - name: Test (${{ matrix.cc }})
+        run: meson test -C build --print-errorlogs
+
+  sanitizer:
+    name: Sanitizers (ASan + UBSan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libcurl4-openssl-dev \
+            python3-pip \
+            ninja-build
+          pipx install meson || pip3 install --user meson
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Configure with sanitizers
+        env:
+          CC: clang
+          CFLAGS: "-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          LDFLAGS: "-fsanitize=address,undefined"
+        run: meson setup build-san --werror -Db_sanitize=address,undefined
+
+      - name: Compile
+        run: ninja -C build-san
+
+      - name: Test under sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1
+        run: meson test -C build-san --print-errorlogs --timeout-multiplier 3
+
+  bench:
+    name: Swarm density benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libcurl4-openssl-dev \
+            python3-pip \
+            ninja-build
+          pipx install meson || pip3 install --user meson
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Configure benchmark build
+        run: meson setup build-bench -Dbench=true
+
+      - name: Build benchmark
+        run: ninja -C build-bench bench/bench_swarm
+
+      - name: Run 100-agent density check
+        run: ./build-bench/bench/bench_swarm 100

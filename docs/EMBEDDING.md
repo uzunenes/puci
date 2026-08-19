@@ -114,5 +114,5 @@ tool_timeout_ms = 60000
 
 ## Current limitations
 
-- Python bindings and PyPI publication are out of scope for v0.3.0.
-- Phase 3b features (tree-sitter search, MCP SSE transport) are staged post-v0.3.0.
+- Python bindings and PyPI publication are out of scope for the 0.x track.
+- Phase 3b features (tree-sitter search, MCP SSE transport) are staged post-1.0.

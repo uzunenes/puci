@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Added
+
+- GitHub Actions CI (`.github/workflows/ci.yml`): dual-compiler (gcc + clang) build & test matrix, ASan + UBSan sanitizer job, and swarm density benchmark job.
+- README badges (CI status, MIT license, version, C17) and a "SQLite of AI agent harnesses" tagline with a one-line value proposition.
+
+### Fixed
+
+- Clang build: added missing trailing newlines in `src/cli/tui/content.h`, `src/cli/tui/ttg.h`, `src/cli/tui/ttg.c`, and `tests/integration/test_approval_event.c` (`-Wnewline-eof` under `-Werror`).
+- Clang build: `do_one_turn` in `test_approval_event.c` now takes a `puci_approval_decision` instead of `int` (`-Wsign-conversion`).
+- `subprojects/termbox2.wrap` now declares `patch_directory = termbox2` so the bundled `meson.build` is applied automatically on a fresh checkout (previously required a manual copy, leaving the TUI silently disabled).
+
+### Changed
+
+- LICENSE copyright holder corrected from the project name to the author (`Enes Uzun`).
+- Documentation version references synchronized to v0.5.0: `docs/SHOW_HN.md`, `docs/BENCHMARKS.md`, `docs/COMPARISON.md`, `docs/EMBEDDING.md`. Corrected the per-session figure in `SHOW_HN.md` to ~103 kB PSS (matching `BENCHMARKS.md`/`COMPARISON.md`) and the test count in `COMPARISON.md` (18 → 24).
+
 ## [0.5.0] - 2026-08-15
 
 ### Added

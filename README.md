@@ -1,5 +1,15 @@
 # puci
 
+[![CI](https://github.com/uzunenes/puci/actions/workflows/ci.yml/badge.svg)](https://github.com/uzunenes/puci/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.5.0-2.0)](CHANGELOG.md)
+[![C17](https://img.shields.io/badge/C-C17-blue.svg)](https://en.cppreference.com/w/c/17)
+
+> **The SQLite of AI agent harnesses** — a minimal C17 core you embed into
+> Neovim, game engines, or a 1,000-way evaluation swarm. No Python, no Node,
+> no runtime bloat: ~103 kB per session, sub-ms cold start, 1,000 agents on
+> one `poll()` loop.
+
 PUCI is a minimal AI coding-agent harness written in portable C17. It is for
 embedders that want a small provider/tool core and a caller-owned poll loop.
 
