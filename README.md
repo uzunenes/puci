@@ -33,7 +33,7 @@ Enter prompt   ·   ↑/↓ scroll   ·   s sessions   ·   m model
 
 More sizes in [`docs/snapshots/`](docs/snapshots/). Keybindings: [`docs/KEYBINDINGS.md`](docs/KEYBINDINGS.md).
 
-## Comparison (vs Aider / Claude Code / Cline / agent.cpp)
+## Why
 
 |  | **PUCI (C17)** | Python/Node competitors |
 |--|---------------|------------------------|
@@ -44,28 +44,7 @@ More sizes in [`docs/snapshots/`](docs/snapshots/). Keybindings: [`docs/KEYBINDI
 
 Full grounded matrix + methodology: [`docs/COMPARISON.md`](docs/COMPARISON.md) · Repro: `bench/bench_swarm 1000`
 
-## What works
-
-- **Providers:** OpenAI-compatible streaming (OpenAI, OpenRouter, Ollama, vLLM, LM Studio) + Anthropic Messages API with `tool_use`
-- **Sessions:** blocking `puci_session_send()` and non-blocking pollable driving; concurrent agents on one `poll()` loop
-- **Tools:** custom tools, async execution (long-running tools yield fds), MCP stdio client (JSON-RPC 2.0)
-- **Events:** text, reasoning, tool-call/result, completion, cancellation, error
-- **Quality:** ASan/UBSan-clean, Clang + GCC, 24 tests
-
-## Current limitations
-
-0.x API — may change before 1.0. MCP client and Anthropic provider are new; validated against offline mock fixtures, not live endpoints.
-
-## Repository layout
-
-- `libpuci` — reusable core (agent loop, providers, tools, streaming HTTP, MCP)
-- `puci-cli` — terminal client (thin libpuci consumer)
-- `bindings/lua` + `lua/puci` + `plugin/puci.lua` — `puci.nvim` plugin (zero `-llua`)
-- `examples/` — `embedded_editor_agent`, `poll_loop`, `bench_swarm`, and more
-- `bench/bench_swarm` — 1000-agent density benchmark ([`docs/BENCHMARKS.md`](docs/BENCHMARKS.md))
-- Design: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-
-## Building
+## Installation
 
 ```sh
 meson setup build
@@ -112,7 +91,7 @@ context_budget_bytes = 131072
 tool_timeout_ms = 60000
 ```
 
-## MCP servers
+### MCP servers
 
 Connect external Model Context Protocol servers via stdio in `~/.config/puci/config.toml`:
 
@@ -123,6 +102,27 @@ args = ["--repository", "."]
 ```
 
 PUCI launches each server, performs the MCP handshake, discovers tools, and dispatches `tools/call` over JSON-RPC 2.0.
+
+## Features
+
+- **Providers:** OpenAI-compatible streaming (OpenAI, OpenRouter, Ollama, vLLM, LM Studio) + Anthropic Messages API with `tool_use`
+- **Sessions:** blocking `puci_session_send()` and non-blocking pollable driving; concurrent agents on one `poll()` loop
+- **Tools:** custom tools, async execution (long-running tools yield fds), MCP stdio client (JSON-RPC 2.0)
+- **Events:** text, reasoning, tool-call/result, completion, cancellation, error
+- **Quality:** ASan/UBSan-clean, Clang + GCC, 24 tests
+
+### Current limitations
+
+0.x API — may change before 1.0. MCP client and Anthropic provider are new; validated against offline mock fixtures, not live endpoints.
+
+## Repository layout
+
+- `libpuci` — reusable core (agent loop, providers, tools, streaming HTTP, MCP)
+- `puci-cli` — terminal client (thin libpuci consumer)
+- `bindings/lua` + `lua/puci` + `plugin/puci.lua` — `puci.nvim` plugin (zero `-llua`)
+- `examples/` — `embedded_editor_agent`, `poll_loop`, `bench_swarm`, and more
+- `bench/bench_swarm` — 1000-agent density benchmark ([`docs/BENCHMARKS.md`](docs/BENCHMARKS.md))
+- Design: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 
 ## Self-Hosting and Recovery
 
