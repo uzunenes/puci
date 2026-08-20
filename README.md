@@ -1,8 +1,10 @@
 # puci
 
+**Minimal C17 AI agent harness — embed it into Neovim, game engines, or a 1,000-way evaluation swarm.**
+
 [![CI](https://github.com/uzunenes/puci/actions/workflows/ci.yml/badge.svg)](https://github.com/uzunenes/puci/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.5.0-2.0)](CHANGELOG.md)
+[![Version](https://img.shields.io/github/v/release/uzunenes/puci?label=version)](https://github.com/uzunenes/puci/releases)
 [![C17](https://img.shields.io/badge/C-C17-blue.svg)](https://en.cppreference.com/w/c/17)
 
 > **The SQLite of AI agent harnesses** — a minimal C17 core you embed into
@@ -35,16 +37,65 @@ More sizes in [`docs/snapshots/`](docs/snapshots/). Keybindings: [`docs/KEYBINDI
 
 ## Why
 
-|  | **PUCI (C17)** | Python/Node competitors |
-|--|---------------|------------------------|
-| **PSS / session** | **~103 kB** measured | ~30–150 MB |
-| **8 GB host** | **~1000 agents** (one `poll()` loop) | ~20–40 |
-| **Cold start** | **<2 ms** | 150–800 ms |
-| **Embed** | C ABI + `puci.nvim` (no `-llua`) | IPC only |
+|  | **PUCI (C17)** | Aider (Python) | Claude Code (Node) | Cline (TS) |
+|--|---------------|----------------|-------------------|------------|
+| **PSS / session** | **~103 kB** measured | ~30–80 MB | ~40–100 MB | ~80–150 MB |
+| **8 GB host** | **~1000 agents** (measured, `bench_swarm 1000`) | ~20–40 | ~20–40 | ~10–20 |
+| **Cold start** | **<2 ms** | 250–800 ms | 150–400 ms | 300–600 ms |
+| **Embed** | C ABI + `puci.nvim` (no `-llua`) | IPC only | IPC only | VSCode API |
 
-Full grounded matrix + methodology: [`docs/COMPARISON.md`](docs/COMPARISON.md) · Repro: `bench/bench_swarm 1000`
+Competitor numbers are order-of-magnitude estimates, not controlled lab benchmarks. Full matrix + methodology: [`docs/COMPARISON.md`](docs/COMPARISON.md) · Repro: `bench/bench_swarm 1000`
+
+## Embedding example
+
+The whole point of PUCI is a tiny C ABI you drive from your own loop. This is
+`examples/minimal_agent.c` — create a context, configure a provider, send one
+prompt, stream tokens to stdout:
+
+```c
+#include <puci/puci.h>
+#include <stdio.h>
+
+static void on_event(void *ud, puci_session *s, puci_event ev, const void *ctx) {
+    if (ev.kind == PUCI_EVENT_TOKEN_DELTA && ev.text) {
+        fputs(ev.text, stdout); fflush(stdout);
+    }
+}
+
+int main(int argc, char **argv) {
+    puci_context *ctx = NULL;
+    puci_context_create(NULL, &ctx);
+
+    const char *model = getenv("PUCI_MODEL");
+    if (!model) model = "gpt-4o-mini";
+
+    puci_provider_config pcfg = {
+        .name = "openai",
+        .base_url = getenv("PUCI_BASE_URL"),
+        .api_key  = getenv("PUCI_API_KEY"),
+        .model    = model,
+    };
+    puci_context_set_provider(ctx, &pcfg);
+
+    puci_session_options sopts = { .provider = pcfg, .event_cb = on_event };
+    puci_session *sess = NULL;
+    puci_session_create(ctx, &sopts, &sess);
+
+    puci_session_send(sess, argv[1]);   /* blocking; streams via on_event */
+    puci_session_destroy(sess);
+    puci_context_destroy(ctx);
+}
+```
+
+Build: `cc examples/minimal_agent.c $(pkg-config --cflags --libs puci) -o minimal_agent`
+
+More examples (`embedded_editor_agent`, `poll_loop`, `bench_swarm`): [`examples/`](examples/) · Full guide: [`docs/EMBEDDING.md`](docs/EMBEDDING.md)
 
 ## Installation
+
+**Requirements:** C17 compiler (GCC or Clang), Meson ≥ 1.0, Ninja, libcurl dev headers. termbox2 is vendored (no submodule).
+
+**Platforms:** Linux (primary), macOS (partial kqueue path). Windows IOCP not shipped yet.
 
 ```sh
 meson setup build
@@ -59,14 +110,33 @@ CC=gcc   meson setup build-gcc   && meson compile -C build-gcc   && meson test -
 CC=clang meson setup build-clang && meson compile -C build-clang && meson test -C build-clang
 ```
 
-Install the library and compile an embedder with `pkg-config`:
+Install the library system-wide:
 
 ```sh
 meson setup build -Dprefix=/usr/local && meson compile -C build && meson install -C build
-cc examples/embedded_headless.c $(pkg-config --cflags --libs puci) -o embedded_headless
 ```
 
 Optional switches (`-Dexamples=true`, `-Dlua=true`, `-Dbench=true`) and the full embedding guide: [`docs/EMBEDDING.md`](docs/EMBEDDING.md).
+
+### Quick start
+
+```sh
+export PUCI_API_KEY="sk-..."
+./build/src/cli/puci              # launch the TUI
+# or one-shot:
+./build/src/cli/puci run "hello"
+```
+
+### Neovim (`puci.nvim`)
+
+Zero `-llua` dependency — the C module ships its own minimal Lua C ABI. With
+[lazy.nvim](https://github.com/folke/lazy.nvim):
+
+```lua
+{ "uzunenes/puci", build = "meson setup build && ninja -C build", config = function()
+    require("puci").setup({})
+end }
+```
 
 ## Configuration
 
@@ -109,11 +179,12 @@ PUCI launches each server, performs the MCP handshake, discovers tools, and disp
 - **Sessions:** blocking `puci_session_send()` and non-blocking pollable driving; concurrent agents on one `poll()` loop
 - **Tools:** custom tools, async execution (long-running tools yield fds), MCP stdio client (JSON-RPC 2.0)
 - **Events:** text, reasoning, tool-call/result, completion, cancellation, error
-- **Quality:** ASan/UBSan-clean, Clang + GCC, 24 tests
+- **Safety:** tool-call approval callbacks with unified diffs, plan mode (`--dry-run`), credential redaction
+- **Quality:** ASan/UBSan-clean, Clang + GCC, full test suite in CI
 
-### Current limitations
+## Status
 
-0.x API — may change before 1.0. MCP client and Anthropic provider are new; validated against offline mock fixtures, not live endpoints.
+0.x API — may change before 1.0. MCP client and Anthropic provider are new; validated against offline mock fixtures, not live endpoints. No tree-sitter AST / vector index yet (planned post-1.0). MCP is stdio-only (no SSE/HTTP transport yet).
 
 ## Repository layout
 
@@ -127,6 +198,16 @@ PUCI launches each server, performs the MCP handshake, discovers tools, and disp
 ## Self-Hosting and Recovery
 
 When using PUCI to develop PUCI, `make install-good` preserves a verified binary at `~/.local/bin/puci-good`. See [docs/RECOVERY.md](docs/RECOVERY.md) for the recovery guide.
+
+## Contributing
+
+PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md). For security issues (especially around credential handling), see [SECURITY.md](SECURITY.md) or report privately.
+
+## Acknowledgements
+
+- [termbox2](https://github.com/termbox/termbox2) — TUI rendering (vendored)
+- [libcurl](https://curl.se/) — HTTP client
+- [Meson](https://mesonbuild.com/) — build system
 
 ## License
 
