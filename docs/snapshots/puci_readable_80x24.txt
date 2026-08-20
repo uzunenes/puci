@@ -1,8 +1,8 @@
-== PUCI snapshot 24x80 (prompt: selam) ==
+== PUCI snapshot 24x80 (prompt: hello) ==
  PUCI · Agent A · mock-model                            ● Ready · Context 0%
 ┌─ Agent A ────────────────────────────────────────────────────────────────────┐
-│YOU  ❯ selam
-│PUCI · mock-model  Selam! Nasıl yardımcı olabilirim?                          │
+│YOU  ❯ hello
+│PUCI · mock-model  Hi there! How can I help?                                  │
 │                                                                              │
 │                                                                              │
 │                                                                              │

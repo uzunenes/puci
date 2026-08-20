@@ -13,6 +13,26 @@
 PUCI is a minimal AI coding-agent harness written in portable C17. It is for
 embedders that want a small provider/tool core and a caller-owned poll loop.
 
+## The TUI
+
+`puci-cli` ships a termbox2 TUI for interactive use — multi-session, scrollable
+transcript, model switcher, approval prompts. A real 80×24 session:
+
+<pre lang="text">
+ PUCI · Agent A · mock-model                            ● Ready · Context 0%
+┌─ Agent A ────────────────────────────────────────────────────────────────────┐
+│YOU  ❯ hello
+│PUCI · mock-model  Hi there! How can I help?                                  │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌─ Composer ───────────────────────────────────────────────────────────────────┐
+│Message … (Enter to compose)                                                  │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter prompt   ·   ↑/↓ scroll   ·   s sessions   ·   m model
+</pre>
+
+More sizes in [`docs/snapshots/`](docs/snapshots/). Keybindings: [`docs/KEYBINDINGS.md`](docs/KEYBINDINGS.md).
+
 ## Comparison (vs Aider / Claude Code / Cline / agent.cpp)
 
 |  | **PUCI (C17)** | Python/Node competitors |
@@ -26,32 +46,24 @@ Full grounded matrix + methodology: [`docs/COMPARISON.md`](docs/COMPARISON.md) �
 
 ## What works
 
-- OpenAI-compatible streaming (OpenAI, OpenRouter, Ollama, vLLM, LM Studio)
-- Anthropic Messages API (`anthropic-version: 2023-06-01`) with `tool_use` round-trip
-- Blocking `puci_session_send()` and non-blocking, pollable session driving
-- Async tool execution: long-running tools yield and register fds so the host loop never stalls
-- Model Context Protocol (MCP) stdio client: discover and dispatch external tools over JSON-RPC 2.0
-- Text, reasoning, tool-call, tool-result, completion, cancellation, and error payloads
-- Custom tools, approval callbacks, cancellation, ASan/UBSan, and Clang builds
-- Concurrent agents: multiple sessions on a single host `poll()` loop
+- **Providers:** OpenAI-compatible streaming (OpenAI, OpenRouter, Ollama, vLLM, LM Studio) + Anthropic Messages API with `tool_use`
+- **Sessions:** blocking `puci_session_send()` and non-blocking pollable driving; concurrent agents on one `poll()` loop
+- **Tools:** custom tools, async execution (long-running tools yield fds), MCP stdio client (JSON-RPC 2.0)
+- **Events:** text, reasoning, tool-call/result, completion, cancellation, error
+- **Quality:** ASan/UBSan-clean, Clang + GCC, 24 tests
 
 ## Current limitations
 
-The public API is an early 0.x contract and may change before 1.0. The MCP
-client and Anthropic provider are new in the v0.2.0 track and are exercised by
-offline mock fixtures; live MCP servers and live Anthropic endpoints should be
-validated against your own deployments.
+0.x API — may change before 1.0. MCP client and Anthropic provider are new; validated against offline mock fixtures, not live endpoints.
 
 ## Repository layout
 
-- `libpuci` — the reusable core (agent loop, providers, tools, streaming HTTP,
-  MCP client)
-- `puci-cli` — the terminal client, a thin consumer of libpuci
-- `bindings/lua` — minimal C-ABI Lua module (`puci.so`) for Neovim / LuaJIT
-- `lua/puci` + `plugin/puci.lua` — zero-dependency `puci.nvim` plugin (`:Puci`, `require('puci').create_session()`)
-- `examples/` — embedder examples including `embedded_editor_agent`, `poll_loop`, and `bench_swarm`
-- `bench/bench_swarm` — 1000-agent density benchmark (`docs/BENCHMARKS.md`)
-- See `docs/ARCHITECTURE.md` for the system design.
+- `libpuci` — reusable core (agent loop, providers, tools, streaming HTTP, MCP)
+- `puci-cli` — terminal client (thin libpuci consumer)
+- `bindings/lua` + `lua/puci` + `plugin/puci.lua` — `puci.nvim` plugin (zero `-llua`)
+- `examples/` — `embedded_editor_agent`, `poll_loop`, `bench_swarm`, and more
+- `bench/bench_swarm` — 1000-agent density benchmark ([`docs/BENCHMARKS.md`](docs/BENCHMARKS.md))
+- Design: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 
 ## Building
 
@@ -75,9 +87,7 @@ meson setup build -Dprefix=/usr/local && meson compile -C build && meson install
 cc examples/embedded_headless.c $(pkg-config --cflags --libs puci) -o embedded_headless
 ```
 
-Optional build switches: `-Dexamples=true`, `-Dlua=true` (Neovim bindings), `-Dbench=true` (swarm benchmark). See `docs/EMBEDDING.md` for the full embedding guide.
-
-Notable env vars: `PUCI_MAX_TOOL_ITERATIONS` (cap tool rounds), `PUCI_CONTEXT_BUDGET` (3-tier compaction budget).
+Optional switches (`-Dexamples=true`, `-Dlua=true`, `-Dbench=true`) and the full embedding guide: [`docs/EMBEDDING.md`](docs/EMBEDDING.md).
 
 ## Configuration
 
