@@ -14,19 +14,23 @@
 #include <unistd.h>
 
 static const char *g_test_sink; /* test hook path */
+static int g_test_no_backend;   /* test hook: skip OS clipboard backends */
 static int g_osc52_fallback=false;
 
 /* Try all platform backends feeding data into the returned pipe. Returns true
  * if any backend reported a clean success (stdin fully consumed, exit 0). */
-/* PHP-style guard: a missing backend must not deliver SIGPIPE because we write
+/* Backend stdout/stderr go to /dev/null: xclip and wl-copy fork a daemon that
+ * serves the selection, and it would otherwise keep the host's stdout/stderr
+ * (a pipe, when puci is embedded or under a test runner) open indefinitely.
+ * PHP-style guard: a missing backend must not deliver SIGPIPE because we write
  * to a pipe whose child exited instantly. Ignore SIGPIPE for the write loop and
  * restore the previous disposition afterward. */
 static int clip_backend(const char *data, size_t len){
     static const char *const cmds[] = {
-        "wl-copy",
-        "xclip -selection clipboard",
-        "xsel --clipboard --input",
-        "pbcopy",
+        "wl-copy >/dev/null 2>&1",
+        "xclip -selection clipboard >/dev/null 2>&1",
+        "xsel --clipboard --input >/dev/null 2>&1",
+        "pbcopy >/dev/null 2>&1",
         NULL,
     };
     void (*old)(int) = signal(SIGPIPE, SIG_IGN);
@@ -53,7 +57,7 @@ int clip_copy(const char *data, size_t len){
         return ok?0:1;
     }
 
-    if(!g_osc52_fallback && clip_backend(data,len)==0){
+    if(!g_osc52_fallback && !g_test_no_backend && clip_backend(data,len)==0){
         return 0;
     }
     g_osc52_fallback=true; /* remember: no OS clipboard, stick to OSC 52 */
@@ -99,5 +103,7 @@ int clip_copy(const char *data, size_t len){
 }
 
 void clip_set_test_sink(const char *path){ g_test_sink=path; }
+
+void clip_set_test_no_backend(int on){ g_test_no_backend=on; }
 
 size_t clip_osc52_max(void){ return CTX_OSC52_MAX_PAYLOAD; }

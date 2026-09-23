@@ -208,8 +208,10 @@ static void t_clip(void){
     remove(sink);
 
     /* size policy: oversized payload reported 'too large' (2), never truncated.
-     * Clear the sink first so we exercise the real (OSC 52) size gate. */
+     * Clear the sink and skip OS backends so we exercise the real (OSC 52) size
+     * gate regardless of whether the host has xclip/wl-copy installed. */
     clip_set_test_sink("");
+    clip_set_test_no_backend(1);
     size_t biglen = clip_osc52_max()+1;
     char *big = malloc(biglen); CK(big!=NULL);
     if(big){ memset(big,'x',biglen); CK(clip_copy(big,biglen)==2); free(big); }

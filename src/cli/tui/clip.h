@@ -31,6 +31,10 @@ int clip_copy(const char *data, size_t len);
  * a real clipboard backend, and an empty path disables the sink. */
 void clip_set_test_sink(const char *path);
 
+/* Test hook: nonzero skips the OS clipboard backends so the OSC 52 path (and
+ * its size policy) is exercised without touching a host clipboard. */
+void clip_set_test_no_backend(int on);
+
 /* Current maximum OSC 52 payload (bytes) allowed to go out. */
 size_t clip_osc52_max(void);
 

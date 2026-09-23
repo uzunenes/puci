@@ -11,6 +11,9 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
+- Clipboard: backend commands (`wl-copy`, `xclip`, `xsel`, `pbcopy`) now run with stdout/stderr redirected to `/dev/null`. `xclip` and `wl-copy` fork a daemon to serve the selection, which kept the host's stdout/stderr pipe open indefinitely (an embedding host or test runner reading puci's stdout would hang).
+- `test_content` no longer depends on the host: the OSC 52 size-gate check now skips OS clipboard backends via the new `clip_set_test_no_backend()` hook. Previously it timed out on any machine with `xclip`/`wl-copy` installed, and wrote a 64 KiB payload to the real clipboard.
+- `bench_swarm`: the per-session PSS gate now uses peak PSS per session instead of the post-creation delta, which is within shared-page PSS noise (sessions are idle then) and was often negative, so the gate could never fail. JSON output gains `per_session_peak_pss_kb`; `docs/benchmarks.json` regenerated.
 - Clang build: added missing trailing newlines in `src/cli/tui/content.h`, `src/cli/tui/ttg.h`, `src/cli/tui/ttg.c`, and `tests/integration/test_approval_event.c` (`-Wnewline-eof` under `-Werror`).
 - Clang build: `do_one_turn` in `test_approval_event.c` now takes a `puci_approval_decision` instead of `int` (`-Wsign-conversion`).
 - `subprojects/termbox2.wrap` now declares `patch_directory = termbox2` so the bundled `meson.build` is applied automatically on a fresh checkout (previously required a manual copy, leaving the TUI silently disabled).

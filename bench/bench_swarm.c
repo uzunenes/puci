@@ -224,7 +224,7 @@ int main(int argc, char **argv) {
     printf("\n--- Creation ---\n");
     printf("ctx RSS %ld kB (+%ld), PSS %ld kB (+%ld)\n", after_ctx_rss, after_ctx_rss-base_rss, after_ctx_pss, after_ctx_pss-base_pss);
     printf("after %d sessions: RSS %ld kB (+%ld), PSS %ld kB (+%ld) in %ld ms\n", N, after_create_rss, delta_rss, after_create_pss, delta_pss, create_ms);
-    printf("per-session delta: RSS %.2f kB, PSS %.2f kB\n", per_sess_rss, per_sess_pss);
+    printf("per-session idle delta: RSS %.2f kB, PSS %.2f kB (PSS noise dominates here; gate uses peak)\n", per_sess_rss, per_sess_pss);
 
     /* Start turns and drive poll loop */
     for (int i=0;i<N;i++) {
@@ -317,6 +317,10 @@ int main(int argc, char **argv) {
     printf("\n--- Swarm poll ---\n");
     printf("sessions=%d events=%ld done=%d wall=%ld ms poll_ms=%ld\n", N, events, done, wall_ms, poll_ms);
     printf("peak RSS %ld kB (+%ld vs baseline), PSS %ld kB (+%ld)\n", peak_rss, peak_rss-base_rss, peak_pss, peak_pss-base_pss);
+    /* Gate on peak PSS per session: sessions are idle right after creation, so
+     * the creation delta is within shared-page PSS noise and can go negative. */
+    double peak_sess_pss = N ? (double)(peak_pss - base_pss) / N : 0;
+    printf("per-session peak PSS: %.1f kB\n", peak_sess_pss);
     {
         double ev_rate = poll_ms ? (double)events * 1000.0 / (double)poll_ms : 0;
         double turn_rate = poll_ms ? (double)N * 1000.0 / (double)poll_ms : 0;
@@ -324,8 +328,8 @@ int main(int argc, char **argv) {
     }
     if (peak_rss - base_rss < 250*1024) printf("PASS: total RSS <250 MB for %d sessions\n", N);
     else printf("WARN: RSS exceeds 250 MB target\n");
-    if (per_sess_pss < 300) printf("PASS: per-session PSS %.1f kB <300 kB\n", per_sess_pss);
-    else printf("WARN: per-session PSS %.1f kB exceeds 300 kB\n", per_sess_pss);
+    if (peak_sess_pss < 300) printf("PASS: per-session peak PSS %.1f kB <300 kB\n", peak_sess_pss);
+    else printf("WARN: per-session peak PSS %.1f kB exceeds 300 kB\n", peak_sess_pss);
 
     if (json_enabled && json_path) {
         time_t now_t = time(NULL);
@@ -353,6 +357,7 @@ int main(int argc, char **argv) {
             fprintf(jf, "  \"delta_pss_kb\": %ld,\n", delta_pss);
             fprintf(jf, "  \"per_session_rss_kb\": %.2f,\n", per_sess_rss);
             fprintf(jf, "  \"per_session_pss_kb\": %.2f,\n", per_sess_pss);
+            fprintf(jf, "  \"per_session_peak_pss_kb\": %.2f,\n", peak_sess_pss);
             fprintf(jf, "  \"wall_ms\": %ld,\n", wall_ms);
             fprintf(jf, "  \"poll_ms\": %ld,\n", poll_ms);
             fprintf(jf, "  \"create_ms\": %ld,\n", create_ms);
@@ -361,7 +366,7 @@ int main(int argc, char **argv) {
             fprintf(jf, "  \"turns_per_sec\": %.1f,\n", turn_rate);
             fprintf(jf, "  \"done\": %d,\n", done);
             fprintf(jf, "  \"pass_rss_250mb\": %s,\n", (peak_rss - base_rss < 250*1024) ? "true" : "false");
-            fprintf(jf, "  \"pass_pss_300kb\": %s\n", (per_sess_pss < 300) ? "true" : "false");
+            fprintf(jf, "  \"pass_pss_300kb\": %s\n", (peak_sess_pss < 300) ? "true" : "false");
             fprintf(jf, "}\n");
             fclose(jf);
             printf("JSON exported to %s\n", json_path);
