@@ -11,7 +11,8 @@ the four contract sizes and asserts on the decoded terminal output that:
   - no false "new ↓" badge after an un-scrolled normal flow
   - no raw "[think]" reasoning text in the default transcript
   - no bold-black / hard-coded white text (unreadable on dark / light themes)
-  - light background (PUCI_THEME or a real OSC 11 reply) avoids yellow/cyan;
+  - light background (PUCI_THEME, an OSC 11 reply, or the desktop's
+    light/dark setting when the terminal won't say) avoids yellow/cyan;
     NO_COLOR emits no colour escapes at all
   - a user "YOU" label and an assistant "PUCI" heading both appear
   - no "— done —" clutter and no startup keybinding tutorial
@@ -199,6 +200,27 @@ def main():
         out = run_tui(24, 80, base, osc11_reply=b"\x1b]11;rgb:1717/1414/2121\x1b\\")
         ck("osc11-dark keeps palette", "\x1b[36m" in out or "\x1b[1m\x1b[36m" in out,
            "dark OSC 11 reply should keep the dark palette")
+        # Terminal doesn't answer OSC 11 -> follow the computer's light/dark
+        # setting. Fake desktop tools on PATH stand in for the real desktop.
+        def fake_bin(gdbus_out, gsettings_out):
+            d = _tempfile.mkdtemp(prefix="puci-fakebin-", dir=_TEST_HOME)
+            for name, text in (("gdbus", gdbus_out), ("gsettings", gsettings_out)):
+                with open(os.path.join(d, name), "w") as fh:
+                    if text is None:
+                        fh.write("#!/bin/sh\nexit 1\n")
+                    else:
+                        fh.write("#!/bin/sh\necho \"%s\"\n" % text)
+                os.chmod(os.path.join(d, name), 0o755)
+            return {"PATH": d + os.pathsep + os.environ.get("PATH", "")}
+        out = run_tui(24, 80, base, extra_env=fake_bin("(<uint32 2>,)", None))
+        ck("desktop-light portal", not any(b in out for b in light_bad),
+           "desktop portal said light but yellow/cyan were used")
+        out = run_tui(24, 80, base, extra_env=fake_bin(None, "'prefer-light'"))
+        ck("desktop-light gsettings", not any(b in out for b in light_bad),
+           "gsettings said prefer-light but yellow/cyan were used")
+        out = run_tui(24, 80, base, extra_env=fake_bin("(<uint32 1>,)", None))
+        ck("desktop-dark portal", "\x1b[36m" in out,
+           "desktop portal said dark but the dark palette was not used")
         out = run_tui(24, 80, base, extra_env={"NO_COLOR": "1"})
         ck("no-color assistant-text", "tok0" in out, "NO_COLOR run produced no reply")
         ck("no-color no-sgr-colours", not sgr_colour.search(out),

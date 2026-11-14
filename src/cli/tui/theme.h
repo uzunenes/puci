@@ -55,8 +55,10 @@ extern theme_t g_theme;
 void theme_init(theme_bg bg, int no_color);
 
 /* Decides the background: PUCI_THEME=light|dark, else COLORFGBG, else asks
- * the terminal (OSC 11) on `tty_path` (NULL = /dev/tty) with a short bound.
- * Must run BEFORE tb_init (it briefly owns the tty). */
+ * the terminal (OSC 11) on `tty_path` (NULL = /dev/tty) with a short bound,
+ * else follows the computer's light/dark setting (freedesktop portal,
+ * gsettings, macOS defaults). Must run BEFORE tb_init (it briefly owns the
+ * tty). */
 theme_bg theme_detect_bg(const char *tty_path);
 
 /* 1 when NO_COLOR is set to a non-empty value. */

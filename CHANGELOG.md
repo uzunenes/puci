@@ -27,7 +27,7 @@ All notable changes to this project are documented here.
 
 ### Added (TUI design rules)
 
-- Light-terminal palette: the TUI detects the background (`PUCI_THEME=light|dark`, `COLORFGBG`, or an OSC 11 query bounded at 200 ms and cut short by the DA1 reply) and swaps yellow/cyan accents, which wash out on white, for blue/magenta.
+- Light-terminal palette: the TUI detects the background (`PUCI_THEME=light|dark`, `COLORFGBG`, an OSC 11 query bounded at 200 ms and cut short by the DA1 reply, then the computer's light/dark setting via the freedesktop portal, GNOME `gsettings` or macOS `defaults`) and swaps yellow/cyan accents, which wash out on white, for blue/magenta.
 - `NO_COLOR` support (no-color.org): no colour escapes at all; bold, dim, underline and reverse carry meaning.
 - All colours moved into `src/cli/tui/theme.c` as semantic roles; `scripts/check_tui_tokens.sh` (`meson test tui_tokens`) rejects raw `TB_<colour>` names elsewhere and bold black anywhere. Rules documented in `docs/TUI.md`.
 

@@ -161,8 +161,9 @@ cd your-project && puci                         # interactive TUI (press m to sw
 puci run "add a --verbose flag to main.c"        # one-shot
 ```
 
-The TUI adapts to light and dark terminals automatically (override with
-`PUCI_THEME=light|dark`) and honours `NO_COLOR`.
+The TUI follows your terminal's background, or your computer's light/dark
+setting when the terminal doesn't report it (override with
+`PUCI_THEME=light|dark`), and honours `NO_COLOR`.
 
 Other providers: set `PUCI_API_KEY` and `PUCI_BASE_URL` (OpenAI, Ollama,
 vLLM, LM Studio, Anthropic) — see [Configuration](#configuration).

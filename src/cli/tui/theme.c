@@ -7,6 +7,9 @@
 
 #include <fcntl.h>
 #include <poll.h>
+#include <signal.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -199,6 +202,93 @@ static theme_bg query_terminal(const char *tty_path) {
     return res;
 }
 
+
+/* ---- desktop (OS) appearance --------------------------------------- */
+
+/* Runs argv (no shell) and captures up to cap-1 bytes of stdout, bounded by
+ * timeout_ms. Returns the byte count, or -1 if it could not run in time. */
+static int run_capture(char *const argv[], char *out, size_t cap, int timeout_ms) {
+    int pfd[2];
+    if (cap == 0 || pipe(pfd) != 0) return -1;
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pfd[0]);
+        close(pfd[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            dup2(devnull, 0);
+            dup2(devnull, 2);
+        }
+        dup2(pfd[1], 1);
+        close(pfd[0]);
+        close(pfd[1]);
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    close(pfd[1]);
+    size_t len = 0;
+    long long deadline = mono_ms() + timeout_ms;
+    for (;;) {
+        long long left = deadline - mono_ms();
+        if (left <= 0 || len + 1 >= cap) break;
+        struct pollfd p = {pfd[0], POLLIN, 0};
+        if (poll(&p, 1, (int)left) <= 0) break;
+        ssize_t n = read(pfd[0], out + len, cap - 1 - len);
+        if (n <= 0) break;
+        len += (size_t)n;
+    }
+    out[len] = '\0';
+    close(pfd[0]);
+    int status = 0;
+    if (waitpid(pid, &status, WNOHANG) == 0) {
+        kill(pid, SIGKILL);
+        (void)waitpid(pid, &status, 0);
+        return -1;
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return -1;
+    return (int)len;
+}
+
+/* The desktop's light/dark preference, for terminals that won't say what
+ * their background is. freedesktop portal (GNOME, KDE, ...), then GNOME's
+ * gsettings, then macOS. Each probe is bounded; failures fall through. */
+static theme_bg desktop_preference(void) {
+    char out[256];
+    char *portal[] = {"gdbus", "call", "--session",
+                      "--dest", "org.freedesktop.portal.Desktop",
+                      "--object-path", "/org/freedesktop/portal/desktop",
+                      "--method", "org.freedesktop.portal.Settings.ReadOne",
+                      "org.freedesktop.appearance", "color-scheme", NULL};
+    if (run_capture(portal, out, sizeof(out), 300) > 0) {
+        /* "(<uint32 1>,)": 1 = prefer dark, 2 = prefer light, 0 = none */
+        if (strstr(out, "uint32 1")) return THEME_BG_DARK;
+        if (strstr(out, "uint32 2")) return THEME_BG_LIGHT;
+    }
+    char *gs[] = {"gsettings", "get", "org.gnome.desktop.interface", "color-scheme", NULL};
+    if (run_capture(gs, out, sizeof(out), 300) > 0) {
+        if (strstr(out, "prefer-dark")) return THEME_BG_DARK;
+        if (strstr(out, "prefer-light")) return THEME_BG_LIGHT;
+        /* 'default': fall back to the GTK theme's name (Yaru-dark, Adwaita-dark). */
+        char *gt[] = {"gsettings", "get", "org.gnome.desktop.interface", "gtk-theme", NULL};
+        if (run_capture(gt, out, sizeof(out), 300) > 0) {
+            for (char *c = out; *c; c++) {
+                if (*c >= 'A' && *c <= 'Z') *c = (char)(*c - 'A' + 'a');
+            }
+            return strstr(out, "dark") ? THEME_BG_DARK : THEME_BG_LIGHT;
+        }
+    }
+#ifdef __APPLE__
+    char *mac[] = {"defaults", "read", "-g", "AppleInterfaceStyle", NULL};
+    int n = run_capture(mac, out, sizeof(out), 300);
+    if (n > 0 && strstr(out, "Dark")) return THEME_BG_DARK;
+    if (n < 0) return THEME_BG_LIGHT; /* key absent = light mode */
+#endif
+    return THEME_BG_UNKNOWN;
+}
+
 theme_bg theme_detect_bg(const char *tty_path) {
     const char *forced = getenv("PUCI_THEME");
     if (forced && strcasecmp(forced, "light") == 0) return THEME_BG_LIGHT;
@@ -216,5 +306,9 @@ theme_bg theme_detect_bg(const char *tty_path) {
     if (forced && strcasecmp(forced, "auto") != 0 && forced[0]) {
         return THEME_BG_UNKNOWN;
     }
-    return query_terminal(tty_path);
+    /* The terminal knows its real background (its profile may differ from
+     * the desktop); ask it first, then follow the computer's light/dark. */
+    theme_bg t = query_terminal(tty_path);
+    if (t != THEME_BG_UNKNOWN) return t;
+    return desktop_preference();
 }
