@@ -1657,13 +1657,13 @@ composer_done:
         const char *approval[] = {
             "y allow", "A always", "n deny", "j/k scroll", NULL };
         const char *wide[] = {
-            "Enter prompt", "\xE2\x86\x91\xE2\x86\x93 scroll", "s sessions",
-            "m model", "Tab pane", "q quit", NULL };
+            "Type to chat", "\xE2\x86\x91\xE2\x86\x93 scroll", "/sessions",
+            "/model", "Tab pane", "Ctrl+C quit", NULL };
         const char *medium[] = {
-            "Enter prompt", "\xE2\x86\x91/\xE2\x86\x93 scroll", "s sessions",
-            "m model", "q quit", NULL };
+            "Type to chat", "\xE2\x86\x91/\xE2\x86\x93 scroll", "/help",
+            "Ctrl+C quit", NULL };
         const char *narrow[] = {
-            "Enter prompt", "? help", "q quit", NULL };
+            "Type to chat", "/help", "Ctrl+C quit", NULL };
         const char **acts = NULL;
         if(g_input_mode) acts = composer_active;
         else if(g_approval_pending) acts = approval;
@@ -2214,6 +2214,21 @@ int puci_tui_run(const puci_cli_params *params){
                         if(fl>0){ g_pick_filter[fl-1]=0; rebuild_pick_filter(); }
                     }
                     continue;
+                }
+                /* Type-to-compose: when idle (no picker — those `continue`
+                   above — no approval overlay, no active paste), any printable
+                   key, ASCII or a UTF-8 lead byte, opens the composer so it is
+                   typed as the first character instead of read as a one-letter
+                   command. People forget to press Enter first and the opening
+                   letters of a message ("selam" -> the old `s` = sessions) hit
+                   shortcuts. Flipping the flag here routes this same key into
+                   the composer branch below (which also handles UTF-8). Control
+                   keys (Ctrl-C, Tab, arrows, Enter) are < 0x20 and untouched;
+                   sessions/model are now /sessions and /model, quit is Ctrl-C. */
+                if(!g_input_mode && !g_approval_pending && !g_paste
+                   && c>=0x20 && c!=0x7f){
+                    g_input_mode=1; g_input_len=0; g_input[0]=0; g_input_curs=0;
+                    g_hist_pos=g_hist_count; g_hist_tmp[0]=0;
                 }
                 if(g_input_mode){
                     if(c=='\r'){   /* Enter sends */
