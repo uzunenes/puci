@@ -87,7 +87,7 @@ int main(int argc, char **argv) {
 }
 ```
 
-Build: `cc examples/minimal_agent.c $(pkg-config --cflags --libs puci) -o minimal_agent`
+Build: `cc examples/minimal_agent.c $(pkg-config --cflags --libs puci) -o minimal_agent` (after `make install`)
 
 More examples (`embedded_editor_agent`, `poll_loop`, `bench_swarm`): [`examples/`](examples/) · Full guide: [`docs/EMBEDDING.md`](docs/EMBEDDING.md)
 
@@ -108,45 +108,63 @@ Linux distribution and macOS.
 
 ### Option B — build from source
 
-`make` checks the build dependencies and, if one is missing, prints the exact
-install command for your OS. It never installs system packages itself.
+All you need is a C17 compiler, `make` and libcurl's headers. No Meson, no
+Python, no network access during the build (termbox2 is vendored).
 
-1. Install the dependencies (C17 compiler, Meson ≥ 1.0, Ninja, pkg-config, libcurl headers):
+```sh
+git clone https://github.com/uzunenes/puci && cd puci
+make                      # libpuci.a, libpuci.so and the puci CLI (~5 s)
+make test                 # optional
+sudo make install         # /usr/local: bin, lib, include/puci, pkg-config, man pages
+```
 
-   | OS | Command |
-   |---|---|
-   | Debian / Ubuntu | `sudo apt install build-essential meson ninja-build pkg-config libcurl4-openssl-dev` |
-   | Fedora / RHEL | `sudo dnf install gcc meson ninja-build pkgconf-pkg-config libcurl-devel` |
-   | Arch | `sudo pacman -S --needed base-devel meson ninja curl` |
-   | openSUSE | `sudo zypper install gcc meson ninja pkg-config libcurl-devel` |
-   | Alpine | `sudo apk add build-base meson ninja pkgconf curl-dev` |
-   | macOS | `brew install meson ninja pkg-config curl` |
+No root? `make install PREFIX=~/.local` (put `~/.local/bin` on your `PATH`).
+`make uninstall` removes exactly what was installed. If a dependency is
+missing, `make deps` prints the command for your OS:
 
-2. Build, test and install:
+| OS | Dependencies |
+|---|---|
+| Debian / Ubuntu | `sudo apt install build-essential libcurl4-openssl-dev pkg-config` |
+| Fedora / RHEL | `sudo dnf install gcc make libcurl-devel pkgconf-pkg-config` |
+| Arch | `sudo pacman -S --needed base-devel curl` |
+| Alpine | `sudo apk add build-base curl-dev pkgconf` |
+| Gentoo | `emerge net-misc/curl` (the toolchain is already there) |
+| FreeBSD / OpenBSD | `pkg install gmake curl` / `pkg_add gmake curl`, then use `gmake` |
+| macOS | `xcode-select --install` (libcurl ships with macOS) |
 
-   ```sh
-   git clone https://github.com/uzunenes/puci && cd puci
-   make                           # configure + build
-   make test                      # optional
-   sudo make install              # -> /usr/local/bin/puci (+ libpuci, headers, pkg-config)
-   ```
+The usual variables work: `PREFIX`, `DESTDIR`, `BINDIR`, `LIBDIR`,
+`INCLUDEDIR`, `MANDIR`, `CC`, `CFLAGS`, `LDFLAGS`; libcurl is found with
+pkg-config or `curl-config` (override with `CURL_CFLAGS` / `CURL_LIBS`).
+`TUI=0` builds a line-mode CLI only, `SHARED=0` skips the shared library.
+The `puci` binary links libpuci statically, so it runs from any prefix without
+`ldconfig`. Packagers: `make install DESTDIR=… PREFIX=/usr LIBDIR=/usr/lib64`.
 
-   No root? `make install PREFIX=~/.local` installs per-user (make sure
-   `~/.local/bin` is on your `PATH`). Remove with `make uninstall`.
+### Use the library in your program
 
-termbox2 is vendored, so the build needs no network access. **Platforms:**
-Linux (primary), macOS (partial kqueue path); Windows is not supported yet.
+```sh
+cc myapp.c $(pkg-config --cflags --libs puci) -o myapp            # shared
+cc myapp.c $(pkg-config --cflags puci) /usr/local/lib/libpuci.a \
+   $(pkg-config --libs libcurl) -pthread -o myapp                  # static
+```
+
+`man libpuci` gives the overview; every function is documented in
+`<puci/*.h>`. Start from [`examples/minimal_agent.c`](examples/minimal_agent.c)
+and [`docs/EMBEDDING.md`](docs/EMBEDDING.md).
+
+**Platforms:** Linux (primary, fully tested), macOS (builds; CI checks it),
+the BSDs (should build with `gmake`, untested). Windows is not supported.
 
 <details>
-<summary>Using Meson directly (developers)</summary>
+<summary>Meson build (developers)</summary>
+
+CI also builds with Meson for the full compiler and sanitizer matrix:
 
 ```sh
 meson setup build && meson compile -C build && meson test -C build
-CC=clang meson setup build-clang && meson compile -C build-clang
+meson setup build-san -Db_sanitize=address,undefined && meson test -C build-san
 ```
 
-Optional switches: `-Dexamples=true`, `-Dlua=true`, `-Dbench=true`. Embedding
-guide: [`docs/EMBEDDING.md`](docs/EMBEDDING.md).
+Optional switches: `-Dexamples=true`, `-Dlua=true`, `-Dbench=true`.
 </details>
 
 ### Quick start (OpenRouter)

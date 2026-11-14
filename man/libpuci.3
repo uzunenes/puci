@@ -1,0 +1,79 @@
+.TH LIBPUCI 3 "November 2026" "puci 0.5.0" "Library Functions Manual"
+.SH NAME
+libpuci \- embeddable AI agent loop for C programs
+.SH SYNOPSIS
+.nf
+.B #include <puci/puci.h>
+.PP
+.BI "puci_status puci_context_create(const puci_context_options *" opts ", puci_context **" out );
+.BI "puci_status puci_context_set_provider(puci_context *" ctx ", const puci_provider_config *" cfg );
+.BI "puci_status puci_session_create(const puci_context *" ctx ", const puci_session_options *" opts ", puci_session **" out );
+.BI "puci_status puci_session_send(puci_session *" s ", const char *" message );
+.BI "void puci_session_destroy(puci_session *" s );
+.BI "void puci_context_destroy(puci_context *" ctx );
+.fi
+.PP
+Compile and link with
+.BR "pkg\-config \-\-cflags \-\-libs puci" .
+.SH DESCRIPTION
+.B libpuci
+runs the model / tool loop of a coding agent inside your program.
+A
+.I context
+holds the provider and the registered tools; a
+.I session
+is one conversation.
+.BR puci_session_send ()
+runs a whole turn and reports progress through the
+.I event_cb
+in
+.IR puci_session_options .
+.PP
+For programs with their own event loop, the turn can be driven without
+blocking:
+.BR puci_session_begin_turn (),
+.BR puci_session_get_fds (),
+.BR puci_session_next_timeout_ms (),
+.BR puci_session_process ()
+and
+.BR puci_session_next_event ().
+Many sessions can share one
+.BR poll (2)
+loop.
+.SH TOOLS
+Built in: read_file, write_file, edit_file, grep, glob and run_shell.
+Add your own with
+.BR puci_tool_register ()
+or, for long\-running work,
+.BR puci_tool_register_async ().
+MCP servers are attached with
+.BR puci_mcp_server_register ().
+.SH SAFETY
+Without an
+.I approve_cb
+(or
+.I approval_mode
+= PUCI_APPROVAL_MODE_EVENT), only read_file, grep and glob run; every other
+tool is denied. Set
+.I approval_mode
+= PUCI_APPROVAL_MODE_AUTO to run everything unattended.
+Set
+.I workspace_root
+to confine the file tools to a directory.
+.SH RETURN VALUE
+Functions return PUCI_OK (0) on success or a nonzero
+.IR puci_status ;
+.BR puci_status_string ()
+names it and
+.BR puci_session_error ()
+gives details.
+.SH EXAMPLE
+See
+.I examples/minimal_agent.c
+in the source distribution.
+.SH SEE ALSO
+.BR puci (1)
+.PP
+Headers in
+.I <puci/*.h>
+document every function.

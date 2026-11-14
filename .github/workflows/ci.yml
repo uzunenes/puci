@@ -50,13 +50,62 @@ jobs:
       - name: Test (${{ matrix.cc }})
         run: meson test -C build --print-errorlogs
 
-      - name: make install smoke test (${{ matrix.cc }})
+
+  plain-make:
+    # The path a user takes: no Meson, just a compiler, make and libcurl.
+    name: Plain make (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install libcurl (Linux)
+        if: runner.os == 'Linux'
         run: |
-          make install PREFIX="$RUNNER_TEMP/puci"
-          "$RUNNER_TEMP/puci/bin/puci" --version
-          PKG_CONFIG_PATH="$(dirname "$(find "$RUNNER_TEMP/puci" -name puci.pc)")" \
-            cc -std=c17 examples/minimal_agent.c $(PKG_CONFIG_PATH="$(dirname "$(find "$RUNNER_TEMP/puci" -name puci.pc)")" pkg-config --cflags --libs puci) -o /tmp/minimal_agent
-          make uninstall
+          for i in 1 2 3 4 5; do
+            sudo apt-get update && break || { echo "apt retry $i"; sleep 15; }
+          done
+          sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev pkg-config
+
+      - name: Check dependencies
+        run: sh scripts/check-deps.sh
+
+      - name: make (warnings are errors here, never for users)
+        run: make -j4 CFLAGS="-O2 -g -Werror"
+
+      - name: make test (Linux)
+        if: runner.os == 'Linux'
+        run: make test
+
+      - name: make TUI=0 SHARED=0 (Linux)
+        if: runner.os == 'Linux'
+        run: make -j4 O=build/minimal TUI=0 SHARED=0 CFLAGS="-O2 -Werror" && build/minimal/puci --version
+
+      - name: install, embed via pkg-config, uninstall
+        run: |
+          P="$RUNNER_TEMP/prefix"
+          make install PREFIX="$P"
+          "$P/bin/puci" --version
+          export PKG_CONFIG_PATH="$P/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          cc -std=c17 examples/minimal_agent.c $(pkg-config --cflags --libs puci) \
+             -Wl,-rpath,"$P/lib" -o "$RUNNER_TEMP/minimal_shared"
+          cc -std=c17 examples/minimal_agent.c $(pkg-config --cflags puci) "$P/lib/libpuci.a" \
+             $(pkg-config --libs libcurl 2>/dev/null || curl-config --libs) -pthread \
+             -o "$RUNNER_TEMP/minimal_static"
+          make uninstall PREFIX="$P"
+          left=$(find "$P" -type f -o -type l | wc -l)
+          test "$left" -eq 0 || { echo "uninstall left $left files"; find "$P"; exit 1; }
+
+      - name: DESTDIR staging (packagers)
+        run: |
+          make install DESTDIR="$RUNNER_TEMP/stage" PREFIX=/usr
+          grep -q '^prefix=/usr$' "$RUNNER_TEMP/stage/usr/lib/pkgconfig/puci.pc"
+          test -x "$RUNNER_TEMP/stage/usr/bin/puci"
 
   sanitizer:
     name: Sanitizers (ASan + UBSan)

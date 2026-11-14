@@ -36,18 +36,13 @@ jobs:
             sudo apt-get update && break || { echo "apt retry $i"; sleep 15; }
           done
           sudo apt-get install -y --no-install-recommends \
-            build-essential libcurl4-openssl-dev ninja-build pkg-config python3-pip
-          pip3 install --user --upgrade meson
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      - name: Configure
-        run: meson setup build --buildtype=release -Dshared_lib=false --prefix=/usr/local
+            build-essential libcurl4-openssl-dev pkg-config python3
 
       - name: Build
-        run: meson compile -C build
+        run: make -j4 CFLAGS="-O2"
 
       - name: Test
-        run: meson test -C build --print-errorlogs --no-suite stress
+        run: make test
 
       - name: Package
         id: pkg
@@ -56,8 +51,10 @@ jobs:
           [ "$GITHUB_REF_TYPE" = tag ] || ver="$(git describe --always)"
           name="puci-${ver}-${{ matrix.target }}"
           mkdir -p "dist/$name/bin"
-          install -m 755 build/src/cli/puci "dist/$name/bin/puci"
+          install -m 755 build/make/puci "dist/$name/bin/puci"
           strip "dist/$name/bin/puci"
+          mkdir -p "dist/$name/man/man1"
+          cp man/puci.1 "dist/$name/man/man1/"
           cp LICENSE README.md CHANGELOG.md "dist/$name/"
           "dist/$name/bin/puci" --version
           ldd "dist/$name/bin/puci"
@@ -72,9 +69,25 @@ jobs:
             dist/*.tar.gz
             dist/*.sha256
 
+  source:
+    name: Source tarball
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: make dist
+        run: |
+          make dist
+          cd build/make && sha256sum puci-*.tar.gz > "$(ls puci-*.tar.gz).sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source
+          path: |
+            build/make/puci-*.tar.gz
+            build/make/puci-*.tar.gz.sha256
+
   release:
     name: Publish release
-    needs: build
+    needs: [build, source]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
