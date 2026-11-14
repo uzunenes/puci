@@ -31,6 +31,9 @@ meson-info/
 .DS_Store
 
 # Secrets
+keys.txt
+keys/
+*.keys
 .env
 .env.*
 *.key
