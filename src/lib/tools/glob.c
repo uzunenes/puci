@@ -9,6 +9,7 @@
 #include "tools/tools_internal.h"
 #include "path_guard.h"
 
+#include <limits.h> /* PATH_MAX: not pulled in transitively on macOS */
 #include <dirent.h>
 #include <errno.h>
 #include <fnmatch.h>

@@ -8,6 +8,8 @@
 #include <puci/puci.h>
 
 #include <stdio.h>
+#include <unistd.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -32,6 +34,9 @@ static void print_help(FILE *f) {
             "  --session <id>                  Use or create a specific named session\n"
             "  --resume [latest|<id>]          Continue a previous session\n"
             "  --plan, --dry-run               Plan mode: simulate file mutations without writing to disk\n"
+            "  -C, --cwd <dir>                 Workspace directory (default: the current directory)\n"
+            "  --trust-project-mcp             Start MCP servers declared in this project's .puci.toml\n"
+            "  -y, --yes                       Auto-approve every tool call (DANGEROUS; also PUCI_AUTO_APPROVE=1)\n"
             "\n"
             "Configuration:\n"
             "  PUCI_BASE_URL                   Provider base URL (default https://api.openai.com/v1)\n"
@@ -73,6 +78,23 @@ int main(int argc, char **argv) {
             argi++;
         } else if (strcmp(arg, "--plan") == 0 || strcmp(arg, "--dry-run") == 0) {
             params.plan_mode = 1;
+            argi++;
+        } else if (strcmp(arg, "-C") == 0 || strcmp(arg, "--cwd") == 0) {
+            if (argi + 1 >= argc) {
+                fprintf(stderr, "puci: %s requires a directory\n", arg);
+                return 2;
+            }
+            const char *dir = argv[++argi];
+            if (chdir(dir) != 0) {
+                fprintf(stderr, "puci: cannot use workspace '%s': %s\n", dir, strerror(errno));
+                return 2;
+            }
+            argi++;
+        } else if (strcmp(arg, "--trust-project-mcp") == 0) {
+            setenv("PUCI_TRUST_PROJECT_MCP", "1", 1);
+            argi++;
+        } else if (strcmp(arg, "--yes") == 0 || strcmp(arg, "-y") == 0) {
+            params.auto_approve = 1;
             argi++;
         } else if (strcmp(arg, "--session") == 0) {
             if (argi + 1 < argc) {

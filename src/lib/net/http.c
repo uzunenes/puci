@@ -25,7 +25,42 @@ typedef struct http_ctx {
     int idle_timed_out;
     const puci_cancel_token *cancel; /* may be NULL */
     int cancelled;               /* latched when cancel observed */
+    char head[512];              /* first bytes of the body, for HTTP error messages */
+    size_t head_len;
 } http_ctx;
+
+/* Turns a captured error body into a one-line message: the JSON
+ * "message" field when present (OpenAI/OpenRouter/Anthropic all use
+ * {"error":{"message":...}}), else the raw body with control chars blanked. */
+static void http_error_from_body(const http_ctx *h, char *err, size_t errlen) {
+    if (!err || errlen == 0 || err[0] || h->head_len == 0) {
+        return;
+    }
+    char body[sizeof(h->head) + 1];
+    memcpy(body, h->head, h->head_len);
+    body[h->head_len] = '\0';
+    const char *p = strstr(body, "\"message\"");
+    if (p) {
+        p = strchr(p + 9, ':');
+        if (p) {
+            p++;
+            while (*p == ' ') p++;
+            if (*p == '"') {
+                p++;
+                const char *e = p;
+                while (*e && !(*e == '"' && e[-1] != '\\')) e++;
+                snprintf(err, errlen, "%.*s", (int)(e - p), p);
+                return;
+            }
+        }
+    }
+    size_t n = 0;
+    for (size_t i = 0; i < h->head_len && n + 1 < errlen && n < 200; i++) {
+        unsigned char c = (unsigned char)body[i];
+        err[n++] = (c < 0x20) ? ' ' : (char)c;
+    }
+    err[n] = '\0';
+}
 
 /* Opaque persistent connection: wraps a long-lived libcurl easy handle so the
  * underlying TCP/TLS connection survives across requests (keep-alive + TLS
@@ -128,6 +163,12 @@ static size_t write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
         return 0;
     }
     if (total > 0) {
+        if (h->head_len < sizeof(h->head)) {
+            size_t take = sizeof(h->head) - h->head_len;
+            if (take > total) take = total;
+            memcpy(h->head + h->head_len, ptr, take);
+            h->head_len += take;
+        }
         h->last_activity_ms = now_ms();
         h->cb(h->ud, ptr, total);
     }
@@ -221,6 +262,9 @@ puci_status puci_http_post_stream(const puci_allocator *alloc,
                                   int *out_status, char *err, size_t errlen) {
     if (!req || !req->url || !data_cb) {
         return PUCI_ERR_INVALID_ARG;
+    }
+    if (err && errlen > 0) {
+        err[0] = '\0';
     }
 
     int own_curl = 1;
@@ -474,6 +518,9 @@ puci_status puci_http_post_stream(const puci_allocator *alloc,
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
     if (out_status) {
         *out_status = (int)code;
+    }
+    if (code >= 400) {
+        http_error_from_body(&hctx, err, errlen);
     }
 
     curl_slist_free_all(hdr);
@@ -908,6 +955,9 @@ puci_status puci_http_step(puci_http_req *r, int *done, int *http_status,
         if (http_status) {
             *http_status = r->http_status;
         }
+        if (r->http_status >= 400) {
+            http_error_from_body(&r->hctx, err, errlen);
+        }
         return r->terminal_status;
     }
 
@@ -960,6 +1010,9 @@ puci_status puci_http_step(puci_http_req *r, int *done, int *http_status,
             *http_status = r->http_status;
         }
         r->terminal_status = req_terminal_status(r, err, errlen);
+        if (r->http_status >= 400) {
+            http_error_from_body(&r->hctx, err, errlen);
+        }
         if (done) {
             *done = 1;
         }

@@ -142,6 +142,7 @@ int main(int argc, char **argv) {
     puci_context_set_provider(ctx, &pcfg);
 
     puci_session_options sopts = {0};
+    sopts.approval_mode = PUCI_APPROVAL_MODE_AUTO; /* examples run tools unattended: explicit opt-in */
     sopts.provider = pcfg;
     sopts.event_cb = on_event;
     sopts.system_prompt = "You are an editor assistant. Be terse.";

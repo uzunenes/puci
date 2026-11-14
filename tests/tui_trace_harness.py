@@ -15,6 +15,19 @@ Each scenario 3 reps median. Report per-phase p50/p90/p99/max, wall vs cpu, TTG,
 import os, sys, time, json, subprocess, statistics, tempfile, signal, pathlib, random, math
 from collections import defaultdict
 
+# Hermetic test home: never read the developer's ~/.config/puci (API keys) or
+# write sessions/history into their ~/.local/share/puci.
+import atexit as _atexit, shutil as _shutil, tempfile as _tempfile
+_TEST_HOME = _tempfile.mkdtemp(prefix="puci-test-home-")
+_atexit.register(_shutil.rmtree, _TEST_HOME, True)
+for _k in ("PUCI_API_KEY", "OPENROUTER_API_KEY", "PUCI_BASE_URL", "PUCI_MODEL"):
+    os.environ.pop(_k, None)
+os.environ.update(HOME=_TEST_HOME,
+                  XDG_CONFIG_HOME=os.path.join(_TEST_HOME, ".config"),
+                  XDG_DATA_HOME=os.path.join(_TEST_HOME, ".local", "share"),
+                  XDG_STATE_HOME=os.path.join(_TEST_HOME, ".local", "state"))
+
+
 FAKE = pathlib.Path(__file__).with_name("fake_sse.py")
 PUCI = pathlib.Path(__file__).parent.parent / "build" / "src" / "cli" / "puci"
 TRACE_FILE = "/tmp/puci_trace.ndjson"

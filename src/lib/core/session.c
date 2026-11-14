@@ -202,6 +202,28 @@ puci_status puci_session_create(const puci_context *ctx,
             return PUCI_ERR_NOMEM;
         }
     }
+    if (opts->workspace_root) {
+        sess->workspace_root = puci_workspace_canon(opts->workspace_root);
+        if (!sess->workspace_root) {
+            puci_session_destroy(sess);
+            return PUCI_ERR_INVALID_ARG;
+        }
+        /* Tell the model where it works so it uses relative paths. */
+        const char *base = sess->system_prompt ? sess->system_prompt : "";
+        size_t need = strlen(base) + strlen(sess->workspace_root) + 160;
+        char *sp = (char *)puci_alloc_malloc(&sess->alloc, need);
+        if (!sp) {
+            puci_session_destroy(sess);
+            return PUCI_ERR_NOMEM;
+        }
+        snprintf(sp, need, "%s%sWorkspace: %s. Work inside it and prefer relative paths; "
+                 "files outside it cannot be modified.",
+                 base, base[0] ? "\n\n" : "", sess->workspace_root);
+        if (sess->system_prompt) {
+            puci_alloc_free(&sess->alloc, sess->system_prompt);
+        }
+        sess->system_prompt = sp;
+    }
     sess->event_cb = opts->event_cb;
     sess->event_userdata = opts->event_userdata;
     sess->approve_cb = opts->approve_cb;
@@ -284,6 +306,7 @@ void puci_session_destroy(puci_session *sess) {
     if (sess->system_prompt) {
         puci_alloc_free(&sess->alloc, sess->system_prompt);
     }
+    free(sess->workspace_root);
     if (sess->cfg.name) {
         puci_alloc_free(&sess->alloc, (void *)sess->cfg.name);
     }
@@ -696,6 +719,14 @@ puci_status puci_session_set_plan_mode(puci_session *sess, int plan_mode) {
     }
     sess->plan_mode = plan_mode ? 1 : 0;
     return PUCI_OK;
+}
+
+const char *puci_session_workspace(const puci_session *sess) {
+    return sess ? sess->workspace_root : NULL;
+}
+
+size_t puci_session_message_count(const puci_session *sess) {
+    return sess ? sess->nmessages : 0;
 }
 
 int puci_session_get_plan_mode(const puci_session *sess) {

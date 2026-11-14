@@ -253,6 +253,7 @@ static void test_full_agent_loop(void) {
     memset(&c, 0, sizeof(c));
 
     puci_session_options sopts = {0};
+    sopts.approval_mode = PUCI_APPROVAL_MODE_AUTO;
     sopts.provider = pcfg;
     sopts.event_cb = on_event;
     sopts.event_userdata = &c;

@@ -41,7 +41,7 @@ static puci_status anthropic_build_request(const puci_session *sess,
     puci_arena arena;
     puci_arena_init(&arena, NULL, 0);
 
-    const char *model = sess->cfg.model ? sess->cfg.model : "claude-3-5-sonnet-20241022";
+    const char *model = sess->cfg.model ? sess->cfg.model : "claude-sonnet-5-5";
     puci_strbuf_appendz(out, "{\"model\":");
     puci_strbuf_append_json_string(out, model);
     puci_strbuf_appendz(out, ",\"max_tokens\":4096,\"stream\":true");

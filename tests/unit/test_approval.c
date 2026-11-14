@@ -274,7 +274,9 @@ static void test_diff(void) {
     "data: {\"id\":\"t\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n" \
     "data: [DONE]\n\n"
 
-static void test_plan_mode_dry_run(void) {
+/* plan_mode=1: dry run. plan_mode=0,auto=0: no policy -> fail-closed deny.
+ * auto=1: explicit PUCI_APPROVAL_MODE_AUTO -> the file IS written. */
+static void run_write_file_case(int plan_mode, int auto_mode, const char *workspace) {
     const char *target_file = "/tmp/puci_plan_test.txt";
     unlink(target_file);
 
@@ -345,19 +347,29 @@ static void test_plan_mode_dry_run(void) {
 
     puci_session_options sopts = {0};
     sopts.provider = pcfg;
-    sopts.plan_mode = 1;
+    sopts.plan_mode = plan_mode;
+    if (auto_mode) sopts.approval_mode = PUCI_APPROVAL_MODE_AUTO;
+    sopts.workspace_root = workspace;
     sopts.max_tool_iterations = 8;
 
     puci_session *sess = NULL;
     CHECK(puci_session_create(ctx, &sopts, &sess) == PUCI_OK);
-    CHECK(puci_session_get_plan_mode(sess) == 1);
+    CHECK(puci_session_get_plan_mode(sess) == plan_mode);
 
     puci_status st = puci_session_send(sess, "write file");
     CHECK(st == PUCI_OK);
 
-    /* File must NOT have been written to disk */
     FILE *check_f = fopen(target_file, "r");
-    CHECK(check_f == NULL);
+    if (auto_mode && !workspace) {
+        CHECK(check_f != NULL);
+        if (check_f) fclose(check_f);
+        unlink(target_file);
+    } else {
+        /* plan mode, fail-closed, or outside the workspace: must NOT have
+         * been written to disk (even in AUTO mode) */
+        CHECK(check_f == NULL);
+        if (check_f) fclose(check_f);
+    }
 
     puci_session_destroy(sess);
     puci_context_destroy(ctx);
@@ -369,6 +381,19 @@ int main(void) {
     test_diff();
     run_one(PUCI_APPROVAL_DENY, /*expect_ran*/ 0, /*expect_blocked*/ 1);
     run_one(PUCI_APPROVAL_ALLOW, /*expect_ran*/ 1, /*expect_blocked*/ 0);
-    test_plan_mode_dry_run();
+    run_write_file_case(1, 0, NULL);
+    run_write_file_case(0, 0, NULL); /* fail-closed default */
+    run_write_file_case(0, 1, NULL); /* explicit AUTO */
+    {
+        /* AUTO but confined to a workspace that does not contain the target:
+         * the write is refused. */
+        char tmpl[] = "/tmp/puci-ws-appr-XXXXXX";
+        char *ws = mkdtemp(tmpl);
+        CHECK(ws != NULL);
+        if (ws) {
+            run_write_file_case(0, 1, ws);
+            rmdir(ws);
+        }
+    }
     TEST_END();
 }

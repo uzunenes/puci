@@ -8,6 +8,11 @@
  *   4. Built-in defaults
  */
 
+/* realpath() is XSI; the global -D_POSIX_C_SOURCE alone hides it. */
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
+#endif
+
 #include "config.h"
 
 #include <ctype.h>
@@ -15,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -121,6 +127,32 @@ const char *puci_cli_config_error(void) {
     return g_last_error[0] ? g_last_error : NULL;
 }
 
+#define PUCI_OPENROUTER_DEFAULT_MODEL "z-ai/glm-5.3"
+
+int puci_cli_workspace(char *out, size_t cap) {
+    char cwd[4096];
+    if (!getcwd(cwd, sizeof(cwd))) {
+        if (out && cap) out[0] = '\0';
+        return -1;
+    }
+    const char *home = getenv("HOME");
+    char rhome[4096] = "";
+    if (home && home[0] && !realpath(home, rhome)) {
+        snprintf(rhome, sizeof(rhome), "%s", home);
+    }
+    size_t hl = strlen(rhome);
+    if (out && cap) {
+        if (hl > 1 && strncmp(cwd, rhome, hl) == 0 && (cwd[hl] == '/' || cwd[hl] == '\0')) {
+            snprintf(out, cap, "~%s", cwd + hl);
+        } else {
+            snprintf(out, cap, "%s", cwd);
+        }
+    }
+    if (strcmp(cwd, "/") == 0) return 1;
+    if (hl > 0 && strcmp(cwd, rhome) == 0) return 1;
+    return 0;
+}
+
 puci_provider_config *puci_cli_provider(const char *name) {
     g_last_error[0] = '\0';
 
@@ -202,10 +234,12 @@ puci_provider_config *puci_cli_provider(const char *name) {
         if ((!env_base_explicit || !*env_base_explicit) && strcmp(base, "https://api.openai.com/v1") == 0) {
             snprintf(base, sizeof(base), "%s", "https://openrouter.ai/api/v1");
         }
-        const char *env_model_explicit = getenv("PUCI_MODEL");
-        if ((!env_model_explicit || !*env_model_explicit) && strcmp(model, "gpt-4o-mini") == 0) {
-            snprintf(model, sizeof(model), "%s", "anthropic/claude-3.5-sonnet");
-        }
+    }
+    /* OpenRouter needs vendor-prefixed ids ("openai/gpt-4o-mini"); the bare
+     * OpenAI default would be rejected. Whenever the endpoint is OpenRouter
+     * and no model was chosen, use a current tool-capable coding model. */
+    if (strstr(base, "openrouter.ai") != NULL && strcmp(model, "gpt-4o-mini") == 0) {
+        snprintf(model, sizeof(model), "%s", PUCI_OPENROUTER_DEFAULT_MODEL);
     }
 
     const char *env_ca = getenv("PUCI_CA_BUNDLE");
@@ -246,7 +280,29 @@ puci_provider_config *puci_cli_provider(const char *name) {
     return &g_cfg;
 }
 
+static char g_mcp_notice[512];
+
+const char *puci_cli_mcp_notice(void) {
+    return g_mcp_notice;
+}
+
+/* 1 if the file declares at least one [mcp_servers.*] table. */
+static int file_declares_mcp(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char line[1024];
+    int found = 0;
+    while (!found && fgets(line, sizeof(line), f)) {
+        const char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (strncmp(p, "[mcp_servers.", 13) == 0) found = 1;
+    }
+    fclose(f);
+    return found;
+}
+
 int puci_cli_load_mcp_servers(puci_context *ctx) {
+    g_mcp_notice[0] = '\0';
     if (!ctx) {
         return -1;
     }
@@ -274,11 +330,24 @@ int puci_cli_load_mcp_servers(puci_context *ctx) {
         }
     }
 
-    /* 2. Project-local config (.puci.toml). MCP servers are allowed here (they
-     *    are not credentials), but a project credential violation is fatal. */
+    /* 2. Project-local config (.puci.toml). An MCP server is a command that
+     *    puci starts: a cloned repo must not be able to run code just because
+     *    someone typed `puci` in it. Project servers start only when the user
+     *    trusts this project (--trust-project-mcp / PUCI_TRUST_PROJECT_MCP=1). */
+    const char *trust = getenv("PUCI_TRUST_PROJECT_MCP");
+    int trusted = trust && strcmp(trust, "1") == 0;
     const char *proj_files[] = {".puci.toml", ".puci/config.toml", NULL};
     for (int i = 0; proj_files[i]; i++) {
         if (access(proj_files[i], R_OK) == 0) {
+            if (!trusted) {
+                if (file_declares_mcp(proj_files[i])) {
+                    snprintf(g_mcp_notice, sizeof(g_mcp_notice),
+                             "%s declares MCP servers; not started (this project is not trusted). "
+                             "Review it, then run puci --trust-project-mcp to allow them.",
+                             proj_files[i]);
+                }
+                break;
+            }
             int n = puci_mcp_load_servers_from_file(ctx, proj_files[i]);
             if (n >= 0) {
                 total += n;

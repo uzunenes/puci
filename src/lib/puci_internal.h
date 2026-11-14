@@ -118,6 +118,7 @@ struct puci_turn {
     long long prompt_tokens;   /* reported usage (this turn), 0 if unspecified */
     long long completion_tokens;
     long long cached_tokens;
+    char stream_error[256];    /* provider error sent inside the stream, "" if none */
 };
 
 /* ------------------------------------------------------------------ */
@@ -157,6 +158,7 @@ struct puci_session {
 
     size_t max_tool_iterations;
     int plan_mode;
+    char *workspace_root; /* canonical; NULL = unconfined (malloc'd) */
     char *approval_feedback;
     long tool_timeout_ms;
 

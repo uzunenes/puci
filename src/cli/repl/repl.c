@@ -159,7 +159,7 @@ static void on_event(void *ud, puci_session *sess, puci_event ev,
 }
 
 /* Interactive approval policy: show the exact action (parsed argv or unified
- * diff) and ask. Non-interactive stdin auto-allows so piped use still works. */
+ * diff) and ask. Non-interactive stdin is denied unless --yes was given. */
 static puci_approval policy(const puci_approval_request *req, void *ud) {
     repl *r = (repl *)ud;
     if (r && r->always_allow_turn) {
@@ -174,8 +174,10 @@ static puci_approval policy(const puci_approval_request *req, void *ud) {
     }
 
     if (!isatty(STDIN_FILENO)) {
-        /* Non-interactive: do not block; allow. */
-        return PUCI_APPROVAL_ALLOW;
+        /* Non-interactive: nobody can answer, so fail closed. Opt in to
+         * unattended execution with --yes / PUCI_AUTO_APPROVE=1. */
+        fprintf(stderr, "[denied] no tty to confirm; use --yes to auto-approve\n");
+        return PUCI_APPROVAL_DENY;
     }
 
     for (;;) {
@@ -295,6 +297,7 @@ static void recreate_session(repl *r) {
     }
     puci_provider_config *pc = puci_cli_provider("openai");
     puci_session_options op = {0};
+    op.workspace_root = ".";
     op.provider = *pc;
     op.event_cb = on_event;
     op.system_prompt = r->system_prompt;
@@ -505,6 +508,9 @@ int puci_cli_repl_with_params(const puci_cli_params *params) {
 
     /* Connect any MCP servers declared in config.toml / .puci.toml. */
     (void)puci_cli_load_mcp_servers(ctx);
+    if (puci_cli_mcp_notice()[0]) {
+        fprintf(stderr, "[notice] %s\n", puci_cli_mcp_notice());
+    }
 
     repl r;
     memset(&r, 0, sizeof(r));

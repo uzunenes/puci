@@ -174,6 +174,7 @@ static puci_session *make_session(puci_context *ctx, int port) {
         .timeout_ms = 15000,
     };
     puci_session_options sopts = {0};
+    sopts.approval_mode = PUCI_APPROVAL_MODE_AUTO;
     sopts.provider = pcfg;
     sopts.system_prompt = "test";
     sopts.max_tool_iterations = 8;

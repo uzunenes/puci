@@ -24,16 +24,42 @@ static int ensure_dir_exists(const char *dir) {
     for (size_t i = 1; i < len; i++) {
         if (tmp[i] == '/') {
             tmp[i] = '\0';
-            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+            if (mkdir(tmp, 0700) != 0 && errno != EEXIST) {
                 return -1;
             }
             tmp[i] = '/';
         }
     }
-    if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+    if (mkdir(tmp, 0700) != 0 && errno != EEXIST) {
         return -1;
     }
     return 0;
+}
+
+/* Session transcripts and prompt history can hold tool output, file
+ * contents and anything the user typed: keep them owner-only. Tightens dirs
+ * created by older versions (0755) too, but only ones we own. */
+static void make_private_dir(const char *dir) {
+    struct stat st;
+    if (dir && stat(dir, &st) == 0 && S_ISDIR(st.st_mode) &&
+        st.st_uid == getuid() && (st.st_mode & 077) != 0) {
+        (void)chmod(dir, 0700);
+    }
+}
+
+static void make_private_dir_and_parent(const char *dir) {
+    make_private_dir(dir);
+    char parent[1024];
+    snprintf(parent, sizeof(parent), "%s", dir);
+    char *slash = strrchr(parent, '/');
+    if (slash && slash != parent) {
+        *slash = '\0';
+        /* Only the puci-owned data dir, never ~/.local/share itself. */
+        const char *base = strrchr(parent, '/');
+        if (base && strcmp(base + 1, "puci") == 0) {
+            make_private_dir(parent);
+        }
+    }
 }
 
 int puci_cli_get_sessions_dir(char *out_dir, size_t cap) {
@@ -43,6 +69,7 @@ int puci_cli_get_sessions_dir(char *out_dir, size_t cap) {
     struct stat st;
     if (stat(".puci/sessions", &st) == 0 && S_ISDIR(st.st_mode)) {
         snprintf(out_dir, cap, ".puci/sessions");
+        make_private_dir(out_dir);
         return 0;
     }
     const char *xdg = getenv("XDG_DATA_HOME");
@@ -53,10 +80,13 @@ int puci_cli_get_sessions_dir(char *out_dir, size_t cap) {
         if (home && home[0]) {
             snprintf(out_dir, cap, "%s/.local/share/puci/sessions", home);
         } else {
-            snprintf(out_dir, cap, "/tmp/puci-sessions");
+            /* No HOME: don't persist rather than spill into shared /tmp. */
+            out_dir[0] = '\0';
+            return -1;
         }
     }
     ensure_dir_exists(out_dir);
+    make_private_dir_and_parent(out_dir);
     return 0;
 }
 
@@ -73,17 +103,24 @@ int puci_cli_get_history_file(char *out_path, size_t cap) {
         if (home && home[0]) {
             snprintf(dir, sizeof(dir), "%s/.local/share/puci", home);
         } else {
-            snprintf(dir, sizeof(dir), "/tmp");
+            out_path[0] = '\0'; /* no HOME: no history file */
+            return -1;
         }
     }
     ensure_dir_exists(dir);
+    make_private_dir(dir);
     snprintf(out_path, cap, "%s/history", dir);
+    (void)chmod(out_path, 0600); /* no-op if absent; fixes older 0664 files */
     return 0;
 }
 
 int puci_cli_save_session(const puci_session *sess, const char *session_id) {
     if (!sess || !session_id || !session_id[0]) {
         return -1;
+    }
+    /* Nothing was said: don't leave an empty transcript behind. */
+    if (puci_session_message_count(sess) == 0) {
+        return 0;
     }
     char dir[1024];
     if (puci_cli_get_sessions_dir(dir, sizeof(dir)) != 0) {
@@ -92,6 +129,9 @@ int puci_cli_save_session(const puci_session *sess, const char *session_id) {
     char filepath[2048];
     snprintf(filepath, sizeof(filepath), "%s/%s.json", dir, session_id);
     puci_status st = puci_session_save_file(sess, filepath);
+    if (st == PUCI_OK) {
+        (void)chmod(filepath, 0600);
+    }
     return (st == PUCI_OK) ? 0 : -1;
 }
 

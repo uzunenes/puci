@@ -48,11 +48,17 @@ typedef enum puci_approval_decision {
  *
  *  CALLBACK (default): the legacy behaviour — the session invokes
  *           \c approve_cb synchronously and honours its return value.
+ *           FAIL-CLOSED: if no \c approve_cb is set, run_shell / write_file /
+ *           edit_file / MCP / custom tools are denied. Only read_file, grep
+ *           and glob run without a policy.
+ *
+ *  AUTO   : approvals are disabled entirely. Explicit opt-in.
  *           Suitable for CLI / non-interactive hosts that own their poll loop
  *           and can block inside the callback. */
 typedef enum puci_approval_mode {
     PUCI_APPROVAL_MODE_CALLBACK = 0,
     PUCI_APPROVAL_MODE_EVENT     = 1,
+    PUCI_APPROVAL_MODE_AUTO      = 2, /**< NO approval: every tool runs unprompted. Explicit opt-in only (sandboxed/CI hosts). */
 } puci_approval_mode;
 
 /* Legacy callback mode type. `approve_cb` returns a decision; for

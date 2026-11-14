@@ -302,6 +302,48 @@ static void test_multi_provider_switching(void) {
     puci_context_destroy(ctx);
 }
 
+/* OpenRouter-specific stream shapes: `delta.reasoning` (not
+ * reasoning_content), a usage-only final chunk with empty choices, and a
+ * mid-stream {"error":{...}} after the HTTP 200. */
+static void test_openrouter_shapes(void) {
+    puci_context *ctx = NULL;
+    CHECK(puci_context_create(NULL, &ctx) == PUCI_OK);
+    puci_provider_config pcfg = {.name = "openai", .base_url = "https://openrouter.ai/api/v1", .model = "m"};
+    puci_context_set_provider(ctx, &pcfg);
+    puci_session_options sopts = {0};
+    sopts.provider = pcfg;
+    puci_session *sess = NULL;
+    CHECK(puci_session_create(ctx, &sopts, &sess) == PUCI_OK);
+
+    puci_turn t;
+    memset(&t, 0, sizeof(t));
+    puci_strbuf_init(&t.text, &sess->alloc);
+    puci_strbuf_init(&t.reasoning, &sess->alloc);
+    const char *ev[] = {
+        "{\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning\":\"thinking...\"}}]}",
+        "{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}",
+        "{\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3}}",
+    };
+    for (size_t i = 0; i < sizeof(ev) / sizeof(ev[0]); i++) {
+        puci_arena_reset(&sess->scratch);
+        CHECK(puci_openai_provider.parse_stream(sess, &sess->scratch, ev[i], strlen(ev[i]), &t) == PUCI_OK);
+    }
+    CHECK(strcmp(puci_strbuf_cstr(&t.reasoning), "thinking...") == 0);
+    CHECK(strcmp(puci_strbuf_cstr(&t.text), "ok") == 0);
+    CHECK(t.prompt_tokens == 12 && t.completion_tokens == 3);
+    CHECK(t.stream_error[0] == '\0');
+
+    const char *err = "{\"error\":{\"code\":402,\"message\":\"Insufficient credits\"}}";
+    puci_arena_reset(&sess->scratch);
+    CHECK(puci_openai_provider.parse_stream(sess, &sess->scratch, err, strlen(err), &t) == PUCI_ERR_PROTOCOL);
+    CHECK(strcmp(t.stream_error, "Insufficient credits") == 0);
+
+    puci_strbuf_destroy(&t.text);
+    puci_strbuf_destroy(&t.reasoning);
+    puci_session_destroy(sess);
+    puci_context_destroy(ctx);
+}
+
 int main(void) {
     test_reasoning_fixture();
     test_toolcall_fixture();
@@ -309,5 +351,6 @@ int main(void) {
     test_anthropic_toolcall_fixture();
     test_anthropic_request_builder();
     test_multi_provider_switching();
+    test_openrouter_shapes();
     TEST_END();
 }

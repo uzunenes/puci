@@ -1,7 +1,7 @@
 project(
     'puci',
     'c',
-    version: '0.5.0',
+    version: '0.6.0',
     license: 'MIT',
     meson_version: '>=1.0.0',
     default_options: [
@@ -21,10 +21,17 @@ c_args = [
     '-Wpedantic',
     '-Werror',
     '-Wconversion',
+    # snprintf() truncation into fixed UI/status buffers is intentional; GCC's
+    # -O0 analysis flags dozens of those and breaks -Werror debug/sanitizer builds.
+    '-Wno-format-truncation',
     # libpuci targets POSIX (fork+exec, pipes, clock_gettime, strdup). Expose
     # the POSIX API surface under the strict -std=c17 flag.
     '-D_POSIX_C_SOURCE=200809L',
 ]
+# macOS hides BSD/Darwin APIs (O_NOFOLLOW, ...) under _POSIX_C_SOURCE.
+if host_machine.system() == 'darwin'
+    c_args += '-D_DARWIN_C_SOURCE'
+endif
 
 if get_option('native_arch')
     foreach a : cc.get_supported_arguments('-march=native')
@@ -60,7 +67,7 @@ foreach feat : ['native_arch', 'lto']
 endforeach
 
 # ---- Library ABI version (must match include/puci/version.h) ---------------
-PUCI_ABI_VERSION = 2
+PUCI_ABI_VERSION = 3
 
 # ---- Dependencies ---------------------------------------------------------
 curl_dep = dependency('libcurl')

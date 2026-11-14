@@ -87,45 +87,110 @@ int main(int argc, char **argv) {
 }
 ```
 
-Build: `cc examples/minimal_agent.c $(pkg-config --cflags --libs puci) -o minimal_agent`
+Build: `cc examples/minimal_agent.c $(pkg-config --cflags --libs puci) -o minimal_agent` (after `make install`)
 
 More examples (`embedded_editor_agent`, `poll_loop`, `bench_swarm`): [`examples/`](examples/) · Full guide: [`docs/EMBEDDING.md`](docs/EMBEDDING.md)
 
 ## Installation
 
-**Requirements:** C17 compiler (GCC or Clang), Meson ≥ 1.0, Ninja, libcurl dev headers. termbox2 is vendored (no submodule).
+### Option A — prebuilt binary (no compiler needed)
 
-**Platforms:** Linux (primary), macOS (partial kqueue path). Windows IOCP not shipped yet.
-
-```sh
-meson setup build
-ninja -C build
-meson test -C build
-```
-
-Both compilers are supported and CI-tested:
+Download the archive for your platform from
+[Releases](https://github.com/uzunenes/puci/releases), then:
 
 ```sh
-CC=gcc   meson setup build-gcc   && meson compile -C build-gcc   && meson test -C build-gcc
-CC=clang meson setup build-clang && meson compile -C build-clang && meson test -C build-clang
+tar xzf puci-*-linux-x86_64.tar.gz
+sudo install -m 755 puci-*/bin/puci /usr/local/bin/   # or: install -m 755 puci-*/bin/puci ~/.local/bin/
 ```
 
-Install the library system-wide:
+The binary only needs `libcurl`, which is preinstalled on virtually every
+Linux distribution and macOS.
+
+### Option B — build from source
+
+All you need is a C17 compiler, `make` and libcurl's headers. No Meson, no
+Python, no network access during the build (termbox2 is vendored).
 
 ```sh
-meson setup build -Dprefix=/usr/local && meson compile -C build && meson install -C build
+git clone https://github.com/uzunenes/puci && cd puci
+make                      # libpuci.a, libpuci.so and the puci CLI (~5 s)
+make test                 # optional
+sudo make install         # /usr/local: bin, lib, include/puci, pkg-config, man pages
 ```
 
-Optional switches (`-Dexamples=true`, `-Dlua=true`, `-Dbench=true`) and the full embedding guide: [`docs/EMBEDDING.md`](docs/EMBEDDING.md).
+No root? `make install PREFIX=~/.local` (put `~/.local/bin` on your `PATH`).
+`make uninstall` removes exactly what was installed. If a dependency is
+missing, `make deps` prints the command for your OS:
 
-### Quick start
+| OS | Dependencies |
+|---|---|
+| Debian / Ubuntu | `sudo apt install build-essential libcurl4-openssl-dev pkg-config` |
+| Fedora / RHEL | `sudo dnf install gcc make libcurl-devel pkgconf-pkg-config` |
+| Arch | `sudo pacman -S --needed base-devel curl` |
+| Alpine | `sudo apk add build-base curl-dev pkgconf` |
+| Gentoo | `emerge net-misc/curl` (the toolchain is already there) |
+| FreeBSD / OpenBSD | `pkg install gmake curl` / `pkg_add gmake curl`, then use `gmake` |
+| macOS | `xcode-select --install` (libcurl ships with macOS) |
+
+The usual variables work: `PREFIX`, `DESTDIR`, `BINDIR`, `LIBDIR`,
+`INCLUDEDIR`, `MANDIR`, `CC`, `CFLAGS`, `LDFLAGS`; libcurl is found with
+pkg-config or `curl-config` (override with `CURL_CFLAGS` / `CURL_LIBS`).
+`TUI=0` builds a line-mode CLI only, `SHARED=0` skips the shared library.
+The `puci` binary links libpuci statically, so it runs from any prefix without
+`ldconfig`. Packagers: `make install DESTDIR=… PREFIX=/usr LIBDIR=/usr/lib64`.
+
+### Use the library in your program
 
 ```sh
-export PUCI_API_KEY="sk-..."
-./build/src/cli/puci              # launch the TUI
-# or one-shot:
-./build/src/cli/puci run "hello"
+cc myapp.c $(pkg-config --cflags --libs puci) -o myapp            # shared
+cc myapp.c $(pkg-config --cflags puci) /usr/local/lib/libpuci.a \
+   $(pkg-config --libs libcurl) -pthread -o myapp                  # static
 ```
+
+`man libpuci` gives the overview; every function is documented in
+`<puci/*.h>`. Start from [`examples/minimal_agent.c`](examples/minimal_agent.c)
+and [`docs/EMBEDDING.md`](docs/EMBEDDING.md).
+
+**Platforms:** Linux (primary, fully tested), macOS (builds; CI checks it),
+the BSDs (should build with `gmake`, untested). Windows is not supported.
+
+<details>
+<summary>Meson build (developers)</summary>
+
+CI also builds with Meson for the full compiler and sanitizer matrix:
+
+```sh
+meson setup build && meson compile -C build && meson test -C build
+meson setup build-san -Db_sanitize=address,undefined && meson test -C build-san
+```
+
+Optional switches: `-Dexamples=true`, `-Dlua=true`, `-Dbench=true`.
+</details>
+
+### Quick start (OpenRouter)
+
+Get a key at [openrouter.ai/keys](https://openrouter.ai/keys), then:
+
+```sh
+export OPENROUTER_API_KEY="sk-or-..."          # base URL is set automatically
+export PUCI_MODEL="z-ai/glm-5.3"  # optional (default); any tool-capable OpenRouter model id
+puci doctor                                     # checks key, endpoint and model
+cd your-project && puci                         # interactive TUI (press m to switch model)
+puci run "add a --verbose flag to main.c"        # one-shot
+```
+
+The TUI follows your terminal's background, or your computer's light/dark
+setting when the terminal doesn't report it (override with
+`PUCI_THEME=light|dark`), and honours `NO_COLOR`.
+
+Other providers: set `PUCI_API_KEY` and `PUCI_BASE_URL` (OpenAI, Ollama,
+vLLM, LM Studio, Anthropic) — see [Configuration](#configuration).
+
+> **Safety:** tools that run code or modify files (`run_shell`, `write_file`,
+> `edit_file`, MCP) require approval. `puci run` asks on a TTY and denies when
+> there is none; pass `--yes` (or `PUCI_AUTO_APPROVE=1`) only in sandboxes/CI.
+> Embedders without an `approve_cb` get the same fail-closed behaviour unless
+> they set `approval_mode = PUCI_APPROVAL_MODE_AUTO`.
 
 ### Neovim (`puci.nvim`)
 
@@ -147,7 +212,7 @@ Set credentials via environment variables (never committed to repos):
 ```bash
 export PUCI_API_KEY="sk-..."
 export PUCI_BASE_URL="https://openrouter.ai/api/v1"
-export PUCI_MODEL="anthropic/claude-3.5-sonnet"
+export PUCI_MODEL="z-ai/glm-5.3"
 ```
 
 `OPENROUTER_API_KEY` is a first-class fallback for `PUCI_API_KEY`. Config resolution precedence: CLI flags > env vars > project-local config (`.puci.toml`, credentials forbidden) > global config (`~/.config/puci/config.toml`) > defaults. API keys in project-local config are rejected with a fatal error to prevent secret leakage.
@@ -156,10 +221,35 @@ Global config template (`~/.config/puci/config.toml`):
 
 ```toml
 base_url = "https://openrouter.ai/api/v1"
-model = "anthropic/claude-3.5-sonnet"
+model = "z-ai/glm-5.3"
 context_budget_bytes = 131072
 tool_timeout_ms = 60000
 ```
+
+### Workspace and files on disk
+
+puci works in the directory you start it in (or `puci -C <dir>`); that
+directory is the **workspace**, shown in the TUI's empty screen.
+
+- Reading inside the workspace needs no approval; reading outside it always asks.
+- `write_file` / `edit_file` outside the workspace, and `run_shell` with a `cwd`
+  outside it, are refused. Symlinks are resolved, `..` can't escape.
+- Shell commands themselves can still touch anything, which is why every
+  `run_shell` call asks first.
+- Starting puci in your home folder or `/` prints a warning: open a project
+  folder instead.
+
+What puci itself writes (XDG locations, owner-only `0700`/`0600`):
+
+| Path | Contents |
+|---|---|
+| `~/.config/puci/config.toml` | your settings (you create it) |
+| `~/.local/share/puci/sessions/` | conversation transcripts (empty ones are not saved) |
+| `~/.local/share/puci/history` | prompt history |
+
+Nothing is written to `/tmp` or to your project unless you create
+`.puci/sessions/` there (then that project's transcripts stay with it).
+Remove everything with `rm -rf ~/.local/share/puci ~/.config/puci`.
 
 ### MCP servers
 
@@ -172,6 +262,16 @@ args = ["--repository", "."]
 ```
 
 PUCI launches each server, performs the MCP handshake, discovers tools, and dispatches `tools/call` over JSON-RPC 2.0.
+Works in the TUI, the REPL and `puci run`; every MCP tool call asks for approval.
+
+A project can declare servers in its own `.puci.toml`, but starting one means
+running a command from that repository, so puci **does not start them** until
+you trust the project: review the file, then run `puci --trust-project-mcp`
+(or set `PUCI_TRUST_PROJECT_MCP=1`). Servers in your own
+`~/.config/puci/config.toml` always start.
+
+Custom tools in C: `puci_tool_register()` (see [`examples/custom_tool.c`](examples/custom_tool.c));
+long-running tools can be async (`puci_tool_register_async()`).
 
 ## Features
 

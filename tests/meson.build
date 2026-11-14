@@ -241,6 +241,12 @@ test('test_conv', test_conv)
 # python3 being present; uses the shell-captured binary (PUCI_BIN) or the
 # in-tree build. These are heavier PTY tests, so keep them out of the default
 # suite and run under the explicit 'tui' suite.
+# TUI design gate: raw colours only in tui/theme.c (scripts/check_tui_tokens.sh).
+sh_prog = find_program('sh', required: false)
+if sh_prog.found()
+    test('tui_tokens', sh_prog, args: [files('../scripts/check_tui_tokens.sh')])
+endif
+
 py3 = find_program('python3', required: false)
 if py3.found()
     test(

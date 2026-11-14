@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 static void stream_event(void *ud, puci_session *sess, puci_event ev,
                          const void *ctx) {
@@ -42,6 +43,30 @@ static void stream_event(void *ud, puci_session *sess, puci_event ev,
     default:
         break;
     }
+}
+
+/* Approval policy for one-shot runs: show the action, ask on a tty, and fail
+ * closed when nobody can answer. */
+static puci_approval run_policy(const puci_approval_request *req, void *ud) {
+    (void)ud;
+    fprintf(stderr, "\n[approve] %s\n", req->tool);
+    if (req->diff) {
+        fprintf(stderr, "%s\n", req->diff);
+    } else if (req->display && req->display[0]) {
+        fprintf(stderr, "%s\n", req->display);
+    }
+    if (!isatty(STDIN_FILENO)) {
+        fprintf(stderr, "[denied] no tty to confirm; re-run with --yes to auto-approve\n");
+        return PUCI_APPROVAL_DENY;
+    }
+    fprintf(stderr, "Allow? [y/N]: ");
+    fflush(stderr);
+    char b[64];
+    if (!fgets(b, sizeof(b), stdin)) {
+        return PUCI_APPROVAL_DENY;
+    }
+    return (b[0] == 'y' || b[0] == 'Y') ? PUCI_APPROVAL_ALLOW_ONCE
+                                         : PUCI_APPROVAL_DENY;
 }
 
 int puci_cli_run_with_params(const puci_cli_params *params) {
@@ -81,6 +106,9 @@ int puci_cli_run_with_params(const puci_cli_params *params) {
 
     /* Connect any MCP servers declared in config.toml / .puci.toml. */
     (void)puci_cli_load_mcp_servers(ctx);
+    if (puci_cli_mcp_notice()[0]) {
+        fprintf(stderr, "[notice] %s\n", puci_cli_mcp_notice());
+    }
 
     puci_status st = puci_context_set_provider(ctx, pcfg);
     if (st != PUCI_OK) {
@@ -93,10 +121,28 @@ int puci_cli_run_with_params(const puci_cli_params *params) {
     puci_session_options sopts = {0};
     sopts.provider = *pcfg;
     sopts.event_cb = stream_event;
-    sopts.system_prompt = "You are puci, a fast coding agent. Be concise.";
+    sopts.system_prompt = "You are puci, a coding agent in the user's terminal. Be concise.";
     sopts.max_tool_iterations = max_tool_iterations;
     sopts.plan_mode = params ? params->plan_mode : 0;
     sopts.tool_timeout_ms = 60000;
+    sopts.workspace_root = ".";
+    {
+        char ws[4096];
+        if (puci_cli_workspace(ws, sizeof(ws)) == 1) {
+            fprintf(stderr, "[warning] workspace is %s: file tools can reach everything under it. "
+                    "Run puci inside a project folder or pass -C <dir>.\n", ws);
+        }
+    }
+    {
+        const char *ae = getenv("PUCI_AUTO_APPROVE");
+        int yes = (params && params->auto_approve) ||
+                  (ae && strcmp(ae, "1") == 0);
+        if (yes) {
+            sopts.approval_mode = PUCI_APPROVAL_MODE_AUTO;
+        } else {
+            sopts.approve_cb = run_policy;
+        }
+    }
 
     puci_session *sess = NULL;
     st = puci_session_create(ctx, &sopts, &sess);

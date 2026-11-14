@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <time.h>
 
 #include "../test_util.h"
 
@@ -117,6 +118,8 @@ static void test_path_guards(void) {
     CHECK(puci_path_is_protected("build-gcc/src/lib/libpuci.a") == 1);
     CHECK(puci_path_is_protected("/tmp/puci-good") == 1);
     CHECK(puci_path_is_protected("safe_dir/file.txt") == 0);
+    CHECK(puci_path_is_protected("builder.c") == 0);
+    CHECK(puci_path_is_protected("src/build_info.c") == 0);
 
     puci_context *ctx = NULL;
     CHECK(puci_context_create(NULL, &ctx) == PUCI_OK);
@@ -382,7 +385,58 @@ static void test_config_resolution(void) {
     unlink(good_cfg);
 }
 
+/* Workspace confinement: path resolution must follow symlinks, judge
+ * not-yet-existing paths by their parent, and never let ".." escape. */
+static void test_workspace_contains(void) {
+    char tmpl[] = "/tmp/puci-ws-XXXXXX";
+    char *base = mkdtemp(tmpl);
+    CHECK(base != NULL);
+    if (!base) return;
+    char ws[600], sub[700], outside[700], link[700];
+    snprintf(ws, sizeof ws, "%s/ws", base);
+    snprintf(sub, sizeof sub, "%s/src", ws);
+    snprintf(outside, sizeof outside, "%s/outside", base);
+    CHECK(mkdir(ws, 0700) == 0);
+    CHECK(mkdir(sub, 0700) == 0);
+    CHECK(mkdir(outside, 0700) == 0);
+    snprintf(link, sizeof link, "%s/escape", ws);
+    CHECK(symlink(outside, link) == 0);
+
+    char *root = puci_workspace_canon(ws);
+    CHECK(root != NULL);
+    CHECK(puci_workspace_canon("/definitely/not/here") == NULL);
+
+    char p[900];
+    snprintf(p, sizeof p, "%s/src", ws);           CHECK(puci_workspace_contains(root, p) == 1);
+    snprintf(p, sizeof p, "%s/src/new/file.c", ws); CHECK(puci_workspace_contains(root, p) == 1);
+    snprintf(p, sizeof p, "%s", ws);               CHECK(puci_workspace_contains(root, p) == 1);
+    snprintf(p, sizeof p, "%s/outside/x", base);   CHECK(puci_workspace_contains(root, p) == 0);
+    snprintf(p, sizeof p, "%s/../outside/x", ws);  CHECK(puci_workspace_contains(root, p) == 0);
+    snprintf(p, sizeof p, "%s/new/../../outside", ws); CHECK(puci_workspace_contains(root, p) == 0);
+    snprintf(p, sizeof p, "%s/escape/x", ws);      CHECK(puci_workspace_contains(root, p) == 0);
+    snprintf(p, sizeof p, "%sX/file", ws);         CHECK(puci_workspace_contains(root, p) == 0); /* prefix trap */
+    CHECK(puci_workspace_contains(root, "/etc/passwd") == 0);
+    CHECK(puci_workspace_contains(NULL, "/etc/passwd") == 1); /* unconfined */
+
+    /* Relative paths resolve against the cwd. */
+    char oldcwd[1024];
+    CHECK(getcwd(oldcwd, sizeof oldcwd) != NULL);
+    CHECK(chdir(ws) == 0);
+    CHECK(puci_workspace_contains(root, "src/main.c") == 1);
+    CHECK(puci_workspace_contains(root, NULL) == 1);
+    CHECK(puci_workspace_contains(root, "../outside") == 0);
+    CHECK(chdir(oldcwd) == 0);
+
+    free(root);
+    unlink(link);
+    rmdir(sub);
+    rmdir(ws);
+    rmdir(outside);
+    rmdir(base);
+}
+
 int main(void) {
+    test_workspace_contains();
     test_builtins_registered();
     test_custom_tool_via_registry_path();
     test_async_tool_registration_validation();

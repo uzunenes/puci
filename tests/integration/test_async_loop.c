@@ -265,6 +265,7 @@ static void test_bounded_process_calls(void) {
     counts c;
     memset(&c, 0, sizeof(c));
     puci_session_options sopts = {0};
+    sopts.approval_mode = PUCI_APPROVAL_MODE_AUTO;
     sopts.provider = pcfg;
     sopts.event_userdata = &c;
 
@@ -439,6 +440,7 @@ static int drive_streaming_turn(int nchunks, int delay_ms, int distinct,
     };
     puci_context_set_provider(ctx, &pcfg);
     puci_session_options sopts = {0};
+    sopts.approval_mode = PUCI_APPROVAL_MODE_AUTO;
     sopts.provider = pcfg;
     puci_session *sess = NULL;
     if (puci_session_create(ctx, &sopts, &sess) != PUCI_OK) {
@@ -668,6 +670,7 @@ static void test_async_reasoning_payload(void) {
     CHECK(puci_context_set_provider(ctx, &pcfg) == PUCI_OK);
 
     puci_session_options sopts = {0};
+    sopts.approval_mode = PUCI_APPROVAL_MODE_AUTO;
     sopts.provider = pcfg;
     puci_session *sess = NULL;
     CHECK(puci_session_create(ctx, &sopts, &sess) == PUCI_OK);
@@ -754,6 +757,7 @@ int main(void) {
         CHECK(puci_context_set_provider(ctx, &pcfg) == PUCI_OK);
         
         puci_session_options sopts = {0};
+        sopts.approval_mode = PUCI_APPROVAL_MODE_AUTO;
         sopts.provider = pcfg;
         puci_session *sess = NULL;
         CHECK(puci_session_create(ctx, &sopts, &sess) == PUCI_OK);

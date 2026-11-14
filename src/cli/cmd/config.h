@@ -16,6 +16,12 @@
  * name (e.g. "openai"). Calling it again re-reads the environment. */
 puci_provider_config *puci_cli_provider(const char *name);
 
+/* The workspace is the current directory (`puci -C <dir>` changes it).
+ * Writes its display form ("~/proj") into out. Returns 1 if it is too broad
+ * to confine anything useful (the home directory or /), 0 otherwise,
+ * -1 if the cwd cannot be read. */
+int puci_cli_workspace(char *out, size_t cap);
+
 const char *puci_cli_config_error(void);
 
 int puci_cli_parse_toml_file(const char *filepath, int is_project_local,
@@ -34,5 +40,9 @@ int puci_cli_parse_toml_file(const char *filepath, int is_project_local,
  * puci_context_create; the discovered MCP tools become available to every
  * session on the context. */
 int puci_cli_load_mcp_servers(puci_context *ctx);
+
+/* A one-line notice from the last puci_cli_load_mcp_servers() call (e.g.
+ * project-declared servers that were NOT started), or "" if none. */
+const char *puci_cli_mcp_notice(void);
 
 #endif /* PUCI_CLI_CONFIG_H */

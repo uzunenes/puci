@@ -2,7 +2,9 @@
 #define _XOPEN_SOURCE 700
 #include "path_guard.h"
 
+#include <stdatomic.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,7 +16,11 @@ static int segment_is_protected(const char *seg, size_t len) {
     if (len == 4 && memcmp(seg, ".git", 4) == 0) {
         return 1;
     }
-    if (len >= 5 && memcmp(seg, "build", 5) == 0) {
+    /* Build output dirs: "build" or "build-<variant>" (not "builder.c"). */
+    if (len == 5 && memcmp(seg, "build", 5) == 0) {
+        return 1;
+    }
+    if (len > 6 && memcmp(seg, "build-", 6) == 0) {
         return 1;
     }
     if (len >= 9 && memcmp(seg, "puci-good", 9) == 0) {
@@ -98,10 +104,10 @@ int puci_atomic_write_file(const char *path, const char *content, size_t content
     int existed = (stat(path, &st) == 0);
     mode_t mode = existed ? (st.st_mode & 0777) : 0664;
 
-    static unsigned int counter = 0;
-    counter++;
+    static _Atomic unsigned int counter = 0;
+    unsigned int cn = ++counter;
     char tmp_path[PATH_MAX];
-    int n = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%d.%u", path, (int)getpid(), counter);
+    int n = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%d.%u", path, (int)getpid(), cn);
     if (n <= 0 || (size_t)n >= sizeof(tmp_path)) {
         if (err_buf && err_cap > 0) {
             snprintf(err_buf, err_cap, "path too long");
@@ -109,8 +115,14 @@ int puci_atomic_write_file(const char *path, const char *content, size_t content
         return -1;
     }
 
-    FILE *f = fopen(tmp_path, "wb");
+    /* O_EXCL|O_NOFOLLOW: never write through a pre-planted symlink/temp. */
+    int tfd = open(tmp_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    FILE *f = tfd >= 0 ? fdopen(tfd, "wb") : NULL;
     if (!f) {
+        if (tfd >= 0) {
+            close(tfd);
+            unlink(tmp_path);
+        }
         if (err_buf && err_cap > 0) {
             snprintf(err_buf, err_cap, "cannot open temp file for write: %s", strerror(errno));
         }
@@ -156,4 +168,75 @@ int puci_atomic_write_file(const char *path, const char *content, size_t content
         *out_written = written;
     }
     return 0;
+}
+
+/* ---- workspace confinement ------------------------------------------ */
+
+char *puci_workspace_canon(const char *dir) {
+    if (!dir || !dir[0]) {
+        return NULL;
+    }
+    char buf[PATH_MAX];
+    struct stat st;
+    if (!realpath(dir, buf) || stat(buf, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        return NULL;
+    }
+    return strdup(buf);
+}
+
+static int under(const char *root, const char *p) {
+    size_t n = strlen(root);
+    if (n == 1 && root[0] == '/') {
+        return p[0] == '/';
+    }
+    return strncmp(root, p, n) == 0 && (p[n] == '\0' || p[n] == '/');
+}
+
+int puci_workspace_contains(const char *root, const char *path) {
+    if (!root || !root[0]) {
+        return 1;
+    }
+    char want[PATH_MAX];
+    if (!path || !path[0]) {
+        path = ".";
+    }
+    if (path[0] == '/') {
+        if (snprintf(want, sizeof(want), "%s", path) >= (int)sizeof(want)) return 0;
+    } else {
+        char cwd[PATH_MAX];
+        if (!getcwd(cwd, sizeof(cwd))) return 0;
+        if (snprintf(want, sizeof(want), "%s/%s", cwd, path) >= (int)sizeof(want)) return 0;
+    }
+    /* Resolve the deepest existing ancestor; the rest must not climb. */
+    char head[PATH_MAX];
+    snprintf(head, sizeof(head), "%s", want);
+    char tailbuf[PATH_MAX];
+    tailbuf[0] = '\0';
+    for (;;) {
+        char resolved[PATH_MAX];
+        if (realpath(head, resolved)) {
+            if (tailbuf[0]) {
+                /* Reject ".." in the not-yet-existing remainder. */
+                const char *c = tailbuf;
+                while (*c) {
+                    while (*c == '/') c++;
+                    const char *e = strchr(c, '/');
+                    size_t l = e ? (size_t)(e - c) : strlen(c);
+                    if (l == 2 && c[0] == '.' && c[1] == '.') return 0;
+                    c += l;
+                }
+            }
+            return under(root, resolved);
+        }
+        char *slash = strrchr(head, '/');
+        if (!slash) return 0;
+        char rest[PATH_MAX];
+        if (snprintf(rest, sizeof(rest), "%s%s%s", slash + 1, tailbuf[0] ? "/" : "", tailbuf) >= (int)sizeof(rest)) return 0;
+        snprintf(tailbuf, sizeof(tailbuf), "%s", rest);
+        if (slash == head) {
+            head[1] = '\0';
+        } else {
+            *slash = '\0';
+        }
+    }
 }

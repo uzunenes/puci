@@ -1,0 +1,114 @@
+.TH PUCI 1 "November 2026" "puci 0.6.0" "User Commands"
+.SH NAME
+puci \- minimal AI coding agent for the terminal
+.SH SYNOPSIS
+.B puci
+.RI [ options ]
+.br
+.B puci
+.RI [ options ]
+.B run
+.I prompt
+.br
+.B puci doctor
+.SH DESCRIPTION
+.B puci
+talks to a language model and lets it read, write and edit files and run
+commands in a
+.IR workspace ,
+asking before anything that changes your system.
+On a terminal it starts a full\-screen interface (TUI); otherwise, or with
+.BR \-\-no\-tui ,
+a line\-mode REPL.
+.B run
+performs one non\-interactive turn and streams the answer to standard output.
+.B doctor
+checks the configuration, the key and a live round trip to the provider.
+.SH OPTIONS
+.TP
+.BR \-C ", " \-\-cwd " " \fIdir\fR
+Use
+.I dir
+as the workspace (default: the current directory).
+.TP
+.BR \-y ", " \-\-yes
+Approve every tool call without asking. Writes outside the workspace are
+still refused. Use only in sandboxes and CI.
+.TP
+.BR \-\-plan ", " \-\-dry\-run
+Plan mode: file changes are simulated, nothing is written.
+.TP
+.BI \-\-session " id"
+Use or create the named session.
+.TP
+.BR \-\-resume " [" latest | \fIid\fR ]
+Continue a saved session.
+.TP
+.B \-\-trust\-project\-mcp
+Start the MCP servers declared in this project's
+.IR .puci.toml .
+Without it they are listed but not started, because starting one runs a
+command from the repository.
+.TP
+.BR \-\-tui ", " \-\-no\-tui
+Force the full\-screen interface, or the line\-mode REPL.
+.TP
+.B \-\-list\-sessions
+List saved sessions.
+.TP
+.BR \-V ", " \-\-version
+Print the version.
+.SH WORKSPACE AND APPROVAL
+Reading inside the workspace needs no approval; reading outside it always
+asks. Writing or editing files outside the workspace, and running a command
+with its working directory outside it, are refused. Symbolic links and
+.B ..
+are resolved first. Every shell command asks for approval, because the
+command itself can reach any file. Starting puci in your home directory or
+.B /
+prints a warning.
+.SH ENVIRONMENT
+.TP
+.B OPENROUTER_API_KEY
+OpenRouter key; also sets the base URL to OpenRouter.
+.TP
+.BR PUCI_API_KEY ", " PUCI_BASE_URL ", " PUCI_MODEL
+Provider key, endpoint (any OpenAI\-compatible URL such as Ollama or
+llama.cpp, or Anthropic) and model.
+.TP
+.B PUCI_AUTO_APPROVE=1
+Same as
+.BR \-\-yes .
+.TP
+.B PUCI_THEME=light|dark
+Override the detected terminal background.
+.TP
+.B NO_COLOR
+Disable colour.
+.SH FILES
+.TP
+.I ~/.config/puci/config.toml
+User configuration: base_url, model, api_key, MCP servers.
+.TP
+.I .puci.toml
+Project configuration. Keys and credentials are refused here.
+.TP
+.I ~/.local/share/puci/sessions/
+Saved conversations (mode 0600).
+.TP
+.I ~/.local/share/puci/history
+Prompt history (mode 0600).
+.SH EXIT STATUS
+0 on success, 1 on a runtime or provider error, 2 on a usage error.
+.SH EXAMPLES
+.nf
+export OPENROUTER_API_KEY=sk\-or\-...
+puci doctor
+cd ~/src/project && puci
+puci \-C ~/src/project run "add a \-\-verbose flag"
+PUCI_BASE_URL=http://localhost:11434/v1 PUCI_MODEL=qwen3 puci
+.fi
+.SH SEE ALSO
+.BR libpuci (3)
+.PP
+https://github.com/uzunenes/puci

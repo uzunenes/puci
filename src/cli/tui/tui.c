@@ -1,4 +1,4 @@
-/* tui.c - PUCI Featherweight TUI v0.5.0 — termbox2 hybrid cell renderer
+/* tui.c - PUCI Featherweight TUI — termbox2 hybrid cell renderer
  * Master poll ring: STDIN + N*session fds. termbox2 = double-buffer only.
  * World-class chat flow: stream coalescing, word-wrap, scrollback, session & model pickers.
  */
@@ -26,6 +26,7 @@
 #include "content.h"
 #include "md.h"
 #include "hl.h"
+#include "theme.h"
 #ifdef __clang__
 #pragma clang diagnostic pop
 #elif defined(__GNUC__)
@@ -155,30 +156,10 @@ static void on_winch(int s){ (void)s; g_winch=1; }
 static void on_terminate(int s){ (void)s; g_terminate=1; }
 
 /* ── Semantic theme tokens ──────────────────────────────────────────
-   All colour decisions go through this palette so overlay/header blue
-   no longer dominates the screen. The terminal default background is used
-   everywhere except selected rows. */
-typedef struct {
-    uintattr_t bg;         /* default background (TB_DEFAULT) */
-    uintattr_t surface;    /* overlay/panel background */
-    uintattr_t border;     /* faint border */
-    uintattr_t focus;      /* focused border / accent */
-    uintattr_t text;       /* body text */
-    uintattr_t muted;      /* dimmed/secondary text */
-    uintattr_t accent;     /* primary accent */
-    uintattr_t success;    /* ok / ready */
-    uintattr_t warning;    /* pending / attention */
-    uintattr_t error;      /* failure */
-    uintattr_t user;       /* user message label */
-    uintattr_t assistant;  /* assistant label */
-    uintattr_t tool;       /* tool card */
-} theme_t;
-static const theme_t g_theme = {
-    TB_DEFAULT, TB_DEFAULT, TB_WHITE|TB_BOLD, TB_CYAN|TB_BOLD,
-    TB_WHITE, TB_BLACK|TB_BOLD, TB_CYAN, TB_GREEN,
-    TB_YELLOW, TB_RED|TB_BOLD, TB_CYAN|TB_BOLD, TB_WHITE|TB_BOLD, TB_YELLOW
-};
+   Every colour decision goes through g_theme (tui/theme.c, rules in
+   tui/theme.h); raw TB_<colour> names are not allowed in this file. */
 
+static char g_ws_disp[4096]; static int g_ws_broad=0; /* workspace shown in the empty state */
 static int g_show_debug=0;   /* enable RSS/PSS/trace metrics in header */
 
 static int g_headless=0;
@@ -419,6 +400,7 @@ static void history_save_line(const char *line){
     if(g_hist_count>0 && strcmp(g_hist[g_hist_count-1],line)==0) return;
     char path[1024]; if(puci_cli_get_history_file(path,sizeof path)!=0) return;
     FILE *f=fopen(path,"a"); if(!f) return;
+    (void)fchmod(fileno(f),0600); /* prompts are private */
     fprintf(f,"%s\n",line); fclose(f);
     if(g_hist_count<HIST_MAX){ snprintf(g_hist[g_hist_count],2048,"%s",line); g_hist_count++; }
     else { // rotate
@@ -447,18 +429,16 @@ static void history_next(void){
 #define MAX_MODELS 512
 static char g_model_buf[MAX_MODELS][128];
 static const char *g_static_models[] = {
-    "deepseek/deepseek-chat",
-    "deepseek/deepseek-v3.2-exp",
-    "deepseek/deepseek-r1",
-    "anthropic/claude-3.5-sonnet",
-    "anthropic/claude-3.5-haiku",
-    "openai/gpt-4o-mini",
-    "openai/gpt-4o",
-    "openai/gpt-4.1-mini",
-    "google/gemini-2.0-flash-001",
-    "google/gemini-2.0-flash-lite-001",
-    "meta-llama/llama-3.3-70b-instruct",
-    "qwen/qwen-2.5-72b-instruct",
+    /* Offline fallback only; the picker merges the live /models list. */
+    "z-ai/glm-5.3",
+    "anthropic/claude-sonnet-5.5",
+    "anthropic/claude-opus-5.5",
+    "anthropic/claude-haiku-5.5",
+    "openai/gpt-5.6-terra",
+    "openai/gpt-5.6-luna",
+    "google/gemini-3.8-flash",
+    "deepseek/deepseek-v4.1-flash",
+    "moonshotai/kimi-k3.1-pro",
     NULL
 };
 static const char *k_models[MAX_MODELS+1];
@@ -637,7 +617,7 @@ static int fetch_models_into(char out[][128], int cap, int *err){
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 6L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 4L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "puci/0.5.0");
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "puci/" PUCI_VERSION_STRING);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
     CURLcode rc=curl_easy_perform(curl);
@@ -947,15 +927,15 @@ static void tb_print_styled(int x,int y, uintattr_t base_fg, uintattr_t base_bg,
     int bold=0, code=0;
     // heading detection at line start
     if(s[0]=='#' && (s[1]==' '||s[1]=='#')){
-        base_fg = TB_YELLOW|TB_BOLD; // heading yellow
+        base_fg = g_theme.heading;
         int skip=0; while(s[skip]=='#') skip++; if(s[skip]==' ') skip++;
         s += skip;
     } else if(s[0]=='>' && s[1]==' '){
-        base_fg = TB_CYAN;
-        if(col < x+max_w){ tb_set_cell(col,y, 0x2502, TB_CYAN, base_bg); col++; }
+        base_fg = g_theme.quote;
+        if(col < x+max_w){ tb_set_cell(col,y, 0x2502, g_theme.quote, base_bg); col++; }
         s+=2;
     } else if((s[0]=='-'||s[0]=='*') && s[1]==' '){
-        base_fg = TB_WHITE;
+        base_fg = g_theme.text;
         if(col < x+max_w){ tb_set_cell(col,y, 0x2022, base_fg, base_bg); col++; tb_set_cell(col,y,' ', base_fg, base_bg); col++; }
         s+=2;
     }
@@ -988,7 +968,7 @@ static void tb_print_styled(int x,int y, uintattr_t base_fg, uintattr_t base_bg,
         if(col+w > x+max_w) break;
         uintattr_t fg=base_fg, bg=base_bg;
         if(bold) fg|=TB_BOLD;
-        if(code){ fg=TB_BLACK; bg=TB_WHITE; }
+        if(code){ fg=g_theme.code_fg; bg=g_theme.code_bg; }
         /* Wide glyphs occupy two cells; termbox fills the trailing cell. */
         tb_set_cell(col,y,cp, fg, bg);
         col+=w; s+=(size_t)bl;
@@ -1013,16 +993,16 @@ static void tb_print_hl(int x,int y,int max_w,HlLang lang,const char *s,uintattr
         if((int)off>=max_w) break;
         uintattr_t fg=base_fg;
         switch(sp[i].kind){
-            case HL_TK_KEYWORD: fg=TB_CYAN|TB_BOLD; break;
-            case HL_TK_STRING:  fg=TB_GREEN; break;
-            case HL_TK_NUMBER:  fg=TB_MAGENTA; break;
-            case HL_TK_COMMENT: fg=TB_GREEN|TB_DIM; break;
-            case HL_TK_BOOL:    fg=TB_YELLOW; break;
-            case HL_TK_HEADING: fg=TB_YELLOW|TB_BOLD; break;
-            case HL_TK_DIFF_ADD:fg=TB_GREEN; break;
-            case HL_TK_DIFF_DEL:fg=TB_RED; break;
-            case HL_TK_DIFF_HUNK:fg=TB_CYAN; break;
-            case HL_TK_MD_LINK: fg=TB_BLUE|TB_UNDERLINE; break;
+            case HL_TK_KEYWORD: fg=g_theme.hl_keyword; break;
+            case HL_TK_STRING:  fg=g_theme.hl_string; break;
+            case HL_TK_NUMBER:  fg=g_theme.hl_number; break;
+            case HL_TK_COMMENT: fg=g_theme.hl_comment; break;
+            case HL_TK_BOOL:    fg=g_theme.hl_bool; break;
+            case HL_TK_HEADING: fg=g_theme.heading; break;
+            case HL_TK_DIFF_ADD:fg=g_theme.diff_add; break;
+            case HL_TK_DIFF_DEL:fg=g_theme.diff_del; break;
+            case HL_TK_DIFF_HUNK:fg=g_theme.diff_hunk; break;
+            case HL_TK_MD_LINK: fg=g_theme.hl_link; break;
             default: break;
         }
         const char *p=s+off;
@@ -1075,7 +1055,7 @@ static int md_fence_detect(const char *line, HlLang *out_lang){
     return 1;
 }
 static void tb_draw_box(int r,int c,int h,int w,const char *title,int focused){
-    uintattr_t fg = focused ? TB_CYAN|TB_BOLD : TB_WHITE;
+    uintattr_t fg = focused ? g_theme.focus : g_theme.border;
     uintattr_t bg = TB_DEFAULT;
     tb_set_cell(c, r, 0x250C, fg, bg);
     for(int x=1;x<w-1;x++) tb_set_cell(c+x, r, 0x2500, fg, bg);
@@ -1349,7 +1329,7 @@ static void tui_render_pane(Pane *p, int x, int y, int h, int w, int focused){
             else { take=(int)render_segment(s+seg_off, inner_w); if(take<1||take>rem) take=rem; }
             char seg[RING_COLS]; memcpy(seg,s+seg_off,(size_t)take); seg[take]=0;
             seg_off+=take;
-            uintattr_t fg=TB_WHITE;
+            uintattr_t fg=g_theme.text;
             if(t==RL_USER) fg=g_theme.user;
             else if(t==RL_TOOL) fg=g_theme.tool;
             else if(t==RL_ERROR) fg=g_theme.error;
@@ -1416,6 +1396,14 @@ static void tui_render_pane(Pane *p, int x, int y, int h, int w, int focused){
             tb_print(x+1, ey, g_theme.accent, TB_DEFAULT, "PUCI");
             tb_print(x+1, ey+1, g_theme.muted,  TB_DEFAULT, "Type a message to begin.");
             tb_print(x+1, ey+2, g_theme.muted,  TB_DEFAULT, "/help for commands");
+            if(ey+4 <= y+inner_h && g_ws_disp[0]){
+                char wl[600];
+                snprintf(wl,sizeof wl,"workspace: %.500s", g_ws_disp);
+                tb_print(x+1, ey+4, g_theme.muted, TB_DEFAULT, wl);
+                if(g_ws_broad && ey+5 <= y+inner_h)
+                    tb_print(x+1, ey+5, g_theme.warning, TB_DEFAULT,
+                             "this is your whole home folder: start puci inside a project (or puci -C <dir>)");
+            }
         }
     }
     /* Unread / new-lines badge: only when follow is disabled (scrolled up)
@@ -1557,8 +1545,8 @@ void tui_render_frame(void){
         int svis=sh-2; if(svis<1) svis=1;
         int stop=g_pick_sel-(svis-1); if(stop<0) stop=0;
         for(int i=stop; i<cnt && i<stop+svis; i++){
-            uint32_t fg=(i==g_pick_sel && g_mode==2)? TB_BLACK:TB_WHITE;
-            uint32_t bg=(i==g_pick_sel && g_mode==2)? TB_CYAN:TB_DEFAULT;
+            uint32_t fg=(i==g_pick_sel && g_mode==2)? g_theme.sel_fg:g_theme.text;
+            uint32_t bg=(i==g_pick_sel && g_mode==2)? g_theme.sel_bg:g_theme.bg;
             int src=(g_mode==2? g_pick_filtered_idx[i] : i);
             for(int x=sc+1;x<sc+sw-1;x++) tb_set_cell(x, sr+1+(i-stop),' ',fg,bg);
             char ln[88]; snprintf(ln,sizeof ln,"%.12s %.10s", g_sess_list[src].id, g_sess_list[src].model);
@@ -1693,7 +1681,7 @@ composer_done:
         if(oc >= cols-2) oc = cols>3 ? cols-3 : 0;
         int maxh = rows - or_ - 1; if(maxh<3) maxh=3; if(oh>maxh) oh=maxh;
         int maxw = cols - oc - 1; if(maxw<8) maxw=8; if(ow>maxw) ow=maxw;
-        for(int y=or_; y<or_+oh; y++) for(int x=oc; x<oc+ow; x++) tb_set_cell(x,y,' ', TB_WHITE, g_theme.surface);
+        for(int y=or_; y<or_+oh; y++) for(int x=oc; x<oc+ow; x++) tb_set_cell(x,y,' ', g_theme.text, g_theme.surface);
         if(g_approval_feedback_mode){
             tb_draw_box(or_,oc,oh,ow,"Approval — deny with reason (Enter send, Esc cancel)",1);
         } else {
@@ -1705,9 +1693,9 @@ composer_done:
             if(l>=g_hunk_off && l < g_hunk_off+rows_avail){
                 int yy = or_+1+(l-g_hunk_off);
                 if(yy >= or_+1 && yy < or_+oh-2){
-                    uint32_t fg = TB_WHITE;
-                    if(tok[0]=='+') fg = TB_GREEN|TB_BOLD;
-                    else if(tok[0]=='-') fg = TB_RED|TB_BOLD;
+                    uint32_t fg = g_theme.text;
+                    if(tok[0]=='+') fg = g_theme.diff_add;
+                    else if(tok[0]=='-') fg = g_theme.diff_del;
                     char line[96]; snprintf(line,sizeof line,"%.*s", ow>2?ow-2:0, tok);
                     tb_print(oc+1, yy, fg, g_theme.surface, line);
                 }
@@ -1721,12 +1709,12 @@ composer_done:
             if(g_approval_feedback_mode){
                 char fbuf[540];
                 snprintf(fbuf,sizeof fbuf,"reason> %.510s", g_approval_feedback);
-                tb_print(oc+1, fy, TB_BLACK, TB_YELLOW, fbuf);
+                tb_print(oc+1, fy, g_theme.banner_fg, g_theme.banner_bg, fbuf);
             } else {
                 char hbuf[64];
                 if(g_hunk_max>1) snprintf(hbuf,sizeof hbuf,"%d/%d  j/k scroll", g_hunk_off+1, g_hunk_max);
                 else snprintf(hbuf,sizeof hbuf,"%d/%d", g_hunk_off+1, g_hunk_max);
-                tb_print(oc+1, fy, TB_CYAN, g_theme.surface, hbuf);
+                tb_print(oc+1, fy, g_theme.accent, g_theme.surface, hbuf);
             }
         }
     }
@@ -1738,7 +1726,7 @@ composer_done:
         if(oc >= cols-2) oc = cols>3 ? cols-3 : 0;
         int maxh = rows - or_ - 1; if(maxh<3) maxh=3; if(oh>maxh) oh=maxh;
         int maxw = cols - oc - 1; if(maxw<8) maxw=8; if(ow>maxw) ow=maxw;
-        for(int y=or_; y<or_+oh; y++) for(int x=oc; x<oc+ow; x++) tb_set_cell(x,y,' ', TB_WHITE, g_theme.surface);
+        for(int y=or_; y<or_+oh; y++) for(int x=oc; x<oc+ow; x++) tb_set_cell(x,y,' ', g_theme.text, g_theme.surface);
         char mtitle[64]; if(g_pick_filter[0]) snprintf(mtitle,sizeof mtitle,"Model /%.30s", g_pick_filter); else snprintf(mtitle,sizeof mtitle,"Model — Enter select (Ctrl-Y copy)");
         tb_draw_box(or_,oc,oh,ow,mtitle,1);
         /* Viewport: keep the selection row visible, scroll to follow it. */
@@ -1749,10 +1737,10 @@ composer_done:
             int yy=or_+1+(i-top);
             if(yy < or_+oh-1){
                 if(i==g_pick_sel){
-                    for(int x=oc+1;x<oc+ow-1;x++) tb_set_cell(x,yy,' ', TB_BLACK, TB_CYAN);
-                    tb_print(oc+2, yy, TB_BLACK, TB_CYAN, k_models[src]);
+                    for(int x=oc+1;x<oc+ow-1;x++) tb_set_cell(x,yy,' ', g_theme.sel_fg, g_theme.sel_bg);
+                    tb_print(oc+2, yy, g_theme.sel_fg, g_theme.sel_bg, k_models[src]);
                 } else {
-                    tb_print(oc+2, yy, TB_WHITE, g_theme.surface, k_models[src]);
+                    tb_print(oc+2, yy, g_theme.text, g_theme.surface, k_models[src]);
                 }
             }
         }
@@ -1917,7 +1905,11 @@ int puci_tui_run(const puci_cli_params *params){
     /* PUCI_TUI_TTY lets tests/harnesses point termbox at an explicit tty path
        (e.g. a pty slave) instead of the default /dev/tty, which is absent on
        headless CI runners. */
+    g_ws_broad = puci_cli_workspace(g_ws_disp, sizeof g_ws_disp) == 1;
     const char *tty_path = getenv("PUCI_TUI_TTY");
+    /* Pick the palette before termbox owns the tty (the probe talks to it). */
+    theme_init(theme_no_color_env() ? THEME_BG_UNKNOWN : theme_detect_bg(tty_path),
+               theme_no_color_env());
     int tb_rc = tty_path ? tb_init_file(tty_path) : tb_init();
     if(tb_rc!=0){
         if(getenv("PUCI_TUI_FORCE")){
@@ -1941,6 +1933,8 @@ int puci_tui_run(const puci_cli_params *params){
     for(int i=0;i<MAX_PANES;i++){ memset(&g_panes[i],0,sizeof g_panes[i]); snprintf(g_panes[i].title,sizeof g_panes[i].title,"Agent %c",'A'+i); snprintf(g_panes[i].session_id,sizeof g_panes[i].session_id,"tui-%ld-%d-%d",(long)time(NULL),i,++g_sess_seq); g_panes[i].scroll_off=0; g_panes[i].layout_dirty=1; g_panes[i].cached_inner_w=-1; g_panes[i].cached_total_vis=-1; g_panes[i].follow=1; g_panes[i].unread=0; }
     puci_context *ctx=NULL;
     if(puci_context_create(NULL,&ctx)!=PUCI_OK){ tui_teardown(); trace_dump(); fprintf(stderr,"ctx fail\n"); return 1; }
+    /* MCP servers from config (project ones only when trusted). */
+    int mcp_n = puci_cli_load_mcp_servers(ctx);
     puci_provider_config *pcfg_ptr = puci_cli_provider("openai");
     if(pcfg_ptr && pcfg_ptr->model) snprintf(g_current_model,sizeof g_current_model,"%.255s",pcfg_ptr->model);
     if(!pcfg_ptr){ tui_teardown(); trace_dump(); fprintf(stderr,"tui: provider config failed\n"); puci_context_destroy(ctx); return 1; }
@@ -1949,9 +1943,10 @@ int puci_tui_run(const puci_cli_params *params){
     for(int i=0;i<g_npane;i++){
         puci_session_options sopts={0}; sopts.provider=pcfg;
         sopts.system_prompt = plan_mode
-            ? "You are puci, a fast C coding agent. Produce a concise implementation plan; do not edit files unless asked."
-            : "You are puci, a fast C coding agent. Be concise and helpful.";
+            ? "You are puci, a coding agent in the user's terminal. Produce a concise implementation plan; do not edit files unless asked."
+            : "You are puci, a coding agent in the user's terminal. Be concise and helpful.";
         sopts.approval_mode=PUCI_APPROVAL_MODE_EVENT;
+        sopts.workspace_root=".";
         puci_session *s=NULL;
         puci_status _cs = puci_session_create(ctx,&sopts,&s);
         if(_cs==PUCI_OK){
@@ -1970,10 +1965,12 @@ int puci_tui_run(const puci_cli_params *params){
         puci_context_destroy(ctx);
         return 1;
     }
+    if(puci_cli_mcp_notice()[0]) ring_push_typed(&g_panes[0].ring, puci_cli_mcp_notice(), RL_ERROR);
+    else if(mcp_n>0){ char mm[96]; snprintf(mm,sizeof mm,"MCP: %d server(s) connected", mcp_n); ring_push_typed(&g_panes[0].ring, mm, RL_SYSTEM); }
     load_sessions(); history_load(); models_init_static();
     // test hooks
     { const char *tf=getenv("PUCI_TUI_FILL_RING"); if(tf && *tf){ int n=atoi(tf); if(n>0){ for(int i=0;i<n;i++){ char ln[128]; snprintf(ln,sizeof ln,"prefill line %d Lorem ipsum dolor sit amet consectetur", i); ring_push_typed(&g_panes[0].ring, ln, RL_SYSTEM); } g_panes[0].layout_dirty=1; } } }
-    { const char *pn=getenv("PUCI_TUI_PANES"); if(pn && *pn){ int v=atoi(pn); if(v>=1 && v<=MAX_PANES){ g_npane=v; for(int i=1;i<g_npane;i++){ if(!g_panes[i].sess){ puci_session_options sopts={0}; sopts.provider=pcfg; sopts.system_prompt="test"; sopts.approval_mode=PUCI_APPROVAL_MODE_EVENT; if(puci_session_create(ctx,&sopts,&g_panes[i].sess)==PUCI_OK){ ring_push_typed(&g_panes[i].ring,"— test pane —", RL_SYSTEM); } } } } } }
+    { const char *pn=getenv("PUCI_TUI_PANES"); if(pn && *pn){ int v=atoi(pn); if(v>=1 && v<=MAX_PANES){ g_npane=v; for(int i=1;i<g_npane;i++){ if(!g_panes[i].sess){ puci_session_options sopts={0}; sopts.provider=pcfg; sopts.system_prompt="test"; sopts.approval_mode=PUCI_APPROVAL_MODE_EVENT; sopts.workspace_root="."; if(puci_session_create(ctx,&sopts,&g_panes[i].sess)==PUCI_OK){ ring_push_typed(&g_panes[i].ring,"— test pane —", RL_SYSTEM); } } } } } }
     get_winsize(&g_rows,&g_cols);
     if(cli_prompt){
         snprintf(g_input, sizeof g_input, "%.*s", (int)(sizeof g_input -1), cli_prompt);

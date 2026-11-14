@@ -4,12 +4,69 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-14
+
+**ABI 3** (`libpuci.so.3`): `puci_session_options` gained `workspace_root`; rebuild programs that embed libpuci.
+
 ### Added
 
 - GitHub Actions CI (`.github/workflows/ci.yml`): dual-compiler (gcc + clang) build & test matrix, ASan + UBSan sanitizer job, and swarm density benchmark job.
 - README badges (CI status, MIT license, version, C17) and a "SQLite of AI agent harnesses" tagline with a one-line value proposition.
 
+### Added
+
+- Plain `Makefile`: builds libpuci (`.a` + versioned `.so` with soname, `.dylib` on macOS) and the CLI with only a C compiler, make and libcurl, no Meson. `make test`, `make install` (bin, lib, `include/puci`, `puci.pc`, man pages), `make uninstall`, `make dist`; honours `PREFIX DESTDIR BINDIR LIBDIR INCLUDEDIR MANDIR PKGCONFIGDIR CC CFLAGS CPPFLAGS LDFLAGS`, `TUI=0`, `SHARED=0`. Warnings never fail a user build. Header dependencies tracked with `-MMD`. The CLI links libpuci statically so it runs from any prefix. `make deps` (`scripts/check-deps.sh`) prints the dependency command for the OS and never installs anything. Meson stays as the developer/CI build.
+- Man pages: `puci(1)` and `libpuci(3)`.
+- CI: a plain-make job on Linux and macOS (build with `-Werror`, `make test`, `TUI=0 SHARED=0`, install + embed via pkg-config shared and static, uninstall leaves nothing, `DESTDIR` staging). Releases are built with `make` and ship a source tarball.
+- Release workflow (`.github/workflows/release.yml`): pushing a `v*` tag builds Linux x86_64/arm64 binaries (static libpuci, dynamic libcurl), runs the tests and attaches `.tar.gz` + `.sha256` to the GitHub Release.
+- OpenRouter: mid-stream `{"error":{...}}` payloads (e.g. "Insufficient credits") and `delta.reasoning` are handled; HTTP 4xx/5xx errors now show the provider's message ("... is not a valid model ID") instead of a bare status code.
+
+### Changed
+
+- termbox2 is always taken from the vendored, pinned header. The Meson wrap that `git clone`d termbox2's moving `head` at configure time was removed, so builds are offline and reproducible.
+- Installed `puci` carries an RPATH to its `libdir`, so per-user installs (`PREFIX=~/.local`) work without `ldconfig`/`LD_LIBRARY_PATH`. `puci.pc` lists `-lpuci` once and declares `Requires.private: libcurl`.
+- Default OpenRouter model is now `z-ai/glm-5.3` (pinned, tool-capable; the old `anthropic/claude-3.5-sonnet` no longer exists on OpenRouter), and it is also applied when `PUCI_BASE_URL` points at OpenRouter with no model set. The TUI's offline model list and the Anthropic provider default were refreshed.
+
+### Fixed (build)
+
+- `-Dtui=disabled` / `TUI=0` builds failed to link: `main.c` called the TUI unconditionally. `tui.h` now provides stubs when the TUI is compiled out.
+
+### Fixed (TUI readability)
+
+- Hints, the status line and other secondary text were drawn bold-black (`ESC[1;30m`), i.e. black on dark terminals that don't brighten bold (GNOME Terminal/VTE, kitty, Alacritty defaults), so they were invisible; body text and borders were hard-coded white, invisible on light themes. The theme now uses the terminal's own foreground for text and a dimmed default foreground for secondary text, so it is readable on any palette. `test_tui_polish` guards against both.
+
+### Added (TUI design rules)
+
+- Light-terminal palette: the TUI detects the background (`PUCI_THEME=light|dark`, `COLORFGBG`, an OSC 11 query bounded at 200 ms and cut short by the DA1 reply, then the computer's light/dark setting via the freedesktop portal, GNOME `gsettings` or macOS `defaults`) and swaps yellow/cyan accents, which wash out on white, for blue/magenta.
+- `NO_COLOR` support (no-color.org): no colour escapes at all; bold, dim, underline and reverse carry meaning.
+- All colours moved into `src/cli/tui/theme.c` as semantic roles; `scripts/check_tui_tokens.sh` (`meson test tui_tokens`) rejects raw `TB_<colour>` names elsewhere and bold black anywhere. Rules documented in `docs/TUI.md`.
+
+### Added (workspace)
+
+- Workspace confinement: `puci_session_options.workspace_root` (library, opt-in) and always on in the CLI/TUI (the start directory, or `puci -C <dir>`). Reads inside it run without approval, reads outside always ask (refused when nobody can be asked), `write_file`/`edit_file` and `run_shell`'s `cwd` outside it are refused, even with `--yes`. Symlinks and `..` are resolved before the check. The model is told its workspace in the system prompt.
+- `puci -C <dir>` / `--cwd <dir>`; the TUI shows the workspace in its empty state, and starting in `~` or `/` warns.
+- `puci_session_workspace()` and `puci_session_message_count()`.
+
+### Changed (files on disk)
+
+- No `/tmp` fallbacks: without `HOME`, history and transcripts are simply not kept (previously `/tmp/history` and `/tmp/puci-sessions`, shared and world-writable).
+- Sessions with no messages are no longer saved.
+- System prompts no longer say "C coding agent".
+
+### Security
+
+- **Project MCP servers need trust.** An MCP server in a project's `.puci.toml` is a command puci starts at launch; a cloned repository could run code just because someone typed `puci` in it. Project-declared servers are now skipped with a notice unless `--trust-project-mcp` / `PUCI_TRUST_PROJECT_MCP=1`; servers in the user's own config are unaffected. Covered by `test_config`.
+- The TUI now loads MCP servers (it previously ignored them; only `puci run` and the REPL did).
+
+- Session transcripts and prompt history are now owner-only: `~/.local/share/puci` and `sessions/` are created (and tightened, if created by older versions) as `0700`, transcript and history files as `0600`. They were `0755`/`0664`, readable by other local users, although they contain tool output and everything typed.
+- TUI test harnesses run with a temporary `HOME`/`XDG_*` and no provider env vars, so they no longer read the developer's `~/.config/puci` (API key) or write mock sessions and history into `~/.local/share/puci`.
+- **Approval is now fail-closed.** Previously a session with no `approve_cb` (e.g. `puci run`, or any embedder that forgot to set one) executed `run_shell`, `write_file`, `edit_file`, MCP and custom tools with no approval at all, and the REPL auto-allowed every tool when stdin was not a TTY. Now, without a policy, only `read_file`/`grep`/`glob` run; everything else is denied. Unattended use is an explicit opt-in: `PUCI_APPROVAL_MODE_AUTO` (library) or `--yes` / `PUCI_AUTO_APPROVE=1` (CLI). `puci run` prompts on a TTY and denies when none is available.
+- `puci_atomic_write_file` creates its temp file with `O_EXCL|O_NOFOLLOW` (no write-through of planted symlinks) and uses an atomic counter.
+- Path guard matched any path segment *starting with* `build` (e.g. `builder.c`, `build_info.c`); it now matches `build` and `build-*` only.
+
 ### Fixed
+
+- Debug/sanitizer builds with recent GCC no longer fail under `-Werror` on intentional `snprintf` truncation (`-Wno-format-truncation`).
 
 - Clipboard: backend commands (`wl-copy`, `xclip`, `xsel`, `pbcopy`) now run with stdout/stderr redirected to `/dev/null`. `xclip` and `wl-copy` fork a daemon to serve the selection, which kept the host's stdout/stderr pipe open indefinitely (an embedding host or test runner reading puci's stdout would hang).
 - `test_content` no longer depends on the host: the OSC 52 size-gate check now skips OS clipboard backends via the new `clip_set_test_no_backend()` hook. Previously it timed out on any machine with `xclip`/`wl-copy` installed, and wrote a 64 KiB payload to the real clipboard.

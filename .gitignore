@@ -30,7 +30,13 @@ meson-info/
 *~
 .DS_Store
 
+# Reference material from other projects (not part of puci)
+tasarim-paketi/
+
 # Secrets
+keys.txt
+keys/
+*.keys
 .env
 .env.*
 *.key
