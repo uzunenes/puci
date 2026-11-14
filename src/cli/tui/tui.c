@@ -159,6 +159,7 @@ static void on_terminate(int s){ (void)s; g_terminate=1; }
    Every colour decision goes through g_theme (tui/theme.c, rules in
    tui/theme.h); raw TB_<colour> names are not allowed in this file. */
 
+static char g_ws_disp[4096]; static int g_ws_broad=0; /* workspace shown in the empty state */
 static int g_show_debug=0;   /* enable RSS/PSS/trace metrics in header */
 
 static int g_headless=0;
@@ -1395,6 +1396,14 @@ static void tui_render_pane(Pane *p, int x, int y, int h, int w, int focused){
             tb_print(x+1, ey, g_theme.accent, TB_DEFAULT, "PUCI");
             tb_print(x+1, ey+1, g_theme.muted,  TB_DEFAULT, "Type a message to begin.");
             tb_print(x+1, ey+2, g_theme.muted,  TB_DEFAULT, "/help for commands");
+            if(ey+4 <= y+inner_h && g_ws_disp[0]){
+                char wl[600];
+                snprintf(wl,sizeof wl,"workspace: %.500s", g_ws_disp);
+                tb_print(x+1, ey+4, g_theme.muted, TB_DEFAULT, wl);
+                if(g_ws_broad && ey+5 <= y+inner_h)
+                    tb_print(x+1, ey+5, g_theme.warning, TB_DEFAULT,
+                             "this is your whole home folder: start puci inside a project (or puci -C <dir>)");
+            }
         }
     }
     /* Unread / new-lines badge: only when follow is disabled (scrolled up)
@@ -1896,6 +1905,7 @@ int puci_tui_run(const puci_cli_params *params){
     /* PUCI_TUI_TTY lets tests/harnesses point termbox at an explicit tty path
        (e.g. a pty slave) instead of the default /dev/tty, which is absent on
        headless CI runners. */
+    g_ws_broad = puci_cli_workspace(g_ws_disp, sizeof g_ws_disp) == 1;
     const char *tty_path = getenv("PUCI_TUI_TTY");
     /* Pick the palette before termbox owns the tty (the probe talks to it). */
     theme_init(theme_no_color_env() ? THEME_BG_UNKNOWN : theme_detect_bg(tty_path),
@@ -1931,9 +1941,10 @@ int puci_tui_run(const puci_cli_params *params){
     for(int i=0;i<g_npane;i++){
         puci_session_options sopts={0}; sopts.provider=pcfg;
         sopts.system_prompt = plan_mode
-            ? "You are puci, a fast C coding agent. Produce a concise implementation plan; do not edit files unless asked."
-            : "You are puci, a fast C coding agent. Be concise and helpful.";
+            ? "You are puci, a coding agent in the user's terminal. Produce a concise implementation plan; do not edit files unless asked."
+            : "You are puci, a coding agent in the user's terminal. Be concise and helpful.";
         sopts.approval_mode=PUCI_APPROVAL_MODE_EVENT;
+        sopts.workspace_root=".";
         puci_session *s=NULL;
         puci_status _cs = puci_session_create(ctx,&sopts,&s);
         if(_cs==PUCI_OK){
@@ -1955,7 +1966,7 @@ int puci_tui_run(const puci_cli_params *params){
     load_sessions(); history_load(); models_init_static();
     // test hooks
     { const char *tf=getenv("PUCI_TUI_FILL_RING"); if(tf && *tf){ int n=atoi(tf); if(n>0){ for(int i=0;i<n;i++){ char ln[128]; snprintf(ln,sizeof ln,"prefill line %d Lorem ipsum dolor sit amet consectetur", i); ring_push_typed(&g_panes[0].ring, ln, RL_SYSTEM); } g_panes[0].layout_dirty=1; } } }
-    { const char *pn=getenv("PUCI_TUI_PANES"); if(pn && *pn){ int v=atoi(pn); if(v>=1 && v<=MAX_PANES){ g_npane=v; for(int i=1;i<g_npane;i++){ if(!g_panes[i].sess){ puci_session_options sopts={0}; sopts.provider=pcfg; sopts.system_prompt="test"; sopts.approval_mode=PUCI_APPROVAL_MODE_EVENT; if(puci_session_create(ctx,&sopts,&g_panes[i].sess)==PUCI_OK){ ring_push_typed(&g_panes[i].ring,"— test pane —", RL_SYSTEM); } } } } } }
+    { const char *pn=getenv("PUCI_TUI_PANES"); if(pn && *pn){ int v=atoi(pn); if(v>=1 && v<=MAX_PANES){ g_npane=v; for(int i=1;i<g_npane;i++){ if(!g_panes[i].sess){ puci_session_options sopts={0}; sopts.provider=pcfg; sopts.system_prompt="test"; sopts.approval_mode=PUCI_APPROVAL_MODE_EVENT; sopts.workspace_root="."; if(puci_session_create(ctx,&sopts,&g_panes[i].sess)==PUCI_OK){ ring_push_typed(&g_panes[i].ring,"— test pane —", RL_SYSTEM); } } } } } }
     get_winsize(&g_rows,&g_cols);
     if(cli_prompt){
         snprintf(g_input, sizeof g_input, "%.*s", (int)(sizeof g_input -1), cli_prompt);

@@ -297,6 +297,7 @@ static void recreate_session(repl *r) {
     }
     puci_provider_config *pc = puci_cli_provider("openai");
     puci_session_options op = {0};
+    op.workspace_root = ".";
     op.provider = *pc;
     op.event_cb = on_event;
     op.system_prompt = r->system_prompt;

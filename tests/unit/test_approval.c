@@ -276,7 +276,7 @@ static void test_diff(void) {
 
 /* plan_mode=1: dry run. plan_mode=0,auto=0: no policy -> fail-closed deny.
  * auto=1: explicit PUCI_APPROVAL_MODE_AUTO -> the file IS written. */
-static void run_write_file_case(int plan_mode, int auto_mode) {
+static void run_write_file_case(int plan_mode, int auto_mode, const char *workspace) {
     const char *target_file = "/tmp/puci_plan_test.txt";
     unlink(target_file);
 
@@ -349,6 +349,7 @@ static void run_write_file_case(int plan_mode, int auto_mode) {
     sopts.provider = pcfg;
     sopts.plan_mode = plan_mode;
     if (auto_mode) sopts.approval_mode = PUCI_APPROVAL_MODE_AUTO;
+    sopts.workspace_root = workspace;
     sopts.max_tool_iterations = 8;
 
     puci_session *sess = NULL;
@@ -359,12 +360,13 @@ static void run_write_file_case(int plan_mode, int auto_mode) {
     CHECK(st == PUCI_OK);
 
     FILE *check_f = fopen(target_file, "r");
-    if (auto_mode) {
+    if (auto_mode && !workspace) {
         CHECK(check_f != NULL);
         if (check_f) fclose(check_f);
         unlink(target_file);
     } else {
-        /* plan mode or fail-closed: must NOT have been written to disk */
+        /* plan mode, fail-closed, or outside the workspace: must NOT have
+         * been written to disk (even in AUTO mode) */
         CHECK(check_f == NULL);
         if (check_f) fclose(check_f);
     }
@@ -379,8 +381,19 @@ int main(void) {
     test_diff();
     run_one(PUCI_APPROVAL_DENY, /*expect_ran*/ 0, /*expect_blocked*/ 1);
     run_one(PUCI_APPROVAL_ALLOW, /*expect_ran*/ 1, /*expect_blocked*/ 0);
-    run_write_file_case(1, 0);
-    run_write_file_case(0, 0); /* fail-closed default */
-    run_write_file_case(0, 1); /* explicit AUTO */
+    run_write_file_case(1, 0, NULL);
+    run_write_file_case(0, 0, NULL); /* fail-closed default */
+    run_write_file_case(0, 1, NULL); /* explicit AUTO */
+    {
+        /* AUTO but confined to a workspace that does not contain the target:
+         * the write is refused. */
+        char tmpl[] = "/tmp/puci-ws-appr-XXXXXX";
+        char *ws = mkdtemp(tmpl);
+        CHECK(ws != NULL);
+        if (ws) {
+            run_write_file_case(0, 1, ws);
+            rmdir(ws);
+        }
+    }
     TEST_END();
 }

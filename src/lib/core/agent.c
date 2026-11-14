@@ -40,8 +40,11 @@
 #include "net/http.h"
 #include "net/sse.h"
 #include "tools/tools_internal.h"
+#include "tools/path_guard.h"
 #include "util/arena.h"
 #include "util/strbuf.h"
+
+#define PUCI_WS_MSG_MAX 4400
 
 static long long now_ms(void) {
     struct timespec ts;
@@ -450,6 +453,54 @@ static void build_argv_display(puci_arena *arena, puci_strbuf *sb,
         puci_strbuf_append_fmt(sb, "\n  %d: ", i);
         puci_strbuf_appendz(sb, argv[i] ? argv[i] : "");
     }
+}
+
+/* ---- workspace confinement helpers ---------------------------------- */
+
+/* 0 = not path-scoped, 1 = reads a path, 2 = writes a path, 3 = run_shell. */
+static int ws_tool_kind(const char *name) {
+    if (!name) return 0;
+    if (strcmp(name, "read_file") == 0 || strcmp(name, "grep") == 0 ||
+        strcmp(name, "glob") == 0) return 1;
+    if (strcmp(name, "write_file") == 0 || strcmp(name, "edit_file") == 0) return 2;
+    if (strcmp(name, "run_shell") == 0) return 3;
+    return 0;
+}
+
+/* String argument `key` of a tool call (malloc'd), or NULL if absent. */
+static char *tool_arg_str(const char *args_json, const char *key) {
+    if (!args_json) return NULL;
+    puci_arena ar;
+    puci_arena_init(&ar, NULL, 0);
+    pj_val *root = NULL;
+    char *out = NULL;
+    if (pj_parse(&ar, args_json, strlen(args_json), &root) == 0 && root) {
+        pj_val *v = pj_get(root, key);
+        if (v && v->type == PJ_STR) {
+            out = (char *)malloc(v->u.str.len + 1);
+            if (out) {
+                memcpy(out, v->u.str.s, v->u.str.len);
+                out[v->u.str.len] = '\0';
+            }
+        }
+    }
+    puci_arena_destroy(&ar);
+    return out;
+}
+
+/* {"ok":false,"error":"<why> (workspace: <root>)"} */
+static char *ws_denial(const puci_session *sess, const char *why) {
+    puci_strbuf eb;
+    puci_strbuf_init(&eb, NULL);
+    char msg[PUCI_WS_MSG_MAX];
+    snprintf(msg, sizeof(msg), "%s (workspace: %s). Ask the user before working outside it.",
+             why, sess->workspace_root);
+    puci_strbuf_appendz(&eb, "{\"ok\":false,\"error\":");
+    puci_strbuf_append_json_string(&eb, msg);
+    puci_strbuf_appendz(&eb, "}");
+    char *content = strdup(puci_strbuf_cstr(&eb));
+    puci_strbuf_destroy(&eb);
+    return content;
 }
 
 /* Built-in tools that never mutate state or execute code. Everything else
@@ -1152,12 +1203,54 @@ static int run_dispatch_tools(puci_session *sess, struct puci_turn_run *run) {
          * EVENT mode) every tool that can mutate state or run code is denied
          * unless the host explicitly opted out via PUCI_APPROVAL_MODE_AUTO.
          * Read-only built-ins stay available. */
+        /* Workspace confinement (only when the host set a workspace):
+         * writes and shell cwd outside it are refused outright; reads inside
+         * it need no approval, reads outside it always do. */
+        int ws_read_inside = 0, ws_read_outside = 0;
+        if (sess->workspace_root && !resume_approved) {
+            int kind = ws_tool_kind(pub.name);
+            if (kind) {
+                char *p = tool_arg_str(pub.args_json, kind == 3 ? "cwd" : "path");
+                int inside = puci_workspace_contains(sess->workspace_root, p);
+                free(p);
+                if (kind == 1) {
+                    ws_read_inside = inside;
+                    ws_read_outside = !inside;
+                } else if (!inside) {
+                    char *content = ws_denial(sess, kind == 3
+                        ? "run_shell cwd is outside the workspace"
+                        : "path is outside the workspace; refusing to modify it");
+                    qtool_end(sess, pub.id, content, 1);
+                    run->tool_contents[k] = content;
+                    run->tool_idx++;
+                    continue;
+                }
+            }
+        }
+
         int need_approval =
             !allow_always && !resume_approved &&
             sess->approval_mode != PUCI_APPROVAL_MODE_AUTO &&
             (sess->approve_cb ||
              sess->approval_mode == PUCI_APPROVAL_MODE_EVENT ||
              !tool_is_read_only(pub.name));
+        if (ws_read_inside) {
+            need_approval = 0;
+        }
+        if (ws_read_outside) {
+            int can_ask = sess->approval_mode == PUCI_APPROVAL_MODE_EVENT ||
+                          (sess->approval_mode == PUCI_APPROVAL_MODE_CALLBACK &&
+                           sess->approve_cb);
+            if (!can_ask) {
+                char *content = ws_denial(sess,
+                    "reading outside the workspace needs approval, and none is possible here");
+                qtool_end(sess, pub.id, content, 1);
+                run->tool_contents[k] = content;
+                run->tool_idx++;
+                continue;
+            }
+            need_approval = 1; /* even with "allow always": the path is new */
+        }
 
         if (need_approval) {
             if (sess->approval_mode == PUCI_APPROVAL_MODE_EVENT) {

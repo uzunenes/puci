@@ -31,6 +31,18 @@ All notable changes to this project are documented here.
 - `NO_COLOR` support (no-color.org): no colour escapes at all; bold, dim, underline and reverse carry meaning.
 - All colours moved into `src/cli/tui/theme.c` as semantic roles; `scripts/check_tui_tokens.sh` (`meson test tui_tokens`) rejects raw `TB_<colour>` names elsewhere and bold black anywhere. Rules documented in `docs/TUI.md`.
 
+### Added (workspace)
+
+- Workspace confinement: `puci_session_options.workspace_root` (library, opt-in) and always on in the CLI/TUI (the start directory, or `puci -C <dir>`). Reads inside it run without approval, reads outside always ask (refused when nobody can be asked), `write_file`/`edit_file` and `run_shell`'s `cwd` outside it are refused, even with `--yes`. Symlinks and `..` are resolved before the check. The model is told its workspace in the system prompt.
+- `puci -C <dir>` / `--cwd <dir>`; the TUI shows the workspace in its empty state, and starting in `~` or `/` warns.
+- `puci_session_workspace()` and `puci_session_message_count()`.
+
+### Changed (files on disk)
+
+- No `/tmp` fallbacks: without `HOME`, history and transcripts are simply not kept (previously `/tmp/history` and `/tmp/puci-sessions`, shared and world-writable).
+- Sessions with no messages are no longer saved.
+- System prompts no longer say "C coding agent".
+
 ### Security
 
 - Session transcripts and prompt history are now owner-only: `~/.local/share/puci` and `sessions/` are created (and tightened, if created by older versions) as `0700`, transcript and history files as `0600`. They were `0755`/`0664`, readable by other local users, although they contain tool output and everything typed.

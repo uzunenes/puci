@@ -208,6 +208,31 @@ context_budget_bytes = 131072
 tool_timeout_ms = 60000
 ```
 
+### Workspace and files on disk
+
+puci works in the directory you start it in (or `puci -C <dir>`); that
+directory is the **workspace**, shown in the TUI's empty screen.
+
+- Reading inside the workspace needs no approval; reading outside it always asks.
+- `write_file` / `edit_file` outside the workspace, and `run_shell` with a `cwd`
+  outside it, are refused. Symlinks are resolved, `..` can't escape.
+- Shell commands themselves can still touch anything, which is why every
+  `run_shell` call asks first.
+- Starting puci in your home folder or `/` prints a warning: open a project
+  folder instead.
+
+What puci itself writes (XDG locations, owner-only `0700`/`0600`):
+
+| Path | Contents |
+|---|---|
+| `~/.config/puci/config.toml` | your settings (you create it) |
+| `~/.local/share/puci/sessions/` | conversation transcripts (empty ones are not saved) |
+| `~/.local/share/puci/history` | prompt history |
+
+Nothing is written to `/tmp` or to your project unless you create
+`.puci/sessions/` there (then that project's transcripts stay with it).
+Remove everything with `rm -rf ~/.local/share/puci ~/.config/puci`.
+
 ### MCP servers
 
 Connect external Model Context Protocol servers via stdio in `~/.config/puci/config.toml`:

@@ -16,6 +16,12 @@
  * name (e.g. "openai"). Calling it again re-reads the environment. */
 puci_provider_config *puci_cli_provider(const char *name);
 
+/* The workspace is the current directory (`puci -C <dir>` changes it).
+ * Writes its display form ("~/proj") into out. Returns 1 if it is too broad
+ * to confine anything useful (the home directory or /), 0 otherwise,
+ * -1 if the cwd cannot be read. */
+int puci_cli_workspace(char *out, size_t cap);
+
 const char *puci_cli_config_error(void);
 
 int puci_cli_parse_toml_file(const char *filepath, int is_project_local,

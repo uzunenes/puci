@@ -43,6 +43,13 @@ typedef struct puci_session_options {
     puci_approval_mode approval_mode; /**< CALLBACK (default) or EVENT (non-blocking). In EVENT mode approve_cb is ignored and the turn pauses in PUCI_TS_AWAITING_APPROVAL until puci_session_resolve_approval is called. */
     int plan_mode;                  /**< 1 = plan/dry-run mode: mutating file tools simulate success without writing to disk */
     long tool_timeout_ms;           /**< timeout for individual tool calls in ms (0 = default 60000) */
+    /** Directory the agent works in (optional). When set, the built-in file
+     *  tools are confined to it: read_file/grep/glob inside it run without
+     *  approval, outside it they need approval (denied when no approval is
+     *  possible); write_file/edit_file and run_shell's `cwd` outside it are
+     *  refused. Symlinks are resolved. NULL keeps the legacy unconfined
+     *  behaviour. Must name an existing directory (else PUCI_ERR_INVALID_ARG). */
+    const char *workspace_root;
 } puci_session_options;
 
 /** Creates a new session bound to a context. On success returns PUCI_OK and
@@ -259,6 +266,12 @@ puci_status puci_session_resolve_approval(puci_session *sess,
                                           puci_approval_decision decision);
 
 /** Sets whether the session is in plan / dry-run mode (1 = enabled, 0 = disabled). */
+/** Canonical workspace root, or NULL when the session is unconfined. */
+const char *puci_session_workspace(const puci_session *sess);
+
+/** Number of messages in the transcript (system prompt excluded). */
+size_t puci_session_message_count(const puci_session *sess);
+
 puci_status puci_session_set_plan_mode(puci_session *sess, int plan_mode);
 
 /** Returns 1 if session is in plan / dry-run mode, 0 otherwise. */

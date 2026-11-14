@@ -118,10 +118,18 @@ int puci_cli_run_with_params(const puci_cli_params *params) {
     puci_session_options sopts = {0};
     sopts.provider = *pcfg;
     sopts.event_cb = stream_event;
-    sopts.system_prompt = "You are puci, a fast coding agent. Be concise.";
+    sopts.system_prompt = "You are puci, a coding agent in the user's terminal. Be concise.";
     sopts.max_tool_iterations = max_tool_iterations;
     sopts.plan_mode = params ? params->plan_mode : 0;
     sopts.tool_timeout_ms = 60000;
+    sopts.workspace_root = ".";
+    {
+        char ws[4096];
+        if (puci_cli_workspace(ws, sizeof(ws)) == 1) {
+            fprintf(stderr, "[warning] workspace is %s: file tools can reach everything under it. "
+                    "Run puci inside a project folder or pass -C <dir>.\n", ws);
+        }
+    }
     {
         const char *ae = getenv("PUCI_AUTO_APPROVE");
         int yes = (params && params->auto_approve) ||

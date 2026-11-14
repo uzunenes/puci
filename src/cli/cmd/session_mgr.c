@@ -80,7 +80,9 @@ int puci_cli_get_sessions_dir(char *out_dir, size_t cap) {
         if (home && home[0]) {
             snprintf(out_dir, cap, "%s/.local/share/puci/sessions", home);
         } else {
-            snprintf(out_dir, cap, "/tmp/puci-sessions");
+            /* No HOME: don't persist rather than spill into shared /tmp. */
+            out_dir[0] = '\0';
+            return -1;
         }
     }
     ensure_dir_exists(out_dir);
@@ -101,13 +103,12 @@ int puci_cli_get_history_file(char *out_path, size_t cap) {
         if (home && home[0]) {
             snprintf(dir, sizeof(dir), "%s/.local/share/puci", home);
         } else {
-            snprintf(dir, sizeof(dir), "/tmp");
+            out_path[0] = '\0'; /* no HOME: no history file */
+            return -1;
         }
     }
     ensure_dir_exists(dir);
-    if (strcmp(dir, "/tmp") != 0) {
-        make_private_dir(dir);
-    }
+    make_private_dir(dir);
     snprintf(out_path, cap, "%s/history", dir);
     (void)chmod(out_path, 0600); /* no-op if absent; fixes older 0664 files */
     return 0;
@@ -116,6 +117,10 @@ int puci_cli_get_history_file(char *out_path, size_t cap) {
 int puci_cli_save_session(const puci_session *sess, const char *session_id) {
     if (!sess || !session_id || !session_id[0]) {
         return -1;
+    }
+    /* Nothing was said: don't leave an empty transcript behind. */
+    if (puci_session_message_count(sess) == 0) {
+        return 0;
     }
     char dir[1024];
     if (puci_cli_get_sessions_dir(dir, sizeof(dir)) != 0) {

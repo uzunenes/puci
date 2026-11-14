@@ -169,3 +169,74 @@ int puci_atomic_write_file(const char *path, const char *content, size_t content
     }
     return 0;
 }
+
+/* ---- workspace confinement ------------------------------------------ */
+
+char *puci_workspace_canon(const char *dir) {
+    if (!dir || !dir[0]) {
+        return NULL;
+    }
+    char buf[PATH_MAX];
+    struct stat st;
+    if (!realpath(dir, buf) || stat(buf, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        return NULL;
+    }
+    return strdup(buf);
+}
+
+static int under(const char *root, const char *p) {
+    size_t n = strlen(root);
+    if (n == 1 && root[0] == '/') {
+        return p[0] == '/';
+    }
+    return strncmp(root, p, n) == 0 && (p[n] == '\0' || p[n] == '/');
+}
+
+int puci_workspace_contains(const char *root, const char *path) {
+    if (!root || !root[0]) {
+        return 1;
+    }
+    char want[PATH_MAX];
+    if (!path || !path[0]) {
+        path = ".";
+    }
+    if (path[0] == '/') {
+        if (snprintf(want, sizeof(want), "%s", path) >= (int)sizeof(want)) return 0;
+    } else {
+        char cwd[PATH_MAX];
+        if (!getcwd(cwd, sizeof(cwd))) return 0;
+        if (snprintf(want, sizeof(want), "%s/%s", cwd, path) >= (int)sizeof(want)) return 0;
+    }
+    /* Resolve the deepest existing ancestor; the rest must not climb. */
+    char head[PATH_MAX];
+    snprintf(head, sizeof(head), "%s", want);
+    char tailbuf[PATH_MAX];
+    tailbuf[0] = '\0';
+    for (;;) {
+        char resolved[PATH_MAX];
+        if (realpath(head, resolved)) {
+            if (tailbuf[0]) {
+                /* Reject ".." in the not-yet-existing remainder. */
+                const char *c = tailbuf;
+                while (*c) {
+                    while (*c == '/') c++;
+                    const char *e = strchr(c, '/');
+                    size_t l = e ? (size_t)(e - c) : strlen(c);
+                    if (l == 2 && c[0] == '.' && c[1] == '.') return 0;
+                    c += l;
+                }
+            }
+            return under(root, resolved);
+        }
+        char *slash = strrchr(head, '/');
+        if (!slash) return 0;
+        char rest[PATH_MAX];
+        if (snprintf(rest, sizeof(rest), "%s%s%s", slash + 1, tailbuf[0] ? "/" : "", tailbuf) >= (int)sizeof(rest)) return 0;
+        snprintf(tailbuf, sizeof(tailbuf), "%s", rest);
+        if (slash == head) {
+            head[1] = '\0';
+        } else {
+            *slash = '\0';
+        }
+    }
+}

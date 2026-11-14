@@ -8,6 +8,11 @@
  *   4. Built-in defaults
  */
 
+/* realpath() is XSI; the global -D_POSIX_C_SOURCE alone hides it. */
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
+#endif
+
 #include "config.h"
 
 #include <ctype.h>
@@ -15,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -122,6 +128,30 @@ const char *puci_cli_config_error(void) {
 }
 
 #define PUCI_OPENROUTER_DEFAULT_MODEL "z-ai/glm-5.3"
+
+int puci_cli_workspace(char *out, size_t cap) {
+    char cwd[4096];
+    if (!getcwd(cwd, sizeof(cwd))) {
+        if (out && cap) out[0] = '\0';
+        return -1;
+    }
+    const char *home = getenv("HOME");
+    char rhome[4096] = "";
+    if (home && home[0] && !realpath(home, rhome)) {
+        snprintf(rhome, sizeof(rhome), "%s", home);
+    }
+    size_t hl = strlen(rhome);
+    if (out && cap) {
+        if (hl > 1 && strncmp(cwd, rhome, hl) == 0 && (cwd[hl] == '/' || cwd[hl] == '\0')) {
+            snprintf(out, cap, "~%s", cwd + hl);
+        } else {
+            snprintf(out, cap, "%s", cwd);
+        }
+    }
+    if (strcmp(cwd, "/") == 0) return 1;
+    if (hl > 0 && strcmp(cwd, rhome) == 0) return 1;
+    return 0;
+}
 
 puci_provider_config *puci_cli_provider(const char *name) {
     g_last_error[0] = '\0';

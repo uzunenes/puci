@@ -158,6 +158,7 @@ struct puci_session {
 
     size_t max_tool_iterations;
     int plan_mode;
+    char *workspace_root; /* canonical; NULL = unconfined (malloc'd) */
     char *approval_feedback;
     long tool_timeout_ms;
 
