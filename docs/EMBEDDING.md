@@ -95,14 +95,14 @@ Recommended `~/.bashrc` for OpenRouter Bring-Your-Own-Key:
 export OPENROUTER_API_KEY="sk-or-v1-..."
 export PUCI_API_KEY="$OPENROUTER_API_KEY"
 export PUCI_BASE_URL="https://openrouter.ai/api/v1"
-export PUCI_MODEL="anthropic/claude-3.5-sonnet"
+export PUCI_MODEL="anthropic/claude-sonnet-5.5"
 ```
 
-PUCI resolves `OPENROUTER_API_KEY` as a first-class fallback when `PUCI_API_KEY` is unset, defaulting `base_url` to `https://openrouter.ai/api/v1` and `model` to `anthropic/claude-3.5-sonnet`. Template global config at `~/.config/puci/config.toml`:
+PUCI resolves `OPENROUTER_API_KEY` as a first-class fallback when `PUCI_API_KEY` is unset, defaulting `base_url` to `https://openrouter.ai/api/v1` and `model` to `anthropic/claude-sonnet-5.5`. Template global config at `~/.config/puci/config.toml`:
 
 ```toml
 base_url = "https://openrouter.ai/api/v1"
-model = "anthropic/claude-3.5-sonnet"
+model = "anthropic/claude-sonnet-5.5"
 context_budget_bytes = 131072
 tool_timeout_ms = 60000
 ```

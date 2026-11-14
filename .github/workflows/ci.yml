@@ -50,6 +50,14 @@ jobs:
       - name: Test (${{ matrix.cc }})
         run: meson test -C build --print-errorlogs
 
+      - name: make install smoke test (${{ matrix.cc }})
+        run: |
+          make install PREFIX="$RUNNER_TEMP/puci"
+          "$RUNNER_TEMP/puci/bin/puci" --version
+          PKG_CONFIG_PATH="$(dirname "$(find "$RUNNER_TEMP/puci" -name puci.pc)")" \
+            cc -std=c17 examples/minimal_agent.c $(PKG_CONFIG_PATH="$(dirname "$(find "$RUNNER_TEMP/puci" -name puci.pc)")" pkg-config --cflags --libs puci) -o /tmp/minimal_agent
+          make uninstall
+
   sanitizer:
     name: Sanitizers (ASan + UBSan)
     runs-on: ubuntu-latest

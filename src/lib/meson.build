@@ -93,7 +93,8 @@ install_headers(
 # pkg-config file so downstream consumers link with `pkg-config --cflags --libs puci`.
 pkg_mod = import('pkgconfig')
 pkg_mod.generate(
-    libraries: libpuci_targets,
+    libraries: get_option('shared_lib') ? libpuci_shared : libpuci_static,
+    requires_private: ['libcurl'],
     name: 'puci',
     description: 'Minimal C17 AI coding agent harness core library',
     version: meson.project_version(),

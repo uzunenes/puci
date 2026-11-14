@@ -447,18 +447,16 @@ static void history_next(void){
 #define MAX_MODELS 512
 static char g_model_buf[MAX_MODELS][128];
 static const char *g_static_models[] = {
-    "deepseek/deepseek-chat",
-    "deepseek/deepseek-v3.2-exp",
-    "deepseek/deepseek-r1",
-    "anthropic/claude-3.5-sonnet",
-    "anthropic/claude-3.5-haiku",
-    "openai/gpt-4o-mini",
-    "openai/gpt-4o",
-    "openai/gpt-4.1-mini",
-    "google/gemini-2.0-flash-001",
-    "google/gemini-2.0-flash-lite-001",
-    "meta-llama/llama-3.3-70b-instruct",
-    "qwen/qwen-2.5-72b-instruct",
+    /* Offline fallback only; the picker merges the live /models list. */
+    "anthropic/claude-sonnet-5.5",
+    "anthropic/claude-opus-5.5",
+    "anthropic/claude-haiku-5.5",
+    "openai/gpt-5.6-terra",
+    "openai/gpt-5.6-luna",
+    "google/gemini-3.8-flash",
+    "deepseek/deepseek-v4.1-flash",
+    "moonshotai/kimi-k3.1-pro",
+    "z-ai/glm-5.3",
     NULL
 };
 static const char *k_models[MAX_MODELS+1];

@@ -1,0 +1,91 @@
+name: Release
+
+# Push a tag like v0.6.0 to build prebuilt binaries and attach them to a
+# GitHub Release. Binaries link libpuci statically and libcurl dynamically
+# (libcurl.so.4 ships with virtually every Linux distribution). Built on the
+# oldest supported Ubuntu runner so the glibc requirement stays low.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: linux-x86_64
+          - os: ubuntu-22.04-arm
+            target: linux-arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          for i in 1 2 3 4 5; do
+            sudo apt-get update && break || { echo "apt retry $i"; sleep 15; }
+          done
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libcurl4-openssl-dev ninja-build pkg-config python3-pip
+          pip3 install --user --upgrade meson
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Configure
+        run: meson setup build --buildtype=release -Dshared_lib=false --prefix=/usr/local
+
+      - name: Build
+        run: meson compile -C build
+
+      - name: Test
+        run: meson test -C build --print-errorlogs --no-suite stress
+
+      - name: Package
+        id: pkg
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          [ "$GITHUB_REF_TYPE" = tag ] || ver="$(git describe --always)"
+          name="puci-${ver}-${{ matrix.target }}"
+          mkdir -p "dist/$name/bin"
+          install -m 755 build/src/cli/puci "dist/$name/bin/puci"
+          strip "dist/$name/bin/puci"
+          cp LICENSE README.md CHANGELOG.md "dist/$name/"
+          "dist/$name/bin/puci" --version
+          ldd "dist/$name/bin/puci"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+
+  release:
+    name: Publish release
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
+          generate_release_notes: true

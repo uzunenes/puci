@@ -6,6 +6,7 @@
  * base URL and API key).
  */
 
+#include <stdio.h>
 #include "puci_internal.h"
 
 #include <string.h>
@@ -78,6 +79,20 @@ static puci_status parse_stream(const puci_session *sess, puci_arena *scratch,
     if (pj_parse(scratch, data, len, &root) != 0) {
         return PUCI_ERR_PROTOCOL;
     }
+    /* OpenRouter (and some gateways) report failures mid-stream, after the
+     * 200 header, as {"error":{"message":"...","code":...}}. Surface the
+     * provider's message instead of silently ending with an empty answer. */
+    pj_val *err = pj_get(root, "error");
+    if (err && err->type == PJ_OBJ) {
+        pj_val *m = pj_get(err, "message");
+        if (m && m->type == PJ_STR) {
+            int ml = m->u.str.len > 250 ? 250 : (int)m->u.str.len;
+            snprintf(turn->stream_error, sizeof(turn->stream_error), "%.*s", ml, m->u.str.s);
+        } else {
+            snprintf(turn->stream_error, sizeof(turn->stream_error), "unknown provider error");
+        }
+        return PUCI_ERR_PROTOCOL;
+    }
     pj_val *choices = pj_get(root, "choices");
     pj_val *choice0 = choices ? pj_arr_get(choices, 0) : NULL;
     pj_val *delta = choice0 ? pj_get(choice0, "delta") : NULL;
@@ -94,6 +109,9 @@ static puci_status parse_stream(const puci_session *sess, puci_arena *scratch,
          * into its own buffer so it can be surfaced as distinct events and is
          * never concatenated into the final answer text. */
         pj_val *reasoning = pj_get(delta, "reasoning_content");
+        if (!reasoning || reasoning->type != PJ_STR) {
+            reasoning = pj_get(delta, "reasoning"); /* OpenRouter spelling */
+        }
         if (reasoning && reasoning->type == PJ_STR) {
             turn->had_reasoning = 1;
             if (puci_strbuf_append(&turn->reasoning, reasoning->u.str.s,

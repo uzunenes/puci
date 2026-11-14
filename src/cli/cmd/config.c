@@ -121,6 +121,8 @@ const char *puci_cli_config_error(void) {
     return g_last_error[0] ? g_last_error : NULL;
 }
 
+#define PUCI_OPENROUTER_DEFAULT_MODEL "anthropic/claude-sonnet-5.5"
+
 puci_provider_config *puci_cli_provider(const char *name) {
     g_last_error[0] = '\0';
 
@@ -202,10 +204,12 @@ puci_provider_config *puci_cli_provider(const char *name) {
         if ((!env_base_explicit || !*env_base_explicit) && strcmp(base, "https://api.openai.com/v1") == 0) {
             snprintf(base, sizeof(base), "%s", "https://openrouter.ai/api/v1");
         }
-        const char *env_model_explicit = getenv("PUCI_MODEL");
-        if ((!env_model_explicit || !*env_model_explicit) && strcmp(model, "gpt-4o-mini") == 0) {
-            snprintf(model, sizeof(model), "%s", "anthropic/claude-3.5-sonnet");
-        }
+    }
+    /* OpenRouter needs vendor-prefixed ids ("openai/gpt-4o-mini"); the bare
+     * OpenAI default would be rejected. Whenever the endpoint is OpenRouter
+     * and no model was chosen, use a current tool-capable coding model. */
+    if (strstr(base, "openrouter.ai") != NULL && strcmp(model, "gpt-4o-mini") == 0) {
+        snprintf(model, sizeof(model), "%s", PUCI_OPENROUTER_DEFAULT_MODEL);
     }
 
     const char *env_ca = getenv("PUCI_CA_BUNDLE");

@@ -93,39 +93,76 @@ More examples (`embedded_editor_agent`, `poll_loop`, `bench_swarm`): [`examples/
 
 ## Installation
 
-**Requirements:** C17 compiler (GCC or Clang), Meson ≥ 1.0, Ninja, libcurl dev headers. termbox2 is vendored (no submodule).
+### Option A — prebuilt binary (no compiler needed)
 
-**Platforms:** Linux (primary), macOS (partial kqueue path). Windows IOCP not shipped yet.
-
-```sh
-meson setup build
-ninja -C build
-meson test -C build
-```
-
-Both compilers are supported and CI-tested:
+Download the archive for your platform from
+[Releases](https://github.com/uzunenes/puci/releases), then:
 
 ```sh
-CC=gcc   meson setup build-gcc   && meson compile -C build-gcc   && meson test -C build-gcc
-CC=clang meson setup build-clang && meson compile -C build-clang && meson test -C build-clang
+tar xzf puci-*-linux-x86_64.tar.gz
+sudo install -m 755 puci-*/bin/puci /usr/local/bin/   # or: install -m 755 puci-*/bin/puci ~/.local/bin/
 ```
 
-Install the library system-wide:
+The binary only needs `libcurl`, which is preinstalled on virtually every
+Linux distribution and macOS.
+
+### Option B — build from source
+
+`make` checks the build dependencies and, if one is missing, prints the exact
+install command for your OS. It never installs system packages itself.
+
+1. Install the dependencies (C17 compiler, Meson ≥ 1.0, Ninja, pkg-config, libcurl headers):
+
+   | OS | Command |
+   |---|---|
+   | Debian / Ubuntu | `sudo apt install build-essential meson ninja-build pkg-config libcurl4-openssl-dev` |
+   | Fedora / RHEL | `sudo dnf install gcc meson ninja-build pkgconf-pkg-config libcurl-devel` |
+   | Arch | `sudo pacman -S --needed base-devel meson ninja curl` |
+   | openSUSE | `sudo zypper install gcc meson ninja pkg-config libcurl-devel` |
+   | Alpine | `sudo apk add build-base meson ninja pkgconf curl-dev` |
+   | macOS | `brew install meson ninja pkg-config curl` |
+
+2. Build, test and install:
+
+   ```sh
+   git clone https://github.com/uzunenes/puci && cd puci
+   make                           # configure + build
+   make test                      # optional
+   sudo make install              # -> /usr/local/bin/puci (+ libpuci, headers, pkg-config)
+   ```
+
+   No root? `make install PREFIX=~/.local` installs per-user (make sure
+   `~/.local/bin` is on your `PATH`). Remove with `make uninstall`.
+
+termbox2 is vendored, so the build needs no network access. **Platforms:**
+Linux (primary), macOS (partial kqueue path); Windows is not supported yet.
+
+<details>
+<summary>Using Meson directly (developers)</summary>
 
 ```sh
-meson setup build -Dprefix=/usr/local && meson compile -C build && meson install -C build
+meson setup build && meson compile -C build && meson test -C build
+CC=clang meson setup build-clang && meson compile -C build-clang
 ```
 
-Optional switches (`-Dexamples=true`, `-Dlua=true`, `-Dbench=true`) and the full embedding guide: [`docs/EMBEDDING.md`](docs/EMBEDDING.md).
+Optional switches: `-Dexamples=true`, `-Dlua=true`, `-Dbench=true`. Embedding
+guide: [`docs/EMBEDDING.md`](docs/EMBEDDING.md).
+</details>
 
-### Quick start
+### Quick start (OpenRouter)
+
+Get a key at [openrouter.ai/keys](https://openrouter.ai/keys), then:
 
 ```sh
-export PUCI_API_KEY="sk-..."
-./build/src/cli/puci              # launch the TUI
-# or one-shot:
-./build/src/cli/puci run "hello"
+export OPENROUTER_API_KEY="sk-or-..."          # base URL is set automatically
+export PUCI_MODEL="anthropic/claude-sonnet-5.5"  # optional; any tool-capable OpenRouter model id
+puci doctor                                     # checks key, endpoint and model
+cd your-project && puci                         # interactive TUI (press m to switch model)
+puci run "add a --verbose flag to main.c"        # one-shot
 ```
+
+Other providers: set `PUCI_API_KEY` and `PUCI_BASE_URL` (OpenAI, Ollama,
+vLLM, LM Studio, Anthropic) — see [Configuration](#configuration).
 
 > **Safety:** tools that run code or modify files (`run_shell`, `write_file`,
 > `edit_file`, MCP) require approval. `puci run` asks on a TTY and denies when
@@ -153,7 +190,7 @@ Set credentials via environment variables (never committed to repos):
 ```bash
 export PUCI_API_KEY="sk-..."
 export PUCI_BASE_URL="https://openrouter.ai/api/v1"
-export PUCI_MODEL="anthropic/claude-3.5-sonnet"
+export PUCI_MODEL="anthropic/claude-sonnet-5.5"
 ```
 
 `OPENROUTER_API_KEY` is a first-class fallback for `PUCI_API_KEY`. Config resolution precedence: CLI flags > env vars > project-local config (`.puci.toml`, credentials forbidden) > global config (`~/.config/puci/config.toml`) > defaults. API keys in project-local config are rejected with a fatal error to prevent secret leakage.
@@ -162,7 +199,7 @@ Global config template (`~/.config/puci/config.toml`):
 
 ```toml
 base_url = "https://openrouter.ai/api/v1"
-model = "anthropic/claude-3.5-sonnet"
+model = "anthropic/claude-sonnet-5.5"
 context_budget_bytes = 131072
 tool_timeout_ms = 60000
 ```

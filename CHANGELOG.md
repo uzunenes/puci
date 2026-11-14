@@ -9,6 +9,18 @@ All notable changes to this project are documented here.
 - GitHub Actions CI (`.github/workflows/ci.yml`): dual-compiler (gcc + clang) build & test matrix, ASan + UBSan sanitizer job, and swarm density benchmark job.
 - README badges (CI status, MIT license, version, C17) and a "SQLite of AI agent harnesses" tagline with a one-line value proposition.
 
+### Added
+
+- One-command install: the top-level `Makefile` now wraps Meson (`make`, `make test`, `sudo make install`, `make install PREFIX=~/.local`, `make uninstall`). `scripts/check-deps.sh` detects missing build dependencies and prints the exact install command for Debian/Ubuntu, Fedora/RHEL, Arch, openSUSE, Alpine, Void, FreeBSD and macOS; it never installs packages itself.
+- Release workflow (`.github/workflows/release.yml`): pushing a `v*` tag builds Linux x86_64/arm64 binaries (static libpuci, dynamic libcurl), runs the tests and attaches `.tar.gz` + `.sha256` to the GitHub Release.
+- OpenRouter: mid-stream `{"error":{...}}` payloads (e.g. "Insufficient credits") and `delta.reasoning` are handled; HTTP 4xx/5xx errors now show the provider's message ("... is not a valid model ID") instead of a bare status code.
+
+### Changed
+
+- termbox2 is always taken from the vendored, pinned header. The Meson wrap that `git clone`d termbox2's moving `head` at configure time was removed, so builds are offline and reproducible.
+- Installed `puci` carries an RPATH to its `libdir`, so per-user installs (`PREFIX=~/.local`) work without `ldconfig`/`LD_LIBRARY_PATH`. `puci.pc` lists `-lpuci` once and declares `Requires.private: libcurl`.
+- Default OpenRouter model is now `anthropic/claude-sonnet-5.5` (the old `anthropic/claude-3.5-sonnet` no longer exists on OpenRouter), and it is also applied when `PUCI_BASE_URL` points at OpenRouter with no model set. The TUI's offline model list and the Anthropic provider default were refreshed.
+
 ### Security
 
 - **Approval is now fail-closed.** Previously a session with no `approve_cb` (e.g. `puci run`, or any embedder that forgot to set one) executed `run_shell`, `write_file`, `edit_file`, MCP and custom tools with no approval at all, and the REPL auto-allowed every tool when stdin was not a TTY. Now, without a policy, only `read_file`/`grep`/`glob` run; everything else is denied. Unattended use is an explicit opt-in: `PUCI_APPROVAL_MODE_AUTO` (library) or `--yes` / `PUCI_AUTO_APPROVE=1` (CLI). `puci run` prompts on a TTY and denies when none is available.

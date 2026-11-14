@@ -118,6 +118,7 @@ struct puci_turn {
     long long prompt_tokens;   /* reported usage (this turn), 0 if unspecified */
     long long completion_tokens;
     long long cached_tokens;
+    char stream_error[256];    /* provider error sent inside the stream, "" if none */
 };
 
 /* ------------------------------------------------------------------ */

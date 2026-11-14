@@ -820,6 +820,7 @@ static puci_status run_build_request(puci_session *sess,
     run->turn.tool_calls_cap = 0;
     run->turn.tool_calls = NULL;
     run->turn.had_tool_calls = 0;
+    run->turn.stream_error[0] = '\0';
     run->turn.had_reasoning = 0;
     run->turn.stream_done = 0;
     run->turn.finish_reason_stop = 0;
@@ -941,6 +942,12 @@ static int run_stream_step(puci_session *sess, struct puci_turn_run *run) {
         return 1;
     }
     if (run->first_err != PUCI_OK) {
+        if (run->turn.stream_error[0]) {
+            char emsg[300];
+            snprintf(emsg, sizeof(emsg), "provider error: %s", run->turn.stream_error);
+            fin_error(sess, run, PUCI_ERR_PROTOCOL, emsg);
+            return 1;
+        }
         fin_error(sess, run, PUCI_ERR_PROTOCOL, "malformed stream from provider");
         return 1;
     }
