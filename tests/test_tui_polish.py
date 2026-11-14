@@ -14,6 +14,8 @@ the four contract sizes and asserts on the decoded terminal output that:
   - light background (PUCI_THEME, an OSC 11 reply, or the desktop's
     light/dark setting when the terminal won't say) avoids yellow/cyan;
     NO_COLOR emits no colour escapes at all
+  - the frame follows window resizes (grow and shrink)
+  - typing a letter while idle composes (no s/m/q shortcut misfire)
   - a user "YOU" label and an assistant "PUCI" heading both appear
   - no "— done —" clutter and no startup keybinding tutorial
   - the footer holds only whole actions
@@ -135,6 +137,102 @@ def run_tui(rows, cols, base_url, run_ms=3200, extra_env=None, osc11_reply=None)
     return buf.decode("utf-8", "replace")
 
 
+def run_resize(start, end, base_url):
+    """Start at `start` (rows, cols), resize the pty to `end`, return the
+    escape sequences drawn after the resize."""
+    env = dict(os.environ)
+    for k in ("NO_COLOR", "PUCI_THEME", "COLORFGBG"):
+        env.pop(k, None)
+    env.update(PUCI_BASE_URL=base_url, PUCI_API_KEY="test", PUCI_MODEL="mock-model",
+               PUCI_TUI_FORCE="1", PUCI_TUI_EXIT_AFTER_MS="2500", TERM="xterm-256color",
+               PUCI_THEME="dark")
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", start[0], start[1], 0, 0))
+    env["PUCI_TUI_TTY"] = os.ttyname(slave)
+
+    def _ctty():
+        os.setsid()
+        try:
+            fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+        except Exception:
+            pass
+
+    proc = subprocess.Popen([PUCI], env=env, stdin=slave, stdout=slave, stderr=slave,
+                            preexec_fn=_ctty)
+    os.close(slave)
+
+    def drain(sec):
+        out = b""
+        end_t = time.time() + sec
+        while time.time() < end_t:
+            r, _, _ = select.select([master], [], [], 0.05)
+            if r:
+                try:
+                    out += os.read(master, 65536)
+                except OSError:
+                    break
+        return out
+
+    drain(0.9)
+    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", end[0], end[1], 0, 0))
+    after = drain(1.0)
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        proc.kill()
+    os.close(master)
+    return after.decode("utf-8", "replace"), proc.returncode
+
+
+def run_type_without_enter(base_url, keys="selam"):
+    """Start idle, type `keys` WITHOUT pressing Enter first, return the
+    decoded screen. Reproduces: forgetting Enter used to fire s/m/q shortcuts."""
+    env = dict(os.environ)
+    for k in ("NO_COLOR", "PUCI_THEME", "COLORFGBG"):
+        env.pop(k, None)
+    env.update(PUCI_BASE_URL=base_url, PUCI_API_KEY="test", PUCI_MODEL="mock-model",
+               PUCI_TUI_FORCE="1", PUCI_TUI_EXIT_AFTER_MS="2500", TERM="xterm-256color",
+               PUCI_THEME="dark")
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+    env["PUCI_TUI_TTY"] = os.ttyname(slave)
+
+    def _ctty():
+        os.setsid()
+        try:
+            fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+        except Exception:
+            pass
+
+    proc = subprocess.Popen([PUCI], env=env, stdin=slave, stdout=slave, stderr=slave,
+                            preexec_fn=_ctty)
+    os.close(slave)
+
+    def drain(sec):
+        out = b""
+        end_t = time.time() + sec
+        while time.time() < end_t:
+            r, _, _ = select.select([master], [], [], 0.05)
+            if r:
+                try:
+                    out += os.read(master, 65536)
+                except OSError:
+                    break
+        return out
+
+    drain(0.8)
+    os.write(master, keys.encode())
+    out = drain(0.8)
+    os.write(master, b"\r")
+    drain(0.3)
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        proc.kill()
+    os.close(master)
+    return out.decode("utf-8", "replace")
+
+
 def ck(label, cond, detail=""):
     global checks
     checks += 1
@@ -181,11 +279,10 @@ def main():
                "missing composer top border title")
             ck(f"{tag} composer-bottom", "\u2514" in out, "missing composer bottom border")
 
-            # footer: must not end in a half-typed action. A plausible closing
-            # is 'q quit' (wide) or at least not a broken trailing separator.
-            # We require the wide footer to complete on wide sizes.
+            # footer: must not end in a half-typed action. The wide footer ends
+            # in the quit hint ("Ctrl+C quit"); require it to complete.
             if cols >= 120:
-                ck(f"{tag} footer-qquit", "q quit" in out, "wide footer truncated before q quit")
+                ck(f"{tag} footer-quit", "Ctrl+C quit" in out, "wide footer truncated before the quit hint")
 
         # ---- palette variants (design gate: readable on light and dark) ----
         sgr_colour = re.compile(r"\x1b\[(?:[0-9;]*;)?(?:3[0-7]|4[0-7]|9[0-7]|10[0-7])(?:;[0-9;]*)?m")
@@ -225,6 +322,29 @@ def main():
         ck("no-color assistant-text", "tok0" in out, "NO_COLOR run produced no reply")
         ck("no-color no-sgr-colours", not sgr_colour.search(out),
            "NO_COLOR set but colour escapes were emitted")
+
+        # ---- window resize: the TUI must follow SIGWINCH both ways ----
+        def drawn_extent(out):
+            pos = re.findall(r"\x1b\[(\d+);(\d+)H", out)
+            return (max((int(r) for r, _ in pos), default=0),
+                    max((int(c) for _, c in pos), default=0))
+        out, rc = run_resize((15, 60), (30, 120), base)
+        r, c = drawn_extent(out)
+        ck("resize-grow", r > 15 and c > 60,
+           f"after growing 60x15 -> 120x30 the frame still ends at {c}x{r}")
+        out, rc = run_resize((30, 120), (15, 60), base)
+        r, c = drawn_extent(out)
+        ck("resize-shrink", 0 < r <= 15 and 0 < c <= 60,
+           f"after shrinking 120x30 -> 60x15 cells were drawn at {c}x{r}")
+        ck("resize-shrink-exit", rc == 0, f"puci exited with {rc} after shrinking")
+
+        # ---- type-to-compose: typing without Enter must not fire shortcuts ----
+        out = run_type_without_enter(base, "selam")
+        plain = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[()][AB0]", "", out)
+        ck("compose-types-text", "selam" in plain,
+           "typing 'selam' idle did not appear in the composer")
+        ck("compose-enters-input", "Input" in plain,
+           "typing a letter idle did not switch the composer to input mode")
 
         print(f"passed {len(SIZES)} sizes, {checks} checks, {len(failures)} failure(s)")
         for f_ in failures:
