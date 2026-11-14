@@ -1,4 +1,4 @@
-/* tui.c - PUCI Featherweight TUI v0.5.0 — termbox2 hybrid cell renderer
+/* tui.c - PUCI Featherweight TUI — termbox2 hybrid cell renderer
  * Master poll ring: STDIN + N*session fds. termbox2 = double-buffer only.
  * World-class chat flow: stream coalescing, word-wrap, scrollback, session & model pickers.
  */
@@ -617,7 +617,7 @@ static int fetch_models_into(char out[][128], int cap, int *err){
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 6L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 4L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "puci/0.5.0");
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "puci/" PUCI_VERSION_STRING);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
     CURLcode rc=curl_easy_perform(curl);

@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-14
+
+**ABI 3** (`libpuci.so.3`): `puci_session_options` gained `workspace_root`; rebuild programs that embed libpuci.
+
 ### Added
 
 - GitHub Actions CI (`.github/workflows/ci.yml`): dual-compiler (gcc + clang) build & test matrix, ASan + UBSan sanitizer job, and swarm density benchmark job.

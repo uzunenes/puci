@@ -15,17 +15,19 @@
  */
 
 #define PUCI_VERSION_MAJOR 0
-#define PUCI_VERSION_MINOR 5
+#define PUCI_VERSION_MINOR 6
 #define PUCI_VERSION_PATCH 0
 
-#define PUCI_VERSION_STRING "0.5.0"
+#define PUCI_VERSION_STRING "0.6.0"
 
  /* ABI version, drives the shared library soname (e.g. libpuci.so.2).
  * Version 2 is deliberate for v0.1.0: the public tool callback gained a cancel
  * token and puci_event gained its permanent payload union. v0.2.0 adds source-
  * compatible APIs (MCP client, Anthropic provider, Lua bindings) and therefore
- * keeps ABI version 2 unchanged. */
-#define PUCI_ABI_VERSION 2
+ * keeps ABI version 2 unchanged. v0.6.0 appends `workspace_root` to
+ * puci_session_options (the library reads past the end of a struct built by
+ * an older caller), so it bumps the ABI to 3 (libpuci.so.3). */
+#define PUCI_ABI_VERSION 3
 
 #define PUCI_VERSION_HEX \
     ((PUCI_VERSION_MAJOR << 16) | (PUCI_VERSION_MINOR << 8) | (PUCI_VERSION_PATCH))

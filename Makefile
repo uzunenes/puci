@@ -31,7 +31,7 @@ SHARED  ?= 1
 O       ?= build/make
 
 VERSION := $(shell awk '/^\#define PUCI_VERSION_(MAJOR|MINOR|PATCH) /{v = v (v == "" ? "" : ".") $$3} END{print v}' include/puci/version.h)
-ABI     := 2
+ABI     := $(shell awk '/^\#define PUCI_ABI_VERSION /{print $$3}' include/puci/version.h)
 
 PKG_CONFIG ?= pkg-config
 CURL_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags libcurl 2>/dev/null || curl-config --cflags 2>/dev/null)
@@ -43,6 +43,10 @@ ifeq ($(UNAME_S),Darwin)
   SO_NAME  := libpuci.$(ABI).dylib
   SO_LINK  := libpuci.dylib
   SO_FLAGS := -dynamiclib -install_name $(LIBDIR)/$(SO_NAME)
+  # macOS hides BSD/Darwin APIs (O_NOFOLLOW, ...) under _POSIX_C_SOURCE.
+  OS_CPPFLAGS := -D_DARWIN_C_SOURCE
+  # Apple clang may not know every GCC warning name used in WARN.
+  WARN_EXTRA  := -Wno-unknown-warning-option
 else
   SO_REAL  := libpuci.so.$(VERSION)
   SO_NAME  := libpuci.so.$(ABI)
@@ -51,13 +55,13 @@ else
 endif
 
 # Flags the code needs; user CFLAGS/CPPFLAGS add to them, never replace them.
-WARN     := -Wall -Wextra -Wno-format-truncation
+WARN     = -Wall -Wextra -Wno-format-truncation $(WARN_EXTRA)
 BASE_CPPFLAGS := -D_POSIX_C_SOURCE=200809L -Iinclude -Isrc/lib \
                  -DPUCI_FEATURE_TUI=$(TUI) -DPUCI_FEATURE_MEMORY=0 \
                  -DPUCI_FEATURE_SWARM=0 -DPUCI_FEATURE_BROWSER=0 \
                  -DPUCI_FEATURE_MCP=0 -DPUCI_FEATURE_NATIVE_ARCH=0 \
                  -DPUCI_FEATURE_LTO=0
-ALL_CFLAGS := -std=c17 $(WARN) $(BASE_CPPFLAGS) $(CURL_CFLAGS) $(CPPFLAGS) $(CFLAGS)
+ALL_CFLAGS := -std=c17 $(WARN) $(BASE_CPPFLAGS) $(OS_CPPFLAGS) $(CURL_CFLAGS) $(CPPFLAGS) $(CFLAGS)
 
 LIB_SRC := \
 	src/lib/core/context.c src/lib/core/session.c src/lib/core/agent.c \
