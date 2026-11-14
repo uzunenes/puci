@@ -27,6 +27,8 @@ All notable changes to this project are documented here.
 
 ### Security
 
+- Session transcripts and prompt history are now owner-only: `~/.local/share/puci` and `sessions/` are created (and tightened, if created by older versions) as `0700`, transcript and history files as `0600`. They were `0755`/`0664`, readable by other local users, although they contain tool output and everything typed.
+- TUI test harnesses run with a temporary `HOME`/`XDG_*` and no provider env vars, so they no longer read the developer's `~/.config/puci` (API key) or write mock sessions and history into `~/.local/share/puci`.
 - **Approval is now fail-closed.** Previously a session with no `approve_cb` (e.g. `puci run`, or any embedder that forgot to set one) executed `run_shell`, `write_file`, `edit_file`, MCP and custom tools with no approval at all, and the REPL auto-allowed every tool when stdin was not a TTY. Now, without a policy, only `read_file`/`grep`/`glob` run; everything else is denied. Unattended use is an explicit opt-in: `PUCI_APPROVAL_MODE_AUTO` (library) or `--yes` / `PUCI_AUTO_APPROVE=1` (CLI). `puci run` prompts on a TTY and denies when none is available.
 - `puci_atomic_write_file` creates its temp file with `O_EXCL|O_NOFOLLOW` (no write-through of planted symlinks) and uses an atomic counter.
 - Path guard matched any path segment *starting with* `build` (e.g. `builder.c`, `build_info.c`); it now matches `build` and `build-*` only.

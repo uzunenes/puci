@@ -425,6 +425,7 @@ static void history_save_line(const char *line){
     if(g_hist_count>0 && strcmp(g_hist[g_hist_count-1],line)==0) return;
     char path[1024]; if(puci_cli_get_history_file(path,sizeof path)!=0) return;
     FILE *f=fopen(path,"a"); if(!f) return;
+    (void)fchmod(fileno(f),0600); /* prompts are private */
     fprintf(f,"%s\n",line); fclose(f);
     if(g_hist_count<HIST_MAX){ snprintf(g_hist[g_hist_count],2048,"%s",line); g_hist_count++; }
     else { // rotate

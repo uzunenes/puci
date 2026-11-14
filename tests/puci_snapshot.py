@@ -7,6 +7,19 @@ Usage:
 """
 import argparse, os, re, sys, time, subprocess, pty, fcntl, termios, struct, select, signal
 
+# Hermetic test home: never read the developer's ~/.config/puci (API keys) or
+# write sessions/history into their ~/.local/share/puci.
+import atexit as _atexit, shutil as _shutil, tempfile as _tempfile
+_TEST_HOME = _tempfile.mkdtemp(prefix="puci-test-home-")
+_atexit.register(_shutil.rmtree, _TEST_HOME, True)
+for _k in ("PUCI_API_KEY", "OPENROUTER_API_KEY", "PUCI_BASE_URL", "PUCI_MODEL"):
+    os.environ.pop(_k, None)
+os.environ.update(HOME=_TEST_HOME,
+                  XDG_CONFIG_HOME=os.path.join(_TEST_HOME, ".config"),
+                  XDG_DATA_HOME=os.path.join(_TEST_HOME, ".local", "share"),
+                  XDG_STATE_HOME=os.path.join(_TEST_HOME, ".local", "state"))
+
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 FAKE = os.path.join(HERE, "fake_sse.py")
 PUCI = os.environ.get("PUCI_BIN") or os.path.abspath(os.path.join(HERE, "..", "build", "src", "cli", "puci"))

@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -138,6 +139,7 @@ int ledit_history_save(ledit *ed, const char *filepath) {
     if (!f) {
         return -1;
     }
+    (void)fchmod(fileno(f), 0600); /* prompts are private */
     for (size_t i = 0; i < ed->nhist; i++) {
         fprintf(f, "%s\n", ed->history[i]);
     }
