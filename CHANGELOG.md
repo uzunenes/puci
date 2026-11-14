@@ -25,6 +25,12 @@ All notable changes to this project are documented here.
 
 - Hints, the status line and other secondary text were drawn bold-black (`ESC[1;30m`), i.e. black on dark terminals that don't brighten bold (GNOME Terminal/VTE, kitty, Alacritty defaults), so they were invisible; body text and borders were hard-coded white, invisible on light themes. The theme now uses the terminal's own foreground for text and a dimmed default foreground for secondary text, so it is readable on any palette. `test_tui_polish` guards against both.
 
+### Added (TUI design rules)
+
+- Light-terminal palette: the TUI detects the background (`PUCI_THEME=light|dark`, `COLORFGBG`, or an OSC 11 query bounded at 200 ms and cut short by the DA1 reply) and swaps yellow/cyan accents, which wash out on white, for blue/magenta.
+- `NO_COLOR` support (no-color.org): no colour escapes at all; bold, dim, underline and reverse carry meaning.
+- All colours moved into `src/cli/tui/theme.c` as semantic roles; `scripts/check_tui_tokens.sh` (`meson test tui_tokens`) rejects raw `TB_<colour>` names elsewhere and bold black anywhere. Rules documented in `docs/TUI.md`.
+
 ### Security
 
 - Session transcripts and prompt history are now owner-only: `~/.local/share/puci` and `sessions/` are created (and tightened, if created by older versions) as `0700`, transcript and history files as `0600`. They were `0755`/`0664`, readable by other local users, although they contain tool output and everything typed.

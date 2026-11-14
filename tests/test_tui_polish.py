@@ -11,6 +11,8 @@ the four contract sizes and asserts on the decoded terminal output that:
   - no false "new ↓" badge after an un-scrolled normal flow
   - no raw "[think]" reasoning text in the default transcript
   - no bold-black / hard-coded white text (unreadable on dark / light themes)
+  - light background (PUCI_THEME or a real OSC 11 reply) avoids yellow/cyan;
+    NO_COLOR emits no colour escapes at all
   - a user "YOU" label and an assistant "PUCI" heading both appear
   - no "— done —" clutter and no startup keybinding tutorial
   - the footer holds only whole actions
@@ -56,8 +58,13 @@ def start_fake(tokens=40, rate=80):
     return proc, port
 
 
-def run_tui(rows, cols, base_url, run_ms=3200):
+def run_tui(rows, cols, base_url, run_ms=3200, extra_env=None, osc11_reply=None):
     env = dict(os.environ)
+    env.pop("NO_COLOR", None)
+    env.pop("PUCI_THEME", None)
+    env.pop("COLORFGBG", None)
+    if extra_env:
+        env.update(extra_env)
     env["PUCI_BASE_URL"] = base_url
     env["PUCI_API_KEY"] = "test"
     env["PUCI_MODEL"] = "mock-model"
@@ -87,6 +94,15 @@ def run_tui(rows, cols, base_url, run_ms=3200):
     os.close(slave)
     buf = b""
     end = time.time() + (run_ms / 1000.0) + 1.0
+    if osc11_reply is not None:
+        # Play a terminal: answer the background-colour query (OSC 11) and
+        # the DA1 probe that follows it.
+        t0 = time.time()
+        while time.time() - t0 < 1.0 and b"\x1b]11;?" not in buf:
+            r, _, _ = select.select([master], [], [], 0.05)
+            if r:
+                buf += os.read(master, 65536)
+        os.write(master, osc11_reply + b"\x1b[?62;22c")
     time.sleep(0.6)
     os.write(master, b"\r")
     time.sleep(0.2)
@@ -169,6 +185,24 @@ def main():
             # We require the wide footer to complete on wide sizes.
             if cols >= 120:
                 ck(f"{tag} footer-qquit", "q quit" in out, "wide footer truncated before q quit")
+
+        # ---- palette variants (design gate: readable on light and dark) ----
+        sgr_colour = re.compile(r"\x1b\[(?:[0-9;]*;)?(?:3[0-7]|4[0-7]|9[0-7]|10[0-7])(?:;[0-9;]*)?m")
+        light_bad = ("\x1b[33m", "\x1b[36m", "\x1b[43m", "\x1b[46m")  # yellow/cyan wash out on light
+        out = run_tui(24, 80, base, extra_env={"PUCI_THEME": "light"})
+        ck("light assistant-text", "tok0" in out, "light palette run produced no reply")
+        ck("light no-yellow-cyan", not any(b in out for b in light_bad),
+           "yellow/cyan used on a light background")
+        out = run_tui(24, 80, base, osc11_reply=b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\")
+        ck("osc11-light detected", not any(b in out for b in light_bad),
+           "OSC 11 white background not detected (yellow/cyan still used)")
+        out = run_tui(24, 80, base, osc11_reply=b"\x1b]11;rgb:1717/1414/2121\x1b\\")
+        ck("osc11-dark keeps palette", "\x1b[36m" in out or "\x1b[1m\x1b[36m" in out,
+           "dark OSC 11 reply should keep the dark palette")
+        out = run_tui(24, 80, base, extra_env={"NO_COLOR": "1"})
+        ck("no-color assistant-text", "tok0" in out, "NO_COLOR run produced no reply")
+        ck("no-color no-sgr-colours", not sgr_colour.search(out),
+           "NO_COLOR set but colour escapes were emitted")
 
         print(f"passed {len(SIZES)} sizes, {checks} checks, {len(failures)} failure(s)")
         for f_ in failures:

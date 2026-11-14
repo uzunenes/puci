@@ -62,3 +62,22 @@ unbroken.
 
 See `docs/KEYBINDINGS.md` for the full, implementation-matched reference
 (normal mode, composer, both pickers, approval dialog, and slash commands).
+
+## Design rules (colour and readability)
+
+These rules are enforced, not just written down: `scripts/check_tui_tokens.sh`
+(`meson test tui_tokens`) and `tests/test_tui_polish.py` fail the build when
+they are broken.
+
+| Rule | Why | Enforced by |
+|---|---|---|
+| Drawing code uses only the semantic roles in `g_theme` (`text`, `muted`, `accent`, `warning`, `heading`, `sel_fg`/`sel_bg`, ...). Raw `TB_<colour>` names appear only in `src/cli/tui/theme.c`. | One place decides colour, so a palette change can't miss a screen. | `tui_tokens` |
+| Body text, borders and labels use the terminal's own foreground (`TB_DEFAULT`); secondary text is that foreground dimmed. Never hard-coded white, never bold black. | White is invisible on light terminals; bold black is black-on-dark wherever bold isn't brightened (GNOME Terminal/VTE, kitty, Alacritty). | `tui_tokens`, `test_tui_polish` |
+| Accents depend on the background: dark keeps cyan/yellow, light switches to blue/magenta. The background comes from `PUCI_THEME=light\|dark`, else `COLORFGBG`, else an OSC 11 query (≤ 200 ms, cut short by the DA1 reply). | Yellow and cyan wash out on white. | `test_tui_polish` (forced light, OSC 11 light, OSC 11 dark) |
+| `NO_COLOR` (non-empty) removes every colour; meaning is carried by bold, dim, underline and reverse. | [no-color.org](https://no-color.org); users with colour-vision or contrast needs. | `test_tui_polish` |
+| Motion only while something happens (streaming, an open dialog, a pending fetch); a static screen never repaints on a timer. | Idle CPU, battery, calm UI. | `docs/AUDIT.md` measurements |
+| Every layout works from the minimum size up; snapshots at 60×15, 80×24, 120×30, 200×50. | Narrow splits and small panes are common. | `tui_layout_smoke.py`, `test_tui_polish` |
+
+Adding a colour: add a role to `theme_t` in `theme.h`, give it a value in all
+three palettes in `theme.c` (dark, light, no-colour), and draw with
+`g_theme.<role>`.

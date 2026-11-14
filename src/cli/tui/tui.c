@@ -26,6 +26,7 @@
 #include "content.h"
 #include "md.h"
 #include "hl.h"
+#include "theme.h"
 #ifdef __clang__
 #pragma clang diagnostic pop
 #elif defined(__GNUC__)
@@ -155,35 +156,8 @@ static void on_winch(int s){ (void)s; g_winch=1; }
 static void on_terminate(int s){ (void)s; g_terminate=1; }
 
 /* ── Semantic theme tokens ──────────────────────────────────────────
-   All colour decisions go through this palette so overlay/header blue
-   no longer dominates the screen. The terminal default background is used
-   everywhere except selected rows. */
-typedef struct {
-    uintattr_t bg;         /* default background (TB_DEFAULT) */
-    uintattr_t surface;    /* overlay/panel background */
-    uintattr_t border;     /* faint border */
-    uintattr_t focus;      /* focused border / accent */
-    uintattr_t text;       /* body text */
-    uintattr_t muted;      /* dimmed/secondary text */
-    uintattr_t accent;     /* primary accent */
-    uintattr_t success;    /* ok / ready */
-    uintattr_t warning;    /* pending / attention */
-    uintattr_t error;      /* failure */
-    uintattr_t user;       /* user message label */
-    uintattr_t assistant;  /* assistant label */
-    uintattr_t tool;       /* tool card */
-} theme_t;
-/* Readability on ANY terminal palette (dark or light): body text, borders
- * and labels use the terminal's own foreground (TB_DEFAULT) instead of a
- * hard-coded white (invisible on light themes), and secondary text is the
- * default foreground dimmed (SGR 2) instead of "bold black", which renders
- * as black-on-dark on terminals that don't brighten bold (GNOME Terminal,
- * VTE, kitty, Alacritty defaults). */
-static const theme_t g_theme = {
-    TB_DEFAULT, TB_DEFAULT, TB_DEFAULT, TB_CYAN|TB_BOLD,
-    TB_DEFAULT, TB_DEFAULT|TB_DIM, TB_CYAN, TB_GREEN,
-    TB_YELLOW, TB_RED|TB_BOLD, TB_CYAN|TB_BOLD, TB_DEFAULT|TB_BOLD, TB_YELLOW
-};
+   Every colour decision goes through g_theme (tui/theme.c, rules in
+   tui/theme.h); raw TB_<colour> names are not allowed in this file. */
 
 static int g_show_debug=0;   /* enable RSS/PSS/trace metrics in header */
 
@@ -952,12 +926,12 @@ static void tb_print_styled(int x,int y, uintattr_t base_fg, uintattr_t base_bg,
     int bold=0, code=0;
     // heading detection at line start
     if(s[0]=='#' && (s[1]==' '||s[1]=='#')){
-        base_fg = TB_YELLOW|TB_BOLD; // heading yellow
+        base_fg = g_theme.heading;
         int skip=0; while(s[skip]=='#') skip++; if(s[skip]==' ') skip++;
         s += skip;
     } else if(s[0]=='>' && s[1]==' '){
-        base_fg = TB_CYAN;
-        if(col < x+max_w){ tb_set_cell(col,y, 0x2502, TB_CYAN, base_bg); col++; }
+        base_fg = g_theme.quote;
+        if(col < x+max_w){ tb_set_cell(col,y, 0x2502, g_theme.quote, base_bg); col++; }
         s+=2;
     } else if((s[0]=='-'||s[0]=='*') && s[1]==' '){
         base_fg = g_theme.text;
@@ -993,7 +967,7 @@ static void tb_print_styled(int x,int y, uintattr_t base_fg, uintattr_t base_bg,
         if(col+w > x+max_w) break;
         uintattr_t fg=base_fg, bg=base_bg;
         if(bold) fg|=TB_BOLD;
-        if(code){ fg=TB_BLACK; bg=TB_WHITE; }
+        if(code){ fg=g_theme.code_fg; bg=g_theme.code_bg; }
         /* Wide glyphs occupy two cells; termbox fills the trailing cell. */
         tb_set_cell(col,y,cp, fg, bg);
         col+=w; s+=(size_t)bl;
@@ -1018,16 +992,16 @@ static void tb_print_hl(int x,int y,int max_w,HlLang lang,const char *s,uintattr
         if((int)off>=max_w) break;
         uintattr_t fg=base_fg;
         switch(sp[i].kind){
-            case HL_TK_KEYWORD: fg=TB_CYAN|TB_BOLD; break;
-            case HL_TK_STRING:  fg=TB_GREEN; break;
-            case HL_TK_NUMBER:  fg=TB_MAGENTA; break;
-            case HL_TK_COMMENT: fg=TB_GREEN|TB_DIM; break;
-            case HL_TK_BOOL:    fg=TB_YELLOW; break;
-            case HL_TK_HEADING: fg=TB_YELLOW|TB_BOLD; break;
-            case HL_TK_DIFF_ADD:fg=TB_GREEN; break;
-            case HL_TK_DIFF_DEL:fg=TB_RED; break;
-            case HL_TK_DIFF_HUNK:fg=TB_CYAN; break;
-            case HL_TK_MD_LINK: fg=TB_BLUE|TB_UNDERLINE; break;
+            case HL_TK_KEYWORD: fg=g_theme.hl_keyword; break;
+            case HL_TK_STRING:  fg=g_theme.hl_string; break;
+            case HL_TK_NUMBER:  fg=g_theme.hl_number; break;
+            case HL_TK_COMMENT: fg=g_theme.hl_comment; break;
+            case HL_TK_BOOL:    fg=g_theme.hl_bool; break;
+            case HL_TK_HEADING: fg=g_theme.heading; break;
+            case HL_TK_DIFF_ADD:fg=g_theme.diff_add; break;
+            case HL_TK_DIFF_DEL:fg=g_theme.diff_del; break;
+            case HL_TK_DIFF_HUNK:fg=g_theme.diff_hunk; break;
+            case HL_TK_MD_LINK: fg=g_theme.hl_link; break;
             default: break;
         }
         const char *p=s+off;
@@ -1080,7 +1054,7 @@ static int md_fence_detect(const char *line, HlLang *out_lang){
     return 1;
 }
 static void tb_draw_box(int r,int c,int h,int w,const char *title,int focused){
-    uintattr_t fg = focused ? TB_CYAN|TB_BOLD : g_theme.border;
+    uintattr_t fg = focused ? g_theme.focus : g_theme.border;
     uintattr_t bg = TB_DEFAULT;
     tb_set_cell(c, r, 0x250C, fg, bg);
     for(int x=1;x<w-1;x++) tb_set_cell(c+x, r, 0x2500, fg, bg);
@@ -1562,8 +1536,8 @@ void tui_render_frame(void){
         int svis=sh-2; if(svis<1) svis=1;
         int stop=g_pick_sel-(svis-1); if(stop<0) stop=0;
         for(int i=stop; i<cnt && i<stop+svis; i++){
-            uint32_t fg=(i==g_pick_sel && g_mode==2)? TB_BLACK:g_theme.text;
-            uint32_t bg=(i==g_pick_sel && g_mode==2)? TB_CYAN:TB_DEFAULT;
+            uint32_t fg=(i==g_pick_sel && g_mode==2)? g_theme.sel_fg:g_theme.text;
+            uint32_t bg=(i==g_pick_sel && g_mode==2)? g_theme.sel_bg:g_theme.bg;
             int src=(g_mode==2? g_pick_filtered_idx[i] : i);
             for(int x=sc+1;x<sc+sw-1;x++) tb_set_cell(x, sr+1+(i-stop),' ',fg,bg);
             char ln[88]; snprintf(ln,sizeof ln,"%.12s %.10s", g_sess_list[src].id, g_sess_list[src].model);
@@ -1711,8 +1685,8 @@ composer_done:
                 int yy = or_+1+(l-g_hunk_off);
                 if(yy >= or_+1 && yy < or_+oh-2){
                     uint32_t fg = g_theme.text;
-                    if(tok[0]=='+') fg = TB_GREEN|TB_BOLD;
-                    else if(tok[0]=='-') fg = TB_RED|TB_BOLD;
+                    if(tok[0]=='+') fg = g_theme.diff_add;
+                    else if(tok[0]=='-') fg = g_theme.diff_del;
                     char line[96]; snprintf(line,sizeof line,"%.*s", ow>2?ow-2:0, tok);
                     tb_print(oc+1, yy, fg, g_theme.surface, line);
                 }
@@ -1726,12 +1700,12 @@ composer_done:
             if(g_approval_feedback_mode){
                 char fbuf[540];
                 snprintf(fbuf,sizeof fbuf,"reason> %.510s", g_approval_feedback);
-                tb_print(oc+1, fy, TB_BLACK, TB_YELLOW, fbuf);
+                tb_print(oc+1, fy, g_theme.banner_fg, g_theme.banner_bg, fbuf);
             } else {
                 char hbuf[64];
                 if(g_hunk_max>1) snprintf(hbuf,sizeof hbuf,"%d/%d  j/k scroll", g_hunk_off+1, g_hunk_max);
                 else snprintf(hbuf,sizeof hbuf,"%d/%d", g_hunk_off+1, g_hunk_max);
-                tb_print(oc+1, fy, TB_CYAN, g_theme.surface, hbuf);
+                tb_print(oc+1, fy, g_theme.accent, g_theme.surface, hbuf);
             }
         }
     }
@@ -1754,8 +1728,8 @@ composer_done:
             int yy=or_+1+(i-top);
             if(yy < or_+oh-1){
                 if(i==g_pick_sel){
-                    for(int x=oc+1;x<oc+ow-1;x++) tb_set_cell(x,yy,' ', TB_BLACK, TB_CYAN);
-                    tb_print(oc+2, yy, TB_BLACK, TB_CYAN, k_models[src]);
+                    for(int x=oc+1;x<oc+ow-1;x++) tb_set_cell(x,yy,' ', g_theme.sel_fg, g_theme.sel_bg);
+                    tb_print(oc+2, yy, g_theme.sel_fg, g_theme.sel_bg, k_models[src]);
                 } else {
                     tb_print(oc+2, yy, g_theme.text, g_theme.surface, k_models[src]);
                 }
@@ -1923,6 +1897,9 @@ int puci_tui_run(const puci_cli_params *params){
        (e.g. a pty slave) instead of the default /dev/tty, which is absent on
        headless CI runners. */
     const char *tty_path = getenv("PUCI_TUI_TTY");
+    /* Pick the palette before termbox owns the tty (the probe talks to it). */
+    theme_init(theme_no_color_env() ? THEME_BG_UNKNOWN : theme_detect_bg(tty_path),
+               theme_no_color_env());
     int tb_rc = tty_path ? tb_init_file(tty_path) : tb_init();
     if(tb_rc!=0){
         if(getenv("PUCI_TUI_FORCE")){
