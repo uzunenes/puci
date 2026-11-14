@@ -137,8 +137,19 @@ $(O)/puci: $(CLI_OBJ) $(O)/libpuci.a
 
 # puci.pc is written at install time so it always matches the PREFIX /
 # LIBDIR / INCLUDEDIR given to `make install`.
+# libcurl goes in Requires.private when pkg-config knows it (Linux, BSDs,
+# Homebrew), else its flags go in Libs.private (macOS system curl has no .pc).
+CURL_HAS_PC := $(shell $(PKG_CONFIG) --exists libcurl 2>/dev/null && echo 1)
+ifeq ($(CURL_HAS_PC),1)
+  PC_CURL := Requires.private: libcurl
+  PC_CURL_LIBS :=
+else
+  PC_CURL :=
+  PC_CURL_LIBS := $(CURL_LIBS)
+endif
 PC_SED := sed -e 's|@PREFIX@|$(PREFIX)|' -e 's|@LIBDIR@|$(LIBDIR)|' \
-              -e 's|@INCLUDEDIR@|$(INCLUDEDIR)|' -e 's|@VERSION@|$(VERSION)|'
+              -e 's|@INCLUDEDIR@|$(INCLUDEDIR)|' -e 's|@VERSION@|$(VERSION)|' \
+              -e 's|@CURL_PC@|$(PC_CURL)|' -e 's|@CURL_LIBS_PRIVATE@|$(PC_CURL_LIBS)|'
 
 # ---- tests -----------------------------------------------------------------
 T := $(O)/tests

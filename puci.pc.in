@@ -6,7 +6,7 @@ Name: puci
 Description: Minimal C17 AI coding-agent harness core library
 URL: https://github.com/uzunenes/puci
 Version: @VERSION@
-Requires.private: libcurl
+@CURL_PC@
 Cflags: -I${includedir}
 Libs: -L${libdir} -lpuci
-Libs.private: -pthread
+Libs.private: -pthread @CURL_LIBS_PRIVATE@
