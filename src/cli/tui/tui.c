@@ -169,6 +169,15 @@ static void tui_teardown(void){
     sigaction(SIGWINCH, &g_old_winch, NULL); /* restore the app's handler */
 }
 
+/* puci reads stdin itself and owns SIGWINCH, so termbox's own resize path
+ * (its signal handler + tb_peek_event) never runs: its width/height and cell
+ * buffers would stay at the start-up size forever. On every SIGWINCH, ask the
+ * tty for the new size and resize termbox's buffers (this also clears the
+ * screen so the next frame repaints everything). */
+static void tui_sync_term_size(void){
+    if(!g_tb_ok) return;
+    if(update_term_size()==TB_OK) (void)resize_cellbufs();
+}
 static void get_winsize(int *rows,int *cols){
     if(g_tb_ok){
         int w = tb_width(); int h = tb_height();
@@ -1983,7 +1992,7 @@ int puci_tui_run(const puci_cli_params *params){
     int running=1;
     while(running){
         if(g_terminate){ running=0; break; } /* SIGTERM/SIGHUP: clean teardown */
-        if(g_winch){ g_winch=0; get_winsize(&g_rows,&g_cols); dirty=1; for(int _di=0;_di<MAX_PANES;_di++){ g_panes[_di].layout_dirty=1; g_panes[_di].cached_inner_w=-1; } }
+        if(g_winch){ g_winch=0; tui_sync_term_size(); get_winsize(&g_rows,&g_cols); dirty=1; for(int _di=0;_di<MAX_PANES;_di++){ g_panes[_di].layout_dirty=1; g_panes[_di].cached_inner_w=-1; } }
         if(exit_after_ms>0){ struct timespec now; clock_gettime(CLOCK_MONOTONIC,&now); long el=(now.tv_sec-tui_start.tv_sec)*1000 + (now.tv_nsec-tui_start.tv_nsec)/1000000; if(el>=exit_after_ms) running=0; }
         {
             /* Pump a finished background model fetch. Only when it installs a

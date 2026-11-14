@@ -191,7 +191,7 @@ test check: $(TEST_BINS) $(O)/puci
 	if sh scripts/check_tui_tokens.sh >/dev/null; then echo "ok   tui_tokens"; \
 	else echo "FAIL tui_tokens"; fail=1; fi; \
 	if [ "$(TUI)" = 1 ] && command -v python3 >/dev/null 2>&1; then \
-	    if PUCI_BIN=$(CURDIR)/$(O)/puci python3 tests/test_tui_polish.py >$(T)/tui.log 2>&1; \
+	    if PUCI_BIN=$(abspath $(O))/puci python3 tests/test_tui_polish.py >$(T)/tui.log 2>&1; \
 	    then echo "ok   test_tui_polish"; else echo "FAIL test_tui_polish (see $(T)/tui.log)"; fail=1; fi; \
 	fi; \
 	exit $$fail
