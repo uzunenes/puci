@@ -12,6 +12,7 @@ typedef struct puci_cli_params {
     const char *session_id;
     const char *resume_id; /* NULL if not resuming, "latest" or specific id */
     int plan_mode;
+    int auto_approve; /* --yes / PUCI_AUTO_APPROVE=1: run every tool unprompted */
     const char *prompt;
 } puci_cli_params;
 

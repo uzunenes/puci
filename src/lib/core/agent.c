@@ -452,6 +452,14 @@ static void build_argv_display(puci_arena *arena, puci_strbuf *sb,
     }
 }
 
+/* Built-in tools that never mutate state or execute code. Everything else
+ * (run_shell, write_file, edit_file, MCP and host-registered tools) requires
+ * an explicit approval policy. */
+static int tool_is_read_only(const char *name) {
+    return name && (strcmp(name, "read_file") == 0 ||
+                    strcmp(name, "grep") == 0 || strcmp(name, "glob") == 0);
+}
+
 static void build_approval_request(puci_session *sess, const puci_tool_call *pub,
                                    puci_arena *arena,
                                    puci_approval_request *req,
@@ -1133,9 +1141,16 @@ static int run_dispatch_tools(puci_session *sess, struct puci_turn_run *run) {
         int allow_always =
             sess->approve_always_tool &&
             strcmp(sess->approve_always_tool, pub.name) == 0;
+        /* Fail-closed: with no approval policy installed (no callback, not
+         * EVENT mode) every tool that can mutate state or run code is denied
+         * unless the host explicitly opted out via PUCI_APPROVAL_MODE_AUTO.
+         * Read-only built-ins stay available. */
         int need_approval =
             !allow_always && !resume_approved &&
-            (sess->approve_cb || sess->approval_mode == PUCI_APPROVAL_MODE_EVENT);
+            sess->approval_mode != PUCI_APPROVAL_MODE_AUTO &&
+            (sess->approve_cb ||
+             sess->approval_mode == PUCI_APPROVAL_MODE_EVENT ||
+             !tool_is_read_only(pub.name));
 
         if (need_approval) {
             if (sess->approval_mode == PUCI_APPROVAL_MODE_EVENT) {
@@ -1174,7 +1189,7 @@ static int run_dispatch_tools(puci_session *sess, struct puci_turn_run *run) {
             puci_arena_init(&ar, &sess->alloc, 0);
             build_approval_request(sess, &pub, &ar, &apreq, &run->cancel_token);
             int ap_cancelled = sess->cancelled ? 1 : 0;
-            puci_approval ap = ap_cancelled
+            puci_approval ap = (ap_cancelled || !sess->approve_cb)
                                    ? PUCI_APPROVAL_DENY
                                    : sess->approve_cb(&apreq,
                                                       sess->approve_userdata);

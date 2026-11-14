@@ -21,6 +21,9 @@ c_args = [
     '-Wpedantic',
     '-Werror',
     '-Wconversion',
+    # snprintf() truncation into fixed UI/status buffers is intentional; GCC's
+    # -O0 analysis flags dozens of those and breaks -Werror debug/sanitizer builds.
+    '-Wno-format-truncation',
     # libpuci targets POSIX (fork+exec, pipes, clock_gettime, strdup). Expose
     # the POSIX API surface under the strict -std=c17 flag.
     '-D_POSIX_C_SOURCE=200809L',

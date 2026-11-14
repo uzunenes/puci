@@ -211,6 +211,7 @@ static void test_async_tool_nonblocking(void) {
     puci_context_set_provider(ctx, &pcfg);
 
     puci_session_options sopts = {0};
+    sopts.approval_mode = PUCI_APPROVAL_MODE_AUTO;
     sopts.provider = pcfg;
     sopts.system_prompt = "test";
     sopts.max_tool_iterations = 8;
@@ -392,6 +393,7 @@ static void test_tool_timeout_and_process_group_cleanup(void) {
     puci_context_set_provider(ctx, &pcfg);
 
     puci_session_options sopts = {0};
+    sopts.approval_mode = PUCI_APPROVAL_MODE_AUTO;
     sopts.provider = pcfg;
     sopts.system_prompt = "test timeout";
     sopts.max_tool_iterations = 8;
@@ -512,6 +514,7 @@ static void test_async_tool_cancel(void) {
     puci_context_set_provider(ctx, &pcfg);
 
     puci_session_options sopts = {0};
+    sopts.approval_mode = PUCI_APPROVAL_MODE_AUTO;
     sopts.provider = pcfg;
     sopts.system_prompt = "test cancel";
     sopts.max_tool_iterations = 8;

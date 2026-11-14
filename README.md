@@ -127,6 +127,12 @@ export PUCI_API_KEY="sk-..."
 ./build/src/cli/puci run "hello"
 ```
 
+> **Safety:** tools that run code or modify files (`run_shell`, `write_file`,
+> `edit_file`, MCP) require approval. `puci run` asks on a TTY and denies when
+> there is none; pass `--yes` (or `PUCI_AUTO_APPROVE=1`) only in sandboxes/CI.
+> Embedders without an `approve_cb` get the same fail-closed behaviour unless
+> they set `approval_mode = PUCI_APPROVAL_MODE_AUTO`.
+
 ### Neovim (`puci.nvim`)
 
 Zero `-llua` dependency — the C module ships its own minimal Lua C ABI. With

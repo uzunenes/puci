@@ -117,6 +117,8 @@ static void test_path_guards(void) {
     CHECK(puci_path_is_protected("build-gcc/src/lib/libpuci.a") == 1);
     CHECK(puci_path_is_protected("/tmp/puci-good") == 1);
     CHECK(puci_path_is_protected("safe_dir/file.txt") == 0);
+    CHECK(puci_path_is_protected("builder.c") == 0);
+    CHECK(puci_path_is_protected("src/build_info.c") == 0);
 
     puci_context *ctx = NULL;
     CHECK(puci_context_create(NULL, &ctx) == PUCI_OK);

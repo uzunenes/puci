@@ -98,6 +98,7 @@ int main(void) {
         };
         puci_context_set_provider(ctx, &pcfg);
         puci_session_options sopts = {0};
+        sopts.approval_mode = PUCI_APPROVAL_MODE_AUTO; /* examples run tools unattended: explicit opt-in */
         sopts.provider = pcfg;
         sopts.system_prompt = "You run embedded. Be terse.";
 

@@ -9,7 +9,15 @@ All notable changes to this project are documented here.
 - GitHub Actions CI (`.github/workflows/ci.yml`): dual-compiler (gcc + clang) build & test matrix, ASan + UBSan sanitizer job, and swarm density benchmark job.
 - README badges (CI status, MIT license, version, C17) and a "SQLite of AI agent harnesses" tagline with a one-line value proposition.
 
+### Security
+
+- **Approval is now fail-closed.** Previously a session with no `approve_cb` (e.g. `puci run`, or any embedder that forgot to set one) executed `run_shell`, `write_file`, `edit_file`, MCP and custom tools with no approval at all, and the REPL auto-allowed every tool when stdin was not a TTY. Now, without a policy, only `read_file`/`grep`/`glob` run; everything else is denied. Unattended use is an explicit opt-in: `PUCI_APPROVAL_MODE_AUTO` (library) or `--yes` / `PUCI_AUTO_APPROVE=1` (CLI). `puci run` prompts on a TTY and denies when none is available.
+- `puci_atomic_write_file` creates its temp file with `O_EXCL|O_NOFOLLOW` (no write-through of planted symlinks) and uses an atomic counter.
+- Path guard matched any path segment *starting with* `build` (e.g. `builder.c`, `build_info.c`); it now matches `build` and `build-*` only.
+
 ### Fixed
+
+- Debug/sanitizer builds with recent GCC no longer fail under `-Werror` on intentional `snprintf` truncation (`-Wno-format-truncation`).
 
 - Clipboard: backend commands (`wl-copy`, `xclip`, `xsel`, `pbcopy`) now run with stdout/stderr redirected to `/dev/null`. `xclip` and `wl-copy` fork a daemon to serve the selection, which kept the host's stdout/stderr pipe open indefinitely (an embedding host or test runner reading puci's stdout would hang).
 - `test_content` no longer depends on the host: the OSC 52 size-gate check now skips OS clipboard backends via the new `clip_set_test_no_backend()` hook. Previously it timed out on any machine with `xclip`/`wl-copy` installed, and wrote a 64 KiB payload to the real clipboard.

@@ -159,7 +159,7 @@ static void on_event(void *ud, puci_session *sess, puci_event ev,
 }
 
 /* Interactive approval policy: show the exact action (parsed argv or unified
- * diff) and ask. Non-interactive stdin auto-allows so piped use still works. */
+ * diff) and ask. Non-interactive stdin is denied unless --yes was given. */
 static puci_approval policy(const puci_approval_request *req, void *ud) {
     repl *r = (repl *)ud;
     if (r && r->always_allow_turn) {
@@ -174,8 +174,10 @@ static puci_approval policy(const puci_approval_request *req, void *ud) {
     }
 
     if (!isatty(STDIN_FILENO)) {
-        /* Non-interactive: do not block; allow. */
-        return PUCI_APPROVAL_ALLOW;
+        /* Non-interactive: nobody can answer, so fail closed. Opt in to
+         * unattended execution with --yes / PUCI_AUTO_APPROVE=1. */
+        fprintf(stderr, "[denied] no tty to confirm; use --yes to auto-approve\n");
+        return PUCI_APPROVAL_DENY;
     }
 
     for (;;) {

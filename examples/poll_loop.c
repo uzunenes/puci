@@ -149,6 +149,7 @@ int main(void) {
 
     /* Create session. */
     puci_session_options sopts = {0};
+    sopts.approval_mode = PUCI_APPROVAL_MODE_AUTO; /* examples run tools unattended: explicit opt-in */
     if (puci_session_create(ctx, &sopts, &sess) != PUCI_OK) {
         fprintf(stderr, "session creation failed\n");
         puci_context_destroy(ctx);
