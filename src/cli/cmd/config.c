@@ -121,7 +121,7 @@ const char *puci_cli_config_error(void) {
     return g_last_error[0] ? g_last_error : NULL;
 }
 
-#define PUCI_OPENROUTER_DEFAULT_MODEL "~z-ai/glm-latest"
+#define PUCI_OPENROUTER_DEFAULT_MODEL "z-ai/glm-5.3"
 
 puci_provider_config *puci_cli_provider(const char *name) {
     g_last_error[0] = '\0';

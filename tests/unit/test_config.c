@@ -17,7 +17,7 @@ static void test_openrouter_fallback(void) {
     CHECK(cfg != NULL);
     CHECK(cfg->api_key && strcmp(cfg->api_key, "sk-or-v1-test123") == 0);
     CHECK(cfg->base_url && strcmp(cfg->base_url, "https://openrouter.ai/api/v1") == 0);
-    CHECK(cfg->model && strcmp(cfg->model, "~z-ai/glm-latest") == 0);
+    CHECK(cfg->model && strcmp(cfg->model, "z-ai/glm-5.3") == 0);
 
     /* PUCI_API_KEY takes precedence */
     setenv("PUCI_API_KEY", "sk-puci-direct", 1);

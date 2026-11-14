@@ -155,7 +155,7 @@ Get a key at [openrouter.ai/keys](https://openrouter.ai/keys), then:
 
 ```sh
 export OPENROUTER_API_KEY="sk-or-..."          # base URL is set automatically
-export PUCI_MODEL="~z-ai/glm-latest"  # optional (default); any tool-capable OpenRouter model id
+export PUCI_MODEL="z-ai/glm-5.3"  # optional (default); any tool-capable OpenRouter model id
 puci doctor                                     # checks key, endpoint and model
 cd your-project && puci                         # interactive TUI (press m to switch model)
 puci run "add a --verbose flag to main.c"        # one-shot
@@ -190,7 +190,7 @@ Set credentials via environment variables (never committed to repos):
 ```bash
 export PUCI_API_KEY="sk-..."
 export PUCI_BASE_URL="https://openrouter.ai/api/v1"
-export PUCI_MODEL="~z-ai/glm-latest"
+export PUCI_MODEL="z-ai/glm-5.3"
 ```
 
 `OPENROUTER_API_KEY` is a first-class fallback for `PUCI_API_KEY`. Config resolution precedence: CLI flags > env vars > project-local config (`.puci.toml`, credentials forbidden) > global config (`~/.config/puci/config.toml`) > defaults. API keys in project-local config are rejected with a fatal error to prevent secret leakage.
@@ -199,7 +199,7 @@ Global config template (`~/.config/puci/config.toml`):
 
 ```toml
 base_url = "https://openrouter.ai/api/v1"
-model = "~z-ai/glm-latest"
+model = "z-ai/glm-5.3"
 context_budget_bytes = 131072
 tool_timeout_ms = 60000
 ```

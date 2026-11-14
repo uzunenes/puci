@@ -448,7 +448,7 @@ static void history_next(void){
 static char g_model_buf[MAX_MODELS][128];
 static const char *g_static_models[] = {
     /* Offline fallback only; the picker merges the live /models list. */
-    "~z-ai/glm-latest",
+    "z-ai/glm-5.3",
     "anthropic/claude-sonnet-5.5",
     "anthropic/claude-opus-5.5",
     "anthropic/claude-haiku-5.5",
@@ -457,7 +457,6 @@ static const char *g_static_models[] = {
     "google/gemini-3.8-flash",
     "deepseek/deepseek-v4.1-flash",
     "moonshotai/kimi-k3.1-pro",
-    "z-ai/glm-5.3",
     NULL
 };
 static const char *k_models[MAX_MODELS+1];
