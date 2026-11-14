@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-14
+
+ABI 3 unchanged (`libpuci.so.3`); bug fixes only, no rebuild needed for programs already built against 0.6.0.
+
 ### Fixed
 
 - TUI: type to compose. While idle, any printable key now opens the composer and is typed as the first character, instead of being read as a one-letter shortcut. Forgetting to press Enter first made the opening letters of a message fire shortcuts (`s` sessions, `m` model, `q` quit). Sessions/model are reached with `/sessions` and `/model`; quit is `Ctrl+C`. Arrows/PgUp/PgDn/Home/End still scroll and `Tab` still switches panes. Covered by `test_tui_polish`.
