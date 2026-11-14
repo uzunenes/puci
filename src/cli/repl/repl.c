@@ -508,6 +508,9 @@ int puci_cli_repl_with_params(const puci_cli_params *params) {
 
     /* Connect any MCP servers declared in config.toml / .puci.toml. */
     (void)puci_cli_load_mcp_servers(ctx);
+    if (puci_cli_mcp_notice()[0]) {
+        fprintf(stderr, "[notice] %s\n", puci_cli_mcp_notice());
+    }
 
     repl r;
     memset(&r, 0, sizeof(r));

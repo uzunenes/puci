@@ -1933,6 +1933,8 @@ int puci_tui_run(const puci_cli_params *params){
     for(int i=0;i<MAX_PANES;i++){ memset(&g_panes[i],0,sizeof g_panes[i]); snprintf(g_panes[i].title,sizeof g_panes[i].title,"Agent %c",'A'+i); snprintf(g_panes[i].session_id,sizeof g_panes[i].session_id,"tui-%ld-%d-%d",(long)time(NULL),i,++g_sess_seq); g_panes[i].scroll_off=0; g_panes[i].layout_dirty=1; g_panes[i].cached_inner_w=-1; g_panes[i].cached_total_vis=-1; g_panes[i].follow=1; g_panes[i].unread=0; }
     puci_context *ctx=NULL;
     if(puci_context_create(NULL,&ctx)!=PUCI_OK){ tui_teardown(); trace_dump(); fprintf(stderr,"ctx fail\n"); return 1; }
+    /* MCP servers from config (project ones only when trusted). */
+    int mcp_n = puci_cli_load_mcp_servers(ctx);
     puci_provider_config *pcfg_ptr = puci_cli_provider("openai");
     if(pcfg_ptr && pcfg_ptr->model) snprintf(g_current_model,sizeof g_current_model,"%.255s",pcfg_ptr->model);
     if(!pcfg_ptr){ tui_teardown(); trace_dump(); fprintf(stderr,"tui: provider config failed\n"); puci_context_destroy(ctx); return 1; }
@@ -1963,6 +1965,8 @@ int puci_tui_run(const puci_cli_params *params){
         puci_context_destroy(ctx);
         return 1;
     }
+    if(puci_cli_mcp_notice()[0]) ring_push_typed(&g_panes[0].ring, puci_cli_mcp_notice(), RL_ERROR);
+    else if(mcp_n>0){ char mm[96]; snprintf(mm,sizeof mm,"MCP: %d server(s) connected", mcp_n); ring_push_typed(&g_panes[0].ring, mm, RL_SYSTEM); }
     load_sessions(); history_load(); models_init_static();
     // test hooks
     { const char *tf=getenv("PUCI_TUI_FILL_RING"); if(tf && *tf){ int n=atoi(tf); if(n>0){ for(int i=0;i<n;i++){ char ln[128]; snprintf(ln,sizeof ln,"prefill line %d Lorem ipsum dolor sit amet consectetur", i); ring_push_typed(&g_panes[0].ring, ln, RL_SYSTEM); } g_panes[0].layout_dirty=1; } } }

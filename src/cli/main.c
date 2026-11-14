@@ -35,6 +35,7 @@ static void print_help(FILE *f) {
             "  --resume [latest|<id>]          Continue a previous session\n"
             "  --plan, --dry-run               Plan mode: simulate file mutations without writing to disk\n"
             "  -C, --cwd <dir>                 Workspace directory (default: the current directory)\n"
+            "  --trust-project-mcp             Start MCP servers declared in this project's .puci.toml\n"
             "  -y, --yes                       Auto-approve every tool call (DANGEROUS; also PUCI_AUTO_APPROVE=1)\n"
             "\n"
             "Configuration:\n"
@@ -88,6 +89,9 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "puci: cannot use workspace '%s': %s\n", dir, strerror(errno));
                 return 2;
             }
+            argi++;
+        } else if (strcmp(arg, "--trust-project-mcp") == 0) {
+            setenv("PUCI_TRUST_PROJECT_MCP", "1", 1);
             argi++;
         } else if (strcmp(arg, "--yes") == 0 || strcmp(arg, "-y") == 0) {
             params.auto_approve = 1;

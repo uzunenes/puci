@@ -244,6 +244,16 @@ args = ["--repository", "."]
 ```
 
 PUCI launches each server, performs the MCP handshake, discovers tools, and dispatches `tools/call` over JSON-RPC 2.0.
+Works in the TUI, the REPL and `puci run`; every MCP tool call asks for approval.
+
+A project can declare servers in its own `.puci.toml`, but starting one means
+running a command from that repository, so puci **does not start them** until
+you trust the project: review the file, then run `puci --trust-project-mcp`
+(or set `PUCI_TRUST_PROJECT_MCP=1`). Servers in your own
+`~/.config/puci/config.toml` always start.
+
+Custom tools in C: `puci_tool_register()` (see [`examples/custom_tool.c`](examples/custom_tool.c));
+long-running tools can be async (`puci_tool_register_async()`).
 
 ## Features
 

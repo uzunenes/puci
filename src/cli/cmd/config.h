@@ -41,4 +41,8 @@ int puci_cli_parse_toml_file(const char *filepath, int is_project_local,
  * session on the context. */
 int puci_cli_load_mcp_servers(puci_context *ctx);
 
+/* A one-line notice from the last puci_cli_load_mcp_servers() call (e.g.
+ * project-declared servers that were NOT started), or "" if none. */
+const char *puci_cli_mcp_notice(void);
+
 #endif /* PUCI_CLI_CONFIG_H */
