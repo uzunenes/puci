@@ -173,10 +173,16 @@ typedef struct {
     uintattr_t assistant;  /* assistant label */
     uintattr_t tool;       /* tool card */
 } theme_t;
+/* Readability on ANY terminal palette (dark or light): body text, borders
+ * and labels use the terminal's own foreground (TB_DEFAULT) instead of a
+ * hard-coded white (invisible on light themes), and secondary text is the
+ * default foreground dimmed (SGR 2) instead of "bold black", which renders
+ * as black-on-dark on terminals that don't brighten bold (GNOME Terminal,
+ * VTE, kitty, Alacritty defaults). */
 static const theme_t g_theme = {
-    TB_DEFAULT, TB_DEFAULT, TB_WHITE|TB_BOLD, TB_CYAN|TB_BOLD,
-    TB_WHITE, TB_BLACK|TB_BOLD, TB_CYAN, TB_GREEN,
-    TB_YELLOW, TB_RED|TB_BOLD, TB_CYAN|TB_BOLD, TB_WHITE|TB_BOLD, TB_YELLOW
+    TB_DEFAULT, TB_DEFAULT, TB_DEFAULT, TB_CYAN|TB_BOLD,
+    TB_DEFAULT, TB_DEFAULT|TB_DIM, TB_CYAN, TB_GREEN,
+    TB_YELLOW, TB_RED|TB_BOLD, TB_CYAN|TB_BOLD, TB_DEFAULT|TB_BOLD, TB_YELLOW
 };
 
 static int g_show_debug=0;   /* enable RSS/PSS/trace metrics in header */
@@ -953,7 +959,7 @@ static void tb_print_styled(int x,int y, uintattr_t base_fg, uintattr_t base_bg,
         if(col < x+max_w){ tb_set_cell(col,y, 0x2502, TB_CYAN, base_bg); col++; }
         s+=2;
     } else if((s[0]=='-'||s[0]=='*') && s[1]==' '){
-        base_fg = TB_WHITE;
+        base_fg = g_theme.text;
         if(col < x+max_w){ tb_set_cell(col,y, 0x2022, base_fg, base_bg); col++; tb_set_cell(col,y,' ', base_fg, base_bg); col++; }
         s+=2;
     }
@@ -1073,7 +1079,7 @@ static int md_fence_detect(const char *line, HlLang *out_lang){
     return 1;
 }
 static void tb_draw_box(int r,int c,int h,int w,const char *title,int focused){
-    uintattr_t fg = focused ? TB_CYAN|TB_BOLD : TB_WHITE;
+    uintattr_t fg = focused ? TB_CYAN|TB_BOLD : g_theme.border;
     uintattr_t bg = TB_DEFAULT;
     tb_set_cell(c, r, 0x250C, fg, bg);
     for(int x=1;x<w-1;x++) tb_set_cell(c+x, r, 0x2500, fg, bg);
@@ -1347,7 +1353,7 @@ static void tui_render_pane(Pane *p, int x, int y, int h, int w, int focused){
             else { take=(int)render_segment(s+seg_off, inner_w); if(take<1||take>rem) take=rem; }
             char seg[RING_COLS]; memcpy(seg,s+seg_off,(size_t)take); seg[take]=0;
             seg_off+=take;
-            uintattr_t fg=TB_WHITE;
+            uintattr_t fg=g_theme.text;
             if(t==RL_USER) fg=g_theme.user;
             else if(t==RL_TOOL) fg=g_theme.tool;
             else if(t==RL_ERROR) fg=g_theme.error;
@@ -1555,7 +1561,7 @@ void tui_render_frame(void){
         int svis=sh-2; if(svis<1) svis=1;
         int stop=g_pick_sel-(svis-1); if(stop<0) stop=0;
         for(int i=stop; i<cnt && i<stop+svis; i++){
-            uint32_t fg=(i==g_pick_sel && g_mode==2)? TB_BLACK:TB_WHITE;
+            uint32_t fg=(i==g_pick_sel && g_mode==2)? TB_BLACK:g_theme.text;
             uint32_t bg=(i==g_pick_sel && g_mode==2)? TB_CYAN:TB_DEFAULT;
             int src=(g_mode==2? g_pick_filtered_idx[i] : i);
             for(int x=sc+1;x<sc+sw-1;x++) tb_set_cell(x, sr+1+(i-stop),' ',fg,bg);
@@ -1691,7 +1697,7 @@ composer_done:
         if(oc >= cols-2) oc = cols>3 ? cols-3 : 0;
         int maxh = rows - or_ - 1; if(maxh<3) maxh=3; if(oh>maxh) oh=maxh;
         int maxw = cols - oc - 1; if(maxw<8) maxw=8; if(ow>maxw) ow=maxw;
-        for(int y=or_; y<or_+oh; y++) for(int x=oc; x<oc+ow; x++) tb_set_cell(x,y,' ', TB_WHITE, g_theme.surface);
+        for(int y=or_; y<or_+oh; y++) for(int x=oc; x<oc+ow; x++) tb_set_cell(x,y,' ', g_theme.text, g_theme.surface);
         if(g_approval_feedback_mode){
             tb_draw_box(or_,oc,oh,ow,"Approval — deny with reason (Enter send, Esc cancel)",1);
         } else {
@@ -1703,7 +1709,7 @@ composer_done:
             if(l>=g_hunk_off && l < g_hunk_off+rows_avail){
                 int yy = or_+1+(l-g_hunk_off);
                 if(yy >= or_+1 && yy < or_+oh-2){
-                    uint32_t fg = TB_WHITE;
+                    uint32_t fg = g_theme.text;
                     if(tok[0]=='+') fg = TB_GREEN|TB_BOLD;
                     else if(tok[0]=='-') fg = TB_RED|TB_BOLD;
                     char line[96]; snprintf(line,sizeof line,"%.*s", ow>2?ow-2:0, tok);
@@ -1736,7 +1742,7 @@ composer_done:
         if(oc >= cols-2) oc = cols>3 ? cols-3 : 0;
         int maxh = rows - or_ - 1; if(maxh<3) maxh=3; if(oh>maxh) oh=maxh;
         int maxw = cols - oc - 1; if(maxw<8) maxw=8; if(ow>maxw) ow=maxw;
-        for(int y=or_; y<or_+oh; y++) for(int x=oc; x<oc+ow; x++) tb_set_cell(x,y,' ', TB_WHITE, g_theme.surface);
+        for(int y=or_; y<or_+oh; y++) for(int x=oc; x<oc+ow; x++) tb_set_cell(x,y,' ', g_theme.text, g_theme.surface);
         char mtitle[64]; if(g_pick_filter[0]) snprintf(mtitle,sizeof mtitle,"Model /%.30s", g_pick_filter); else snprintf(mtitle,sizeof mtitle,"Model — Enter select (Ctrl-Y copy)");
         tb_draw_box(or_,oc,oh,ow,mtitle,1);
         /* Viewport: keep the selection row visible, scroll to follow it. */
@@ -1750,7 +1756,7 @@ composer_done:
                     for(int x=oc+1;x<oc+ow-1;x++) tb_set_cell(x,yy,' ', TB_BLACK, TB_CYAN);
                     tb_print(oc+2, yy, TB_BLACK, TB_CYAN, k_models[src]);
                 } else {
-                    tb_print(oc+2, yy, TB_WHITE, g_theme.surface, k_models[src]);
+                    tb_print(oc+2, yy, g_theme.text, g_theme.surface, k_models[src]);
                 }
             }
         }

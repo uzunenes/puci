@@ -21,6 +21,10 @@ All notable changes to this project are documented here.
 - Installed `puci` carries an RPATH to its `libdir`, so per-user installs (`PREFIX=~/.local`) work without `ldconfig`/`LD_LIBRARY_PATH`. `puci.pc` lists `-lpuci` once and declares `Requires.private: libcurl`.
 - Default OpenRouter model is now `z-ai/glm-5.3` (pinned, tool-capable; the old `anthropic/claude-3.5-sonnet` no longer exists on OpenRouter), and it is also applied when `PUCI_BASE_URL` points at OpenRouter with no model set. The TUI's offline model list and the Anthropic provider default were refreshed.
 
+### Fixed (TUI readability)
+
+- Hints, the status line and other secondary text were drawn bold-black (`ESC[1;30m`), i.e. black on dark terminals that don't brighten bold (GNOME Terminal/VTE, kitty, Alacritty defaults), so they were invisible; body text and borders were hard-coded white, invisible on light themes. The theme now uses the terminal's own foreground for text and a dimmed default foreground for secondary text, so it is readable on any palette. `test_tui_polish` guards against both.
+
 ### Security
 
 - **Approval is now fail-closed.** Previously a session with no `approve_cb` (e.g. `puci run`, or any embedder that forgot to set one) executed `run_shell`, `write_file`, `edit_file`, MCP and custom tools with no approval at all, and the REPL auto-allowed every tool when stdin was not a TTY. Now, without a policy, only `read_file`/`grep`/`glob` run; everything else is denied. Unattended use is an explicit opt-in: `PUCI_APPROVAL_MODE_AUTO` (library) or `--yes` / `PUCI_AUTO_APPROVE=1` (CLI). `puci run` prompts on a TTY and denies when none is available.

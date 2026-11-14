@@ -10,6 +10,7 @@ the four contract sizes and asserts on the decoded terminal output that:
   - the composer has a distinct top border / content / bottom border
   - no false "new ↓" badge after an un-scrolled normal flow
   - no raw "[think]" reasoning text in the default transcript
+  - no bold-black / hard-coded white text (unreadable on dark / light themes)
   - a user "YOU" label and an assistant "PUCI" heading both appear
   - no "— done —" clutter and no startup keybinding tutorial
   - the footer holds only whole actions
@@ -131,6 +132,14 @@ def main():
             ck(f"{tag} no-done", "— done —" not in out, "completion clutter present")
             ck(f"{tag} no-tutorial", "PUCI TUI v0.5" not in out, "startup tutorial present")
             ck(f"{tag} no-unread", "new \u2193" not in out, "false unread/new-lines badge")
+
+            # palette-independent readability: never "bold black" (black on
+            # dark terminals that don't brighten bold) and never a hard-coded
+            # white foreground (invisible on light terminals).
+            ck(f"{tag} no-bold-black", "\x1b[1m\x1b[30m" not in out,
+               "secondary text drawn bold-black (unreadable on dark themes)")
+            ck(f"{tag} no-fixed-white", "\x1b[37m" not in out,
+               "text drawn hard-coded white (unreadable on light themes)")
 
             # roles
             ck(f"{tag} user-role", "YOU" in out, "missing YOU label")
