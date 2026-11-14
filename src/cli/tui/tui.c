@@ -448,6 +448,7 @@ static void history_next(void){
 static char g_model_buf[MAX_MODELS][128];
 static const char *g_static_models[] = {
     /* Offline fallback only; the picker merges the live /models list. */
+    "~z-ai/glm-latest",
     "anthropic/claude-sonnet-5.5",
     "anthropic/claude-opus-5.5",
     "anthropic/claude-haiku-5.5",

@@ -19,7 +19,7 @@ All notable changes to this project are documented here.
 
 - termbox2 is always taken from the vendored, pinned header. The Meson wrap that `git clone`d termbox2's moving `head` at configure time was removed, so builds are offline and reproducible.
 - Installed `puci` carries an RPATH to its `libdir`, so per-user installs (`PREFIX=~/.local`) work without `ldconfig`/`LD_LIBRARY_PATH`. `puci.pc` lists `-lpuci` once and declares `Requires.private: libcurl`.
-- Default OpenRouter model is now `anthropic/claude-sonnet-5.5` (the old `anthropic/claude-3.5-sonnet` no longer exists on OpenRouter), and it is also applied when `PUCI_BASE_URL` points at OpenRouter with no model set. The TUI's offline model list and the Anthropic provider default were refreshed.
+- Default OpenRouter model is now `~z-ai/glm-latest` (a tool-capable alias that tracks the newest GLM release; the old `anthropic/claude-3.5-sonnet` no longer exists on OpenRouter), and it is also applied when `PUCI_BASE_URL` points at OpenRouter with no model set. The TUI's offline model list and the Anthropic provider default were refreshed.
 
 ### Security
 
